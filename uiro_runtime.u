@@ -1,0 +1,79 @@
+module uiro_runtime
+  def self.call_method(obj, method_name, args) if is_list(obj)
+    call_target_method(:uiro_list, obj, method_name, args)
+  end
+
+  def self.call_method(obj, method_name, args) if is_integer(obj)
+    call_target_method(:uiro_integer, obj, method_name, args)
+  end
+
+  def self.call_method(obj, method_name, args) if is_map(obj)
+    call_target_method(:uiro_map, obj, method_name, args)
+  end
+
+  def self.call_method({__class__: module_name, __state__: state}, method_name, args)
+    obj = {__class__: module_name, __state__: state}
+    exports = apply(module_name, :module_info, [:exports])
+    if lists::keyfind(method_name, 1, exports)
+      apply(module_name, method_name, [obj|args])
+    else
+      call_parent_method(module_name, obj, method_name, args)
+    end
+  end
+
+  def self.call_target_method(module_name, obj, method_name, args)
+    exports = apply(module_name, :module_info, [:exports])
+    if lists::keyfind(method_name, 1, exports)
+      apply(module_name, method_name, [obj|args])
+    else
+      call_parent_method(module_name, obj, method_name, args)
+    end
+  end
+
+  def self.call_parent_method(module_name, obj, method_name, args) # {__class__: module_name, __state__: state}, method_name, args)
+    attributes = apply(module_name, :module_info, [:attributes])
+    (:include, include_mods) = lists::keyfind(:include, 1, attributes)
+    if include_mods
+      target_mod = find_mod((method_name, length(args) + 1), include_mods)
+      apply(target_mod, method_name, [obj|args])
+    else
+      "TODO reigai"
+    end
+  end
+
+  def self.find_mod(method, [])
+    index_of(method, [])
+  end
+
+  def self.find_mod(method, [mod|tl])
+    exports = apply(mod, :module_info, [:exports])
+    if index_of(method, exports)
+      mod
+    else
+      find_mod(method, tl)
+    end
+  end
+
+  def self.index_of(item, list)
+    index_of(item, list, 1)
+  end
+
+  def self.index_of(_, [], _)
+    false
+  end
+
+  def self.index_of(item, [item|_], index)
+    index
+  end
+
+  def self.index_of(item, [_|tl], index)
+    index_of(item, tl, index + 1)
+  end
+
+  def self.new_object(module_name, args)
+    {__class__ : module_name,
+     __state__ : apply(module_name, :initialize, [:self | args])}
+  end
+
+  # TODO map, tuple, boolean?, float
+end

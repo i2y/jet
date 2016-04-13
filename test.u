@@ -1,0 +1,246 @@
+module test
+  #export_all #@compile(:export_all)
+
+  from lists import sum/1, sort/1
+
+  record item
+    id = "id",
+    name = "name",
+    price
+  end
+
+  patterns Item
+    :other,
+    nil
+  end
+
+  # faiura
+  def self.foo(x) if x > 0 and x < 3
+    [x] ++ [x, x]
+    y = 3
+    {x: y}
+  end
+
+  def self.foo(3)
+    3 * (1000 + 2000)
+    16$FF
+  end
+
+  def self.foo(10)
+    [x, y | z] = [1, 2, 3]
+    y
+    3 == y
+    z
+    x
+    (x + 3, z)
+    {"a" => 3, # aiueo
+     x: 3}
+    [(x, y)
+     for x in [1, 2, 3]
+     for y in [2, 4, 6]
+     if x == 3 and y == 2]
+    << <<x>>
+     for x in [1, 2, 3]>>
+    <<1, 2, 3>>
+    [x for <<x>> <= <<1,
+                      2, 3>>]
+    __name__
+  end
+
+  def self.hoge(value)
+    match value
+      case 20
+        "happy!"
+      case _
+        20
+    end
+
+    x = match value
+      case 5 if 5 == 5 # and 5 == 4
+        v = "fafaf"
+        w = "happy!"
+        io::format(v ++ w)
+      case 3
+        "hoge!"
+      case _
+        20
+    end
+    x
+    abc::foo(3)
+  end
+
+  def self.test(tup)
+    <<x, y, 3, 4>> = <<1:8,2:8/integer,3/integer,4>>
+    # x, y
+    # unit
+  end
+
+  def self.test2(x)
+    x
+    # aiueo #f afa
+    {} # aiueo
+    # aiueoo
+    # y = [10] ++ (do
+    #   case z
+    #     z
+    #   end
+
+    # case _
+    #     3
+    # end
+    # end).(x) ++ [2]
+    # y
+    z = {|x, y| x/y}
+    #z.(1, 2)
+    #1 |> z.(2)
+    #  |>> z.(4)
+  end
+
+  # aiueo 2 + zzz
+  # aiueo 2 + zzz
+  def self.test3(x)
+    z = if x > 3
+      # (:abc, 2 + 3).test()
+      10
+    else if x == 0
+      10
+      20
+      30
+    else
+      3
+    end
+    z
+  end
+
+  # aiueofa
+  def self.test5()
+    # (&abc.test3/1).(10)
+    {x: 3, y: z} = {x: 3, y: 10}
+    z
+  end
+
+  def self.test6()
+    {a:3, b:4}::a + {a: 3, :b
+    => 10}::b
+    [3, 2, 1, 4] |> sort()
+  end
+
+  def self.test7()
+    "Elixir.List"::delete([1, 2, 3], 1)
+    item = %item(id=10)
+    element(%item.id, item)
+    %item(id=x) = %item(id=10)
+    x
+    abc::foo(10)
+  end
+
+  def self.send(x)
+    self() ! x
+  end
+
+  def self.recv()
+    receive
+      case x
+        x
+    end
+  end
+
+  def self.fafa()
+    x = (1, 2, 3)
+    y = do x end
+    z = do y + y end
+  end
+
+  def self.callback(e, f)
+    #f.(e)
+    e
+  end
+
+  def self.callback2(e, f)
+    #f.(e, e)
+    e
+  end
+
+  def self.callback0(f)
+    f.(100)
+    x = [1, 2, 3, "aiueo"]
+    x.select {|item|
+      false
+    }
+  end
+
+  def self.test_callback()
+    callback(10) {|e| e + e}
+    callback(20) {|e|
+      e + e
+    }
+    callback2(30) do |arg1, arg2|
+      arg1 * arg2
+    end
+    callback0() do |value|
+      value
+    end
+    callback0 do |value|
+      value
+    end
+    # callback0 {|value|
+    #   value
+    # }
+  end
+
+  def self.test_times()
+    10.times {
+      io::format("a")
+    }
+  end
+
+  def self.test_new()
+    car = new Car()
+    car.print33
+    io::format(integer_to_list(Car::test()))
+  end
+
+  def self.test_list()
+    lis = [1, 2, 3]
+    "Elixir.IO"::inspect(
+      lis.select {|item|
+        item == 3
+      })
+  end
+
+  def self.test_reduce()
+    lis = [1, 2, 3]
+    "Elixir.IO"::inspect(
+      lis.reduce([], {|item, acc|
+        acc ++ [item]
+      }))
+  end
+
+  def self.test_select()
+    lis = [1, 2, 3]
+    "Elixir.IO"::inspect(
+      lis.select {|item| item == 2 or item == 3})
+  end
+
+  def self.test_map()
+    lis = [1, 2, 3]
+    "Elixir.IO"::inspect(
+      lis.map {|item| item * 2 })
+  end
+
+  def self.test_reject()
+    lis = [1, 2, 3]
+    "Elixir.IO"::inspect(
+      lis.reject {|item| item == 3 })
+  end
+
+  def self.test_min()
+    lis = [1, 2, 3]
+    "Elixir.IO"::inspect(lis.min)
+  end
+
+  def self.test_unique()
+    lis = [1, 2, 3, 2, 3, 4, 1]
+    "Elixir.IO"::inspect(lis.unique)
+  end
+end

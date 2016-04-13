@@ -1,0 +1,76 @@
+module Enumerable
+  def select(func)
+    self.reduce([]) {|item, acc|
+      if func.(item)
+        acc ++ [item]
+      else
+        acc
+      end
+    }
+  end
+
+  def filter(func)
+    self.reduce([]) {|item, acc|
+      if func.(item)
+        acc ++ [item]
+      else
+        acc
+      end
+    }
+  end
+
+  def reject(func)
+    self.reduce([]) {|item, acc|
+      if func.(item)
+        acc
+      else
+        acc ++ [item]
+      end
+    }
+  end
+
+  def map(func)
+    self.reduce([]) {|item, acc|
+      acc ++ [func.(item)]
+    }
+  end
+
+  def collect(func)
+    self.reduce([]) {|item, acc|
+      acc ++ [func.(item)]
+    }
+  end
+
+  def min(func)
+    self.reduce(:infinity) {|item, acc|
+      match func.(acc, item)
+        case -1
+          0
+        case 0
+          0
+        case 1
+          item
+      end
+    }
+  end
+
+  def min()
+    self.reduce(:infinity) {|item, acc|
+      if acc <= item
+        acc
+      else
+        item
+      end
+    }
+  end
+
+  def unique()
+    self.reduce([]) {|item, acc|
+      if acc.index_of(item)
+        acc
+      else
+        acc ++ [item]
+      end
+    }
+  end
+end

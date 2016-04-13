@@ -1,0 +1,75 @@
+module kitty_gen_server
+  behavior gen_server
+
+  # export init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3
+  # export start/0, checkout/2, lookup/1, return/1
+
+  def self.start()
+    gen_server::start_link((:local, __name__), __name__, [], [])
+  end
+
+  def self.checkout(who, book)
+    gen_server::call(__name__, (:checkout, who, book))
+  end
+
+  def self.lookup(book)
+    gen_server::call(__name__, (:lookup, book))
+  end
+
+  def self.return(book)
+    gen_server::call(__name__, (:return, book))
+  end
+
+  # This is called when a connection is made to the server
+  def self.init([])
+    library = dict::"new"()
+    (:ok, library)
+  end
+
+  # handle_call is invoked in response to gen_server:call
+  def self.handle_call((:checkout, who, book), _from, library)
+    response = if dict::is_key(book, library)
+      new_library = library
+      (:already_checked_out, book)
+    else
+      new_library = dict::append(book, who, library)
+      :ok
+    end
+    (:reply, response, new_library)
+  end
+
+  def self.handle_call((:lookup, book), _from, library)
+    response = if dict::is_key(book, library)
+      (:who, lists::nth(1, dict::fetch(book, library)))
+    else
+      (:not_checked_out, book)
+    end
+    (:reply, response, library)
+  end
+
+  def self.handle_call((:return, book), _from, library)
+    new_library = dict::erase(book, library)
+    (:reply, :ok, new_library)
+  end
+
+  def self.handle_call(_message, _from, library)
+    (:reply, :error, library)
+  end
+
+  # We get compile warnings from gen_server unless we define these
+  def self.handle_cast(_message, library)
+    (:noreply, library)
+  end
+
+  def self.handle_info(_message, library)
+    (:noreply, library)
+  end
+
+  def self.terminate(_reason, _library)
+    :ok
+  end
+
+  def self.code_change(_old_version, library, _extra)
+    (:ok, library)
+  end
+end

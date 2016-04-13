@@ -1,0 +1,5 @@
+module parent2
+  def print33()
+    io::format("parent2")
+  end
+end

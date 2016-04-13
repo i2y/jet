@@ -1,0 +1,12 @@
+module uiro_integer
+  def times(func)
+    if self == 0
+      nil
+    else if self == 1
+      func.()
+    else
+      func.()
+      times(self - 1, func)
+    end
+  end
+end

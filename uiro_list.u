@@ -1,0 +1,35 @@
+module uiro_list
+  include Enumerable
+
+  def reduce(acc, func)
+    lists::foldl(func, acc, self)
+  end
+
+  def index_of(item)
+    index_of(item, self, 1)
+  end
+
+  def self.index_of(_, [], _)
+    false
+  end
+
+  def self.index_of(item, [item|_], index)
+    index
+  end
+
+  def self.index_of(item, [_|tl], index)
+    index_of(item, tl, index + 1)
+  end
+
+  def add(item)
+    self ++ [item]
+  end
+
+  def conj(item)
+    [item|self]
+  end
+
+  def add_all(lis)
+    self ++ lis
+  end
+end

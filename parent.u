@@ -1,0 +1,5 @@
+module parent
+  def print35()
+    @name
+  end
+end
