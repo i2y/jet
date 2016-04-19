@@ -7,9 +7,14 @@ module uiro_runtime
     call_target_method(:uiro_integer, obj, method_name, args)
   end
 
-  def self.call_method(obj, method_name, args) if is_map(obj)
-    call_target_method(:uiro_map, obj, method_name, args)
+  def self.call_method(obj, method_name, args) if is_float(obj)
+    call_target_method(:uiro_float, obj, method_name, args)
   end
+
+  # TODO
+  # def self.call_method(obj, method_name, args) if is_map(obj)
+  #   call_target_method(:uiro_map, obj, method_name, args)
+  # end
 
   def self.call_method({__class__: module_name, __state__: state}, method_name, args)
     obj = {__class__: module_name, __state__: state}
@@ -30,14 +35,34 @@ module uiro_runtime
     end
   end
 
-  def self.call_parent_method(module_name, obj, method_name, args) # {__class__: module_name, __state__: state}, method_name, args)
+  def self.list_modules_([head|tail], acc)
+    list_modules_(tail, acc ++ [head] ++ list_modules(head))
+  end
+
+  def self.list_modules_([], acc)
+    acc
+  end
+
+  def self.list_modules(module_name)
     attributes = apply(module_name, :module_info, [:attributes])
-    (:include, include_mods) = lists::keyfind(:include, 1, attributes)
+    match lists::keyfind(:include, 1, attributes)
+      case :false
+        []
+      case (:include, :false)
+        []
+      case (:include, include_mods)
+        list_modules_(include_mods, [])
+    end
+  end
+
+  def self.call_parent_method(module_name, obj, method_name, args)
+    include_mods = list_modules(module_name) ++ [:Kernel]
+    # "Elixir.IO"::inspect(include_mods)
     if include_mods
       target_mod = find_mod((method_name, length(args) + 1), include_mods)
       apply(target_mod, method_name, [obj|args])
     else
-      "TODO reigai"
+      "TODO exception"
     end
   end
 
@@ -72,8 +97,8 @@ module uiro_runtime
 
   def self.new_object(module_name, args)
     {__class__ : module_name,
-     __state__ : apply(module_name, :initialize, [:self | args])}
+     __state__ : apply(module_name, :initialize, args)}
   end
 
-  # TODO map, tuple, boolean?, float
+  # TODO map, tuple, boolean
 end

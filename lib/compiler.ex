@@ -57,19 +57,20 @@ defmodule Compiler do
     Enum.map(syntax_list, &revert(&1)) |> :compile.forms()
   end
 
-  # TODO tail_recursion
-  def to_erl_syntax([uiro_syntax | uiro_syntax_list], func_map) do
+  def to_erl_syntax_list([uiro_syntax | uiro_syntax_list], func_map, acc) do
     case uiro_syntax do
-      [:func|_] -> to_erl_syntax(uiro_syntax_list, put_func(uiro_syntax, func_map))
+      # [:func|_] -> to_erl_syntax_list(uiro_syntax_list, put_func(uiro_syntax, func_map))
+      [:func|_] -> to_erl_syntax_list(uiro_syntax_list, put_func(uiro_syntax, func_map), acc)
       [:patterns|_] ->
         put_patterns(uiro_syntax)
-        to_erl_syntax(uiro_syntax_list, func_map)
-      _ -> [to_erl_syntax(uiro_syntax) | to_erl_syntax(uiro_syntax_list, func_map)] # TODO
+        to_erl_syntax_list(uiro_syntax_list, func_map, acc)
+      # _ -> [to_erl_syntax(uiro_syntax) | to_erl_syntax_list(uiro_syntax_list, func_map)] # TODO
+      _ -> to_erl_syntax_list(uiro_syntax_list, func_map, acc ++ [to_erl_syntax(uiro_syntax)])
     end
   end
 
-  def to_erl_syntax([], func_map) do
-    Dict.values(func_map)
+  def to_erl_syntax_list([], func_map, acc) do
+    acc ++ Dict.values(func_map)
   end
 
   def to_erl_syntax([{:module_keyword, line}, name]) do
@@ -150,11 +151,10 @@ defmodule Compiler do
     to_erl_syntax([:name, {:name, line, name}])
   end
 
-  def to_erl_syntax([:func, name, args, body]) do
+  def to_erl_syntax([:func, {:name, line, func_name}, args, body]) do
     clause1 = clause(Enum.map(args, &Compiler.pattern_to_erl_syntax(&1)),
                      [],
                      Enum.map(body, &Compiler.to_erl_syntax(&1)))
-    {:name, line, func_name} = name
     function(atom(func_name), [set_pos(clause1, line)])
     |> set_pos(line)
   end
@@ -900,4 +900,5 @@ defmodule Compiler do
     atom(:false) |> set_pos(line)
   end
 
+  # TODO try finally except
 end

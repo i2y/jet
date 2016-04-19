@@ -3,7 +3,7 @@ defmodule Parser do
 
   def parse(str, module_name) do
     {:ok, tokens, _} = str |> to_char_list |> :lexer.string
-    IO.inspect (tokens |> token_filter(module_name)), limit: 1000
+    # IO.inspect (tokens |> token_filter(module_name)), limit: 1000
     {:ok, list} = tokens |> token_filter(module_name) |> :parser.parse
     list
   end
@@ -26,8 +26,6 @@ defmodule Parser do
           [r_token|acc]
       end
     end))
-    #[{:module_keyword, 0}, {:name, 0, module_name}, {:newline, 0}
-    # | module_body]
     module_body
   end
 

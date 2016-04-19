@@ -96,7 +96,7 @@ TRUE = true
 FALSE = false
 SELF_DOT = self\.
 DOT = \.
-NAME = [_a-zA-Z$][-_a-zA-Z0-9]*
+NAME = [_a-zA-Z$][-_a-zA-Z0-9?!]*
 
 
 Rules.

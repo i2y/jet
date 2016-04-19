@@ -243,4 +243,16 @@ module test
     lis = [1, 2, 3, 2, 3, 4, 1]
     "Elixir.IO"::inspect(lis.unique)
   end
+
+  def self.test_zero?()
+    0.zero?
+  end
+
+  def self.test_nonzero?()
+    0.0.nonzero?
+  end
+
+  def self.test_display()
+    [1, 2, 3].display
+  end
 end

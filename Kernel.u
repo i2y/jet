@@ -1,0 +1,6 @@
+module Kernel
+  def display()
+    # TODO
+    io::format("~p", [self])
+  end
+end

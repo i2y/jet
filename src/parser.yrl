@@ -302,11 +302,11 @@ export_name -> name op_div int : [fun_name, '$1', '$3'].
 %               : [func, '$2', '$3', '$4','$6'].
 
 method_stmt -> def_keyword name args newlines body block_closer
-               : [func, '$2', [[name, {name, 0, self}] | '$3'], '$5'].
+               : [func, '$2', add_self('$2', '$3'), '$5']. % [[name, {name, 0, self}] | '$3'], '$5'].
 method_stmt -> def_keyword name args guards then body block_closer
-               : [func, '$2', [[name, {name, 0, self}] | '$3'], '$4','$6'].
+               : [func, '$2', add_self('$2', '$3'), '$4','$6']. % [[name, {name, 0, self}] | '$3'], '$4','$6'].
 method_stmt -> def_keyword name args guards newlines body block_closer
-               : [func, '$2', [[name, {name, 0, self}] | '$3'], '$4','$6'].
+               : [func, '$2', add_self('$2', '$3'), '$4','$6']. % [[name, {name, 0, self}] | '$3'], '$4','$6'].
 
 class_method_stmt -> def_keyword self_dot name args newlines body block_closer
                : [func, '$3', '$4', '$6'].
@@ -599,3 +599,9 @@ to_atom(Token) ->
 
 value(Token) ->
     element(3, Token).
+
+add_self(Func_name, Args) ->
+    case Func_name of
+       {name, Line, "initialize"} -> Args;
+       _ -> [[name, {name, 0, self}] | Args]
+    end.

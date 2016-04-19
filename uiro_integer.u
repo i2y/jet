@@ -1,4 +1,6 @@
 module uiro_integer
+  include Numeric
+
   def times(func)
     if self == 0
       nil

@@ -1,0 +1,25 @@
+module Numeric
+  def round_()
+    round(self)
+  end
+
+  def truncate()
+    trunc(self)
+  end
+
+  def to_int()
+    trunc(self)
+  end
+
+  def to_i()
+    trunc(self)
+  end
+
+  def zero?()
+    self == 0 or self == 0.0
+  end
+
+  def nonzero?()
+    self != 0 and self != 0.0
+  end
+end
