@@ -260,16 +260,28 @@ defmodule Compiler do
     |> set_pos(line)
   end
 
+  def to_erl_syntax([{:range, line}, arg1, arg2]) do
+    operator = module_qualifier(atom(:lists), atom(:seq))
+    application(operator, [to_erl_syntax(arg1), to_erl_syntax(arg2)])
+    |> set_pos(line)
+  end
+
+  def pattern_to_erl_syntax([{:range, line}, arg1, arg2]) do
+    operator = module_qualifier(atom(:lists), atom(:seq))
+    application(operator, [to_erl_syntax(arg1), to_erl_syntax(arg2)])
+    |> set_pos(line)
+  end
+
   def to_erl_syntax([{:op_plus, line}, arg1, arg2]) do
     infix_expr(to_erl_syntax(arg1), operator('+'), to_erl_syntax(arg2))
-        |> set_pos(line)
+    |> set_pos(line)
   end
 
   def pattern_to_erl_syntax([{:op_plus, line}, arg1, arg2]) do
     infix_expr(pattern_to_erl_syntax(arg1),
                operator('+'),
                pattern_to_erl_syntax(arg2))
-      |> set_pos(line)
+    |> set_pos(line)
   end
 
   def to_erl_syntax([{:op_minus, line}, arg1, arg2]) do

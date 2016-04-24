@@ -94,6 +94,7 @@ Nonterminals
   newlines.
 
 Terminals
+  range
   dot
   self_dot
   sharp
@@ -188,6 +189,7 @@ Right 10 equals.
 Right 20 op_not op_bnot.
 Left 30 op_and op_or op_xor op_bitand op_bitor op_bitxor pipeline last_pipeline.
 Nonassoc 40 op_eq op_leq op_geq op_neq op_lt op_gt.
+Left 45 range.
 Left 50 op_plus op_minus op_append.
 Left 60 op_pow op_times op_div op_floor_div percent.
 Right 70 bang.
@@ -385,6 +387,7 @@ binop_expr -> binop_expr op_xor binop_expr : ['$2', '$1', '$3'].
 binop_expr -> binop_expr op_eq binop_expr : ['$2', '$1', '$3'].
 binop_expr -> binop_expr bang binop_expr : ['$2', '$1', '$3'].
 binop_expr -> binop_expr colon_colon name : ['$2', '$1', '$3'].
+binop_expr -> binop_expr range binop_expr : ['$2', '$1', '$3'].
 binop_expr -> self_dot name app_args : [{call_method, line_of('$2')}, [name, {name, line_of('$2'), self}], '$2', '$3'].
 binop_expr -> binop_expr dot name app_args : [{call_method, line_of('$2')}, '$1', '$3', '$4'].
 binop_expr -> self_dot name : [{call_method, line_of('$2')}, [name, {name, line_of('$1'), self}], '$2', []].

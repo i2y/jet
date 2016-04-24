@@ -94,6 +94,7 @@ NOT = not
 NIL = nil
 TRUE = true
 FALSE = false
+DOT_DOT = \.\.
 SELF_DOT = self\.
 DOT = \.
 NAME = [_a-zA-Z$][-_a-zA-Z0-9?!]*
@@ -194,6 +195,7 @@ Rules.
 (\+|\-)?{INT_WITH_BASE} : {token, {int, TokenLine, to_integer(TokenChars)}}.
 {ATOM} : {token, {atom, TokenLine, to_atom(TokenChars)}}.
 (\+|\-)?{INT}+\.{INT}+((E|e)(\+|\-)?{INT}+)? : {token, {float, TokenLine, list_to_float(TokenChars)}}.
+{DOT_DOT} : {token, {range, TokenLine}}.
 {SELF_DOT} : {token, {self_dot, TokenLine}}.
 {DOT} : {token, {dot, TokenLine}}.
 {NAME} : {token, {name, TokenLine, TokenChars}}.
