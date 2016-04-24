@@ -73,4 +73,10 @@ module Enumerable
       end
     }
   end
+
+  def each(func)
+    self.reduce([]) {|item, acc|
+      func.(item)
+    }
+  end
 end
