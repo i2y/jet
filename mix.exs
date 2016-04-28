@@ -9,7 +9,8 @@ defmodule Uiro.Mixfile do
      escript: [main_module: Uiro],
      docs: [readme: true, main: "README.md"],
      description: """
-     Uiro is a immutable OOP language.
+     Uiro is a immutable OOP, dynamically typed, functional language that runs on the Erlang virtual machine (BEAM).
+     Uiro's sytnax is Ruby-like syntax.
      """,
      deps: deps]
   end
