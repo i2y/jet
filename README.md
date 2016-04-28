@@ -130,8 +130,8 @@ end
 ### Trailing closures (Trailing blocks)
 ```ruby
 sample_list = new SampleList([1, 2, 3])
-sample_list.select { |item| item > 1 }
-           .map { |item| item * 2}
+sample_list.select {|item| item > 1}
+           .map {|item| item * 2}
            # => [4, 6]
 ```
 
