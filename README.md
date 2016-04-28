@@ -137,7 +137,7 @@ sample_list.select {|item| item > 1}
 
 ### Pipe operator
 ```ruby
-[1, 2, 3] |> lists.append([4, 5, 6])
+[1, 2, 3] |> lists::append([4, 5, 6])
 # => [1, 2, 3, 4, 5, 6]
 ```
 
