@@ -1,8 +1,6 @@
+# from http://learnyousomeerlang.com/
 module kitty_gen_server
   behavior gen_server
-
-  # export init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3
-  # export start/0, checkout/2, lookup/1, return/1
 
   def self.start()
     gen_server::start_link((:local, __name__), __name__, [], [])
