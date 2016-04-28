@@ -7,7 +7,7 @@ defmodule Uiro do
     {:ok, module_atom, binary} = Parser.parse(source, module_name)
                                     |> Compiler.to_erl_syntax_list(%{}, [])
                                     |> Compiler.to_erl_form_list
-    binary_to_path({module_name, binary}, '.')
+    binary_to_path({module_name, binary}, Path.dirname(module_file_path))
   end
 
   defp binary_to_path({module_name, binary}, compile_path) do
@@ -20,5 +20,4 @@ defmodule Uiro do
     {:ok, tree} = :erl_parse.parse_exprs(tokens)
     tree
   end
-
 end
