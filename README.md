@@ -1,7 +1,7 @@
 # Uiro
 
-Uiro is a immutable OOP, dynamically typed, functional language that runs on the Erlang virtual machine (BEAM).
-Uiro's sytnax is Ruby-like syntax.
+Uiro is a simple OOP, dynamically typed, functional language that runs on the Erlang virtual machine (BEAM).
+Uiro's syntax is Ruby-like syntax. Uiro also got an influence from Python and Mochi.
 
 Its interpreter is written in Elixir. The interpreter translates a program written in Uiro to Erlang's AST / bytecode.
 
