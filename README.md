@@ -118,7 +118,7 @@ class SampleList
   include Enumerable
   
   def initialize(items)
-    { items: items }
+    {items: items}
   end
   
   def reduce(acc, func)
