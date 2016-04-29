@@ -10,7 +10,7 @@ class Car
     1000
   end
 
-  def print()
+  def inspect()
     "Elixir.IO"::inspect(@name)
     "Elixir.IO"::inspect(@speed)
   end

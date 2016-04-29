@@ -15,7 +15,7 @@ class Car
      speed: 100}
   end
   
-  def print()
+  def inspect()
     "Elixir.IO"::inspect(@name)
     "Elixir.IO"::inspect(@speed)
   end
