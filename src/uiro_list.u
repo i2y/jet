@@ -45,6 +45,10 @@ module uiro_list
     list_to_tuple(self)
   end
 
+  def to_binary()
+    list_to_binary(self)
+  end
+
   def drop_last()
     lists::droplast(self)
   end
