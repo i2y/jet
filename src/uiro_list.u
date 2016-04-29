@@ -25,12 +25,24 @@ module uiro_list
     self ++ [item]
   end
 
+  def append(item)
+    self ++ [item]
+  end
+
   def conj(item)
     [item|self]
   end
 
   def add_all(lis)
     self ++ lis
+  end
+
+  def extend(lis)
+    self ++ lis
+  end
+
+  def to_tuple()
+    list_to_tuple(self)
   end
 
   def drop_last()

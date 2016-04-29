@@ -15,6 +15,10 @@ module uiro_runtime
     call_target_method(:uiro_map, obj, method_name, args)
   end
 
+  def self.call_method(obj, method_name, args) if is_tuple(obj)
+    call_target_method(:uiro_tuple, obj, method_name, args)
+  end
+
   def self.call_method({__class__: module_name, __state__: state}, method_name, args)
     obj = {__class__: module_name, __state__: state}
     exports = apply(module_name, :module_info, [:exports])
@@ -99,5 +103,5 @@ module uiro_runtime
      __state__ : apply(module_name, :initialize, args)}
   end
 
-  # TODO map, tuple, boolean
+  # TODO tuple, boolean
 end

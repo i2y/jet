@@ -1,0 +1,32 @@
+module uiro_tuple
+  include Enumerable
+
+  def reduce(acc, func)
+    list = tuple_to_list(self)
+    lists::foldl(func, acc, list)
+  end
+
+  def nth(n)
+    element(n, self)
+  end
+
+  def set(n, item)
+    setelement(n, self, item)
+  end
+
+  def size()
+    tuple_size(self)
+  end
+
+  def append(item)
+    erlang::append_element(self, item) 
+  end
+
+  def add(item)
+    erlang::append_element(self, item) 
+  end
+
+  def to_list()
+    tuple_to_list(self)
+  end
+end
