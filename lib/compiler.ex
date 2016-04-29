@@ -64,7 +64,6 @@ defmodule Compiler do
       [:patterns|_] ->
         put_patterns(uiro_syntax)
         to_erl_syntax_list(uiro_syntax_list, func_map, acc)
-      # _ -> [to_erl_syntax(uiro_syntax) | to_erl_syntax_list(uiro_syntax_list, func_map)] # TODO
       _ -> to_erl_syntax_list(uiro_syntax_list, func_map, acc ++ [to_erl_syntax(uiro_syntax)])
     end
   end

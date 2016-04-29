@@ -269,4 +269,8 @@ module test
       end
     }
   end
+  
+  def self.test_maps()
+    {a: 3, b: 4}.values
+  end
 end

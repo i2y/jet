@@ -82,7 +82,6 @@ RECORD = record
 PATTERNS = patterns
 YIELD = yield
 RETURN = return
-WITH = with
 FOR = for
 IN = in
 FROM = from
@@ -179,7 +178,6 @@ Rules.
 {SHARP} : {token, {sharp, TokenLine}}.
 {NOT} : {token, {not_keyword, TokenLine}}.
 {YIELD} : {token, {yield, TokenLine}}.
-{WITH} : {token, {with, TokenLine}}.
 {FOR} : {token, {for, TokenLine}}.
 {IN} : {token, {in, TokenLine}}.
 {FROM} : {token, {from, TokenLine}}.
