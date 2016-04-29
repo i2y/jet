@@ -102,6 +102,4 @@ module uiro_runtime
     {__class__ : module_name,
      __state__ : apply(module_name, :initialize, args)}
   end
-
-  # TODO tuple, boolean
 end
