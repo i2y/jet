@@ -15,10 +15,6 @@ class Car
      speed: 100}
   end
   
-  def self.test()
-    1000
-  end
-  
   def print()
     "Elixir.IO"::inspect(@name)
     "Elixir.IO"::inspect(@speed)
