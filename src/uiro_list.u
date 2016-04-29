@@ -32,4 +32,28 @@ module uiro_list
   def add_all(lis)
     self ++ lis
   end
+
+  def drop_last()
+    lists::droplast(self)
+  end
+
+  def drop_while(func)
+    lists::dropwhile(func, self)
+  end
+
+  def last()
+    lists::last(self)
+  end
+
+  def member?(elem)
+    lists::member(elem, self)
+  end
+
+  def nth(n)
+    lists::nth(n, self)
+  end
+
+  def nth_tail(n)
+    lists::nthtail(n, self)
+  end
 end
