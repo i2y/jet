@@ -6,6 +6,26 @@ Uiro's syntax is [Ruby](https://www.ruby-lang.org)-like syntax. Uiro also got an
 Its interpreter is written in [Elixir](http://elixir-lang.org). The interpreter translates a program written in Uiro to Erlang's AST / bytecode.
 
 ## Language features
+### Class definition
+Car.u
+```ruby
+class Car
+  def initialize()
+    {name: "foo",
+     speed: 100}
+  end
+  
+  def self.test()
+    1000
+  end
+  
+  def print()
+    "Elixir.IO"::inspect(@name)
+    "Elixir.IO"::inspect(@speed)
+  end
+end
+```
+
 ### Module definition
 Enumerable.u
 ```ruby
@@ -93,27 +113,6 @@ module Enumerable
 end
 ```
 
-
-### Class definition
-Car.u
-```ruby
-class Car
-  def initialize()
-    {name: "foo",
-     speed: 100}
-  end
-  
-  def self.test()
-    1000
-  end
-  
-  def print()
-    "Elixir.IO"::inspect(@name)
-    "Elixir.IO"::inspect(@speed)
-  end
-end
-```
-
 ### Mixing in Modules
 SampleList.u
 ```ruby
@@ -141,7 +140,8 @@ sample_list.select {|item| item > 1}
 ### Pipe operator
 ```ruby
 [1, 2, 3] |> lists::append([4, 5, 6])
-# => [1, 2, 3, 4, 5, 6]
+          |> lists::append([7, 8, 9])
+# => [1, 2, 3, 4, 5, 6, 7, 8, 9]
 ```
 
 ### Other supported features
