@@ -79,4 +79,6 @@ module Enumerable
       func.(item)
     }
   end
+  
+  # TODO sum, max, size, etc.
 end
