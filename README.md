@@ -7,6 +7,7 @@ Its interpreter is written in [Elixir](http://elixir-lang.org). The interpreter 
 
 ## Language features
 ### Module definition
+Enumerable.u
 ```ruby
 module Enumerable
   def select(func)
@@ -94,6 +95,7 @@ end
 
 
 ### Class definition
+Car.u
 ```ruby
 class Car
   def initialize()
@@ -113,6 +115,7 @@ end
 ```
 
 ### Mixing in Modules
+SampleList.u
 ```ruby
 class SampleList
   include Enumerable
