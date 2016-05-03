@@ -11,10 +11,6 @@ module uiro_runtime
     call_target_method(:uiro_float, obj, method_name, args)
   end
 
-  def self.call_method(obj, method_name, args) if is_map(obj)
-    call_target_method(:uiro_map, obj, method_name, args)
-  end
-
   def self.call_method(obj, method_name, args) if is_tuple(obj)
     call_target_method(:uiro_tuple, obj, method_name, args)
   end
@@ -31,6 +27,10 @@ module uiro_runtime
     else
       call_parent_method(module_name, obj, method_name, args)
     end
+  end
+
+  def self.call_method(obj, method_name, args) if is_map(obj)
+    call_target_method(:uiro_map, obj, method_name, args)
   end
 
   def self.call_target_method(module_name, obj, method_name, args)

@@ -196,8 +196,7 @@ module test
 
   def self.test_new()
     car = new Car()
-    car.print33
-    io::format(integer_to_list(Car::test()))
+    car.inspect
   end
 
   def self.test_list()
