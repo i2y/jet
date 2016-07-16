@@ -59,8 +59,9 @@ defmodule Compiler do
 
   def to_erl_syntax_list([uiro_syntax | uiro_syntax_list], func_map, acc) do
     case uiro_syntax do
-      # [:func|_] -> to_erl_syntax_list(uiro_syntax_list, put_func(uiro_syntax, func_map))
-      [:func|_] -> to_erl_syntax_list(uiro_syntax_list, put_func(uiro_syntax, func_map), acc)
+      [:func|_] -> to_erl_syntax_list(uiro_syntax_list,
+                                      put_func(uiro_syntax, func_map),
+                                      acc)
       [:patterns|_] ->
         put_patterns(uiro_syntax)
         to_erl_syntax_list(uiro_syntax_list, func_map, acc)
