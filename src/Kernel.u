@@ -1,6 +1,24 @@
 module Kernel
   def display()
-    # TODO
     io::format("~p", [self])
+  end
+
+  def class_info(info_type)
+    {__class__: module_name} = self
+    apply(module_name, :module_info, [info_type])
+  end
+
+  def class_info()
+    {__class__: module_name} = self
+    apply(module_name, :module_info, [])
+  end
+
+  def class_attrs()
+    {__class__: module_name} = self
+    apply(module_name, :module_info, [:attributes])
+  end
+
+  def class_attr_values(attribute_name)
+    proplists::get_all_values(attribute_name, self.class_attrs())
   end
 end
