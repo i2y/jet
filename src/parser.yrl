@@ -480,6 +480,7 @@ cons_elems -> elem comma elem : [cons, '$1', [cons, '$3', nil]].
 tuple_expr -> paren_opener elems paren_closer : [tuple | '$2'].
 
 elems -> elem : ['$1'].
+elems -> elem comma : ['$1'].
 elems -> elem comma elems : ['$1'|'$3'].
 
 elem -> binop_expr : '$1'.
