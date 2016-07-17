@@ -1,4 +1,8 @@
 module uiro_runtime
+  def self.call_method(obj, method_name, args) if is_atom(obj)
+    call_target_method(:uiro_atom, obj, method_name, args)
+  end
+
   def self.call_method(obj, method_name, args) if is_list(obj)
     call_target_method(:uiro_list, obj, method_name, args)
   end
