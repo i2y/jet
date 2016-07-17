@@ -1,13 +1,18 @@
 defmodule Uiro do
 
   def main(args) do
-    module_file_path = List.first(args)
+    {options, targets, _} = OptionParser.parse(args, aliases: [r: :run])
+    module_file_path = List.first(targets)
     module_name = String.to_char_list(Path.basename(module_file_path, ".u"))
     {:ok, source} = File.read(module_file_path)
     {:ok, module_atom, binary} = Parser.parse(source, module_name)
-                                    |> Compiler.to_erl_syntax_list(%{}, [])
-                                    |> Compiler.to_erl_form_list
+                                 |> Compiler.to_erl_syntax_list(%{}, [])
+                                 |> Compiler.to_erl_form_list
     binary_to_path({module_name, binary}, Path.dirname(module_file_path))
+    if options[:run] do
+      [module_name, func_name] = String.split(options[:run], "::")
+      apply(String.to_atom(module_name), String.to_atom(func_name), [])
+    end
   end
 
   defp binary_to_path({module_name, binary}, compile_path) do
