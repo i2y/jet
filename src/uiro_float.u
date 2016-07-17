@@ -1,3 +1,7 @@
 module uiro_float
   include Numeric
+
+  def to_list()
+    float_to_list(self)
+  end
 end
