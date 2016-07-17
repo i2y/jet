@@ -309,6 +309,18 @@ method_stmt -> def_keyword name args guards then body block_closer
                : [func, '$2', add_self('$2', '$3'), '$4','$6']. % [[name, {name, 0, self}] | '$3'], '$4','$6'].
 method_stmt -> def_keyword name args guards newlines body block_closer
                : [func, '$2', add_self('$2', '$3'), '$4','$6']. % [[name, {name, 0, self}] | '$3'], '$4','$6'].
+method_stmt -> name newline def_keyword name args newlines body block_closer
+               : [decorated_func, [attr, '$1', add_func_name_and_arity([], '$4', {int, 0, length('$5')})],
+                                  [func, '$4', add_self('$4', '$5'), '$7']].
+method_stmt -> name args newline def_keyword name args newlines body block_closer
+               : [decorated_func, [attr, '$1', add_func_name_and_arity('$2', '$5', {int, 0, length('$6')})],
+                                  [func, '$5', add_self('$5', '$6'), '$8']].
+method_stmt -> name newline def_keyword name args guards newlines body block_closer
+               : [decorated_func, [attr, '$1', add_func_name_and_arity([], '$4', {int, 0, length('$5')})],
+                                  [func, '$4', add_self('$4', '$5'), '$6', '$8']].
+method_stmt -> name args newline def_keyword name args guards newlines body block_closer
+               : [decorated_func, [attr, '$1', add_func_name_and_arity('$2', '$5', {int, 0, length('$6')})],
+                                  [func, '$5', add_self('$5', '$6'), '$7', '$9']].
 
 class_method_stmt -> def_keyword self_dot name args newlines body block_closer
                : [func, '$3', '$4', '$6'].
@@ -594,11 +606,23 @@ get_func_expr -> amp name op_div int : [get_func, '$2', '$4'].
 
 Erlang code.
 
+count_char(String, Char) ->
+    F = fun(X, N) when X =:= Char -> N + 1;
+           (_, N)                 -> N
+        end,
+    lists:foldl(F, 0, String).
+
+add_func_name_and_arity(Attr_values, Func_name, Arity) ->
+    Attr_values ++ [[tuple, to_atom_token(Func_name), Arity]].
+
 line_of(Token) ->
     element(2, Token).
 
 to_atom(Token) ->
     list_to_atom(element(3, Token)).
+
+to_atom_token(Token) ->
+    {atom, line_of(Token), to_atom(Token)}.
 
 value(Token) ->
     element(3, Token).

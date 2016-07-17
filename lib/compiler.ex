@@ -59,6 +59,10 @@ defmodule Compiler do
 
   def to_erl_syntax_list([uiro_syntax | uiro_syntax_list], func_map, acc) do
     case uiro_syntax do
+      [:decorated_func, attr, func_def] ->
+        to_erl_syntax_list([func_def|uiro_syntax_list],
+                            func_map,
+                            acc ++ [to_erl_syntax(attr)])
       [:func|_] -> to_erl_syntax_list(uiro_syntax_list,
                                       put_func(uiro_syntax, func_map),
                                       acc)
