@@ -80,5 +80,8 @@ module Enumerable
     }
   end
   
-  # TODO sum, max, size, etc.
+  protocol
+  def reduce(acc, func)
+    nil
+  end
 end
