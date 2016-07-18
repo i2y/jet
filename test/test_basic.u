@@ -1,0 +1,29 @@
+module test_basic
+  test
+  def self.if_stmt()
+    value = if true
+      100
+    else
+      200
+    end
+    test::assert_eq(value, 100)
+  end
+
+  test
+  def self.if_stmt_else()
+    value = if false
+      100
+    else
+      200
+    end
+    test::assert_eq(value, 200)
+  end
+
+  test
+  def self.if_stmt_single()
+    value = if true
+      200
+    end
+    test::assert_eq(value, 200)
+  end
+end

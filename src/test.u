@@ -1,0 +1,9 @@
+module test
+  def self.assert_eq(obj1, obj2)
+    if obj1 == obj2
+      (:ok,)
+    else
+      (:ng, "Expected " ++ obj2.to_list() ++ ", but got " ++ obj1.to_list())
+    end
+  end
+end

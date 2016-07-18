@@ -328,6 +328,18 @@ class_method_stmt -> def_keyword self_dot name args guards then body block_close
                : [func, '$3', '$4', '$5', '$7'].
 class_method_stmt -> def_keyword self_dot name args guards newlines body block_closer
                : [func, '$3', '$4', '$5', '$7'].
+class_method_stmt -> name newline def_keyword self_dot name args newlines body block_closer
+               : [decorated_func, [attr, '$1', add_func_name_and_arity([], '$5', {int, 0, length('$6')})],
+                                  [func, '$5', '$6', '$8']].
+class_method_stmt -> name args newline def_keyword self_dot name args newlines body block_closer
+               : [decorated_func, [attr, '$1', add_func_name_and_arity('$2', '$6', {int, 0, length('$7')})],
+                                  [func, '$6', '$7', '$9']].
+class_method_stmt -> name newline def_keyword self_dot name args guards newlines body block_closer
+               : [decorated_func, [attr, '$1', add_func_name_and_arity([], '$5', {int, 0, length('$6')})],
+                                  [func, '$5', '$6', '$7', '$9']].
+class_method_stmt -> name args newline def_keyword self_dot name args guards newlines body block_closer
+               : [decorated_func, [attr, '$1', add_func_name_and_arity('$2', '$6', {int, 0, length('$7')})],
+                                  [func, '$6', '$7', '$8', '$10']].
 
 args -> paren_opener args_pattern paren_closer : '$2'.
 args -> paren_opener paren_closer : [].
