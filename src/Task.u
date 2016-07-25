@@ -1,0 +1,9 @@
+module Task
+  def self.map(func)
+    new Map(func)
+  end
+
+  def self.call(func)
+    new Call(func)
+  end
+end

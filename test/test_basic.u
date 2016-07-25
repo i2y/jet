@@ -26,4 +26,27 @@ module test_basic
     end
     test::assert_eq(value, 200)
   end
+
+  #test
+  #def self.pipe()
+  #  task = [1, 2, 3] |> new Printer()
+  #  task.run()
+  #  task.run()
+  #end
+
+  #test
+  #def self.pipe_to_map()
+  #  task = [1, 2, 3]
+  #         |> Task::map {|item| item + 1}
+  #         |> new Printer()
+  #  task.run()
+  #end
+
+  test
+  def self.pipe_to()
+    task = [1, 2, 3]
+           |> Task::map {|item| item + 1}
+           |> {|item| item.display()}
+    task.run()
+  end
 end

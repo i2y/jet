@@ -23,6 +23,10 @@ module uiro_runtime
     call_target_method(:uiro_binary, obj, method_name, args)
   end
 
+  def self.call_method(obj, method_name, args) if is_function(obj)
+    call_target_method(:uiro_function, obj, method_name, args)
+  end
+
   def self.call_method({__class__: module_name, __state__: state}, method_name, args)
     obj = {__class__: module_name, __state__: state}
     exports = apply(module_name, :module_info, [:exports])

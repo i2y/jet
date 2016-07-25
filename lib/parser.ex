@@ -36,7 +36,7 @@ defmodule Parser do
                   :op_and, :op_or, :op_is, :op_not,
                   :bang, :equals, :pipe, :pipeline,
                   :last_pipeline, :for, :in, :thin_arrow,
-                  :fat_arrow, :dot], token_type(token))
+                  :fat_arrow, :dot, :cons], token_type(token))
   end
 
   defp comma?(token) do

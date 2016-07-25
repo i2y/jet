@@ -99,7 +99,6 @@ Terminals
   self_dot
   sharp
   pipeline
-  last_pipeline
   cons
   op_floor_div
   op_pow
@@ -187,7 +186,7 @@ Rootsymbol root.
 
 Right 10 equals.
 Right 20 op_not op_bnot.
-Left 30 op_and op_or op_xor op_bitand op_bitor op_bitxor pipeline last_pipeline.
+Left 30 op_and op_or op_xor op_bitand op_bitor op_bitxor pipeline.
 Nonassoc 40 op_eq op_leq op_geq op_neq op_lt op_gt.
 Left 45 range.
 Left 50 op_plus op_minus op_append.
@@ -392,7 +391,6 @@ binop_expr -> binop_expr op_div binop_expr : ['$2', '$1', '$3'].
 binop_expr -> binop_expr op_floor_div binop_expr : ['$2', '$1', '$3'].
 binop_expr -> binop_expr op_append binop_expr : ['$2', '$1', '$3'].
 binop_expr -> binop_expr pipeline binop_expr : ['$2', '$1', '$3'].
-binop_expr -> binop_expr last_pipeline binop_expr : ['$2', '$1', '$3'].
 binop_expr -> binop_expr equals binop_expr : ['$2', '$1', '$3'].
 binop_expr -> binop_expr op_geq binop_expr : ['$2', '$1', '$3'].
 binop_expr -> binop_expr op_leq binop_expr : ['$2', '$1', '$3'].

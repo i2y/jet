@@ -1,0 +1,50 @@
+class Map
+  include TaskBase
+
+  def initialize(func)
+    {func: func,
+     task_list: []}
+  end
+
+  def initialize(func, task_list)
+    {func: func,
+     task_list: task_list}
+  end
+
+  def self.collector(next_actor, eos_flag, count_of_messages, exit_count)
+    if eos_flag and (count_of_messages == exit_count)
+      next_actor ! :eos
+    end
+
+    receive
+      case (:eos, count)
+        collector(next_actor, true, count_of_messages, count)
+      case message
+        next_actor ! message
+        collector(next_actor, eos_flag, count_of_messages + 1, exit_count)
+    end
+  end
+
+  def self.worker(collector, message, func)
+    collector ! func.(message)
+  end
+
+  def self.mapper(collector, next_actor, children, func)
+    receive
+      case :eos
+        collector ! (:eos, children.size())
+      case message
+        new_children = children.append(spawn(__name__, :worker, [collector, message, func]))
+        mapper(collector, next_actor, new_children, func)
+    end
+  end
+
+  def spawn_actor(next_actor)
+    collector = spawn(__name__, :collector, [next_actor, false, 0, -1])
+    spawn(__name__, :mapper, [collector, next_actor, [], @func])
+  end
+
+  def update_task_list(task_list)
+    new Map(@func, task_list)
+  end
+end

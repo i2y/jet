@@ -1,0 +1,5 @@
+module uiro_function
+  def to_task()
+    Task::call(self)
+  end
+end

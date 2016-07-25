@@ -15,4 +15,8 @@ module uiro_integer
   def to_list()
     integer_to_list(self)
   end
+
+  def pipe_to(other)
+    self + other
+  end
 end

@@ -582,13 +582,11 @@ defmodule Compiler do
     |> set_pos(line)
   end
 
-  def to_erl_syntax([{:pipeline, line}, first_arg, [:apply, operator, args]]) do
-    to_erl_syntax([:apply, operator, [first_arg|args]])
-    |> set_pos(line)
-  end
-
-  def to_erl_syntax([{:last_pipeline, line}, last_arg, [:apply, operator, args]]) do
-    to_erl_syntax([:apply, operator, args ++ [last_arg]])
+  def to_erl_syntax([{:pipeline, line}, first_arg, second_arg]) do
+    # [{:call_method, line}, first_arg, {:name, line, :pipe_to}, [second_arg]]
+    [{:call_method, line}, first_arg, {:name, line, :pipe_to},
+     [[{:call_method, line}, second_arg, {:name, line, :to_task}, []]]]
+    |> to_erl_syntax()
     |> set_pos(line)
   end
 

@@ -1,0 +1,29 @@
+class Printer
+  include TaskBase
+
+  def initialize()
+    {task_list: []}
+  end
+
+  def initialize(task_list)
+    {task_list: task_list }
+  end
+
+  def self.print()
+    receive
+      case :eos
+        :eos.display()
+      case item
+        item.display()
+        print()
+    end
+  end
+
+  def spawn_actor(next_actor)
+    spawn(__name__, :print, [])
+  end
+
+  def update_task_list(task_list)
+    new Printer(task_list)
+  end
+end

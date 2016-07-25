@@ -5,6 +5,10 @@ module uiro_list
     lists::foldl(func, acc, self)
   end
 
+  def each(func)
+    lists::foreach(func, self)
+  end
+
   def index_of(item)
     index_of(item, self, 1)
   end
@@ -57,6 +61,11 @@ module uiro_list
     lists::dropwhile(func, self)
   end
 
+  def first()
+    [head|_] = self
+    head
+  end
+
   def last()
     lists::last(self)
   end
@@ -71,5 +80,21 @@ module uiro_list
 
   def nth_tail(n)
     lists::nthtail(n, self)
+  end
+
+  def reverse()
+    lists::reverse(self)
+  end
+
+  def pipe_to(other)
+    new Seq(self).pipe_to(other)
+  end
+
+  def size()
+    erlang::length(self)
+  end
+
+  def length()
+    erlang::length(self)
   end
 end

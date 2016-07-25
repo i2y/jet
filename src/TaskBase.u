@@ -1,0 +1,32 @@
+module TaskBase
+  def pipe_to(next_task)
+    self.update_task_list(@task_list.append(next_task))
+  end
+
+  def run()
+    reversed_task_list = @task_list.reverse().append(self)
+    reversed_task_list.reduce([]) do |task, acc|
+      next_actor = if acc == []
+        self()
+      else
+        acc
+      end
+      task.spawn_actor(next_actor)
+    end
+    reversed_task_list.first()
+  end
+
+  protocol
+  def spawn_actor(next_actor)
+    nil
+  end
+
+  protocol
+  def update_task_list(task_list)
+    nil
+  end
+
+  def to_task()
+    self
+  end
+end

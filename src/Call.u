@@ -1,0 +1,31 @@
+class Call
+  include TaskBase
+
+  def initialize(func)
+    {func: func,
+     task_list: []}
+  end
+
+  def initialize(func, task_list)
+    {func: func,
+     task_list: task_list}
+  end
+
+  def self.call(next_actor, func)
+    receive
+      case :eos
+        next_actor ! :eos
+      case value
+        next_actor ! func.(value)
+        call(next_actor, func) # error message
+    end
+  end
+
+  def spawn_actor(next_actor)
+    spawn(__name__, :call, [next_actor, @func])
+  end
+
+  def update_task_list(task_list)
+    new Call(@func, task_list)
+  end
+end
