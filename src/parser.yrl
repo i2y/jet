@@ -205,6 +205,8 @@ module_closer -> end_keyword newlines : '$1'.
 
 %module -> module_opener name toplevel_stmts module_closer : [['$1', '$2'] | '$3'].
 %module -> module_opener name newlines toplevel_stmts module_closer : [['$1', '$2'] | '$4'].
+module -> module_opener name module_closer : [['$1', '$2'], [{export_all, 1}]].
+module -> module_opener name newlines module_closer : [['$1', '$2'], [{export_all, 1}]].
 module -> module_opener name toplevel_stmts module_closer : [['$1', '$2'], [{export_all, 1}] | '$3'].
 module -> module_opener name newlines toplevel_stmts module_closer : [['$1', '$2'], [{export_all, 1}] | '$4'].
 module -> module_opener name newlines export_stmt delims toplevel_stmts module_closer : [['$1', '$2'], '$4' | '$6'].
@@ -215,6 +217,8 @@ class_opener -> class_keyword newlines : '$1'.
 class_closer -> end_keyword : '$1'.
 class_closer -> end_keyword newlines : '$1'.
 
+class -> class_opener name class_closer : [['$1', '$2'], [{export_all, 1}]].
+class -> class_opener name newlines class_closer : [['$1', '$2'], [{export_all, 1}]].
 class -> class_opener name class_toplevel_stmts class_closer : [['$1', '$2'], [{export_all, 1}] | '$3'].
 class -> class_opener name newlines class_toplevel_stmts class_closer : [['$1', '$2'], [{export_all, 1}] | '$4'].
 class -> class_opener name newlines export_stmt delims class_toplevel_stmts class_closer : [['$1', '$2'], '$4' | '$6'].
@@ -376,6 +380,7 @@ args_pattern -> expr : ['$1'].
 args_pattern -> expr comma args_pattern : ['$1' | '$3'].
 
 body -> stmts : '$1'.
+body -> '$empty' : [].
 
 stmts -> stmt: ['$1'].
 stmts -> stmt delims: ['$1'].
@@ -487,7 +492,7 @@ cons_elems -> elem comma cons_elems : [cons, '$1', '$3'].
 cons_elems -> elem cons elem : [cons, '$1', '$3'].
 cons_elems -> elem comma elem : [cons, '$1', [cons, '$3', nil]].
 
-tuple_expr -> paren_opener elems paren_closer : [tuple | '$2'].
+tuple_expr -> brace_opener elems brace_closer : [tuple | '$2'].
 
 elems -> elem : ['$1'].
 elems -> elem comma : ['$1'].
