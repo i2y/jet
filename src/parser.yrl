@@ -33,6 +33,8 @@ Nonterminals
   body
   stmts
   stmt
+  instance_method_body
+  app_operator_expr
   binop_expr
   expr
   paren_expr
@@ -99,7 +101,7 @@ Terminals
   self_dot
   sharp
   pipeline
-  cons
+  pipe
   op_floor_div
   op_pow
   lbrack
@@ -186,7 +188,7 @@ Rootsymbol root.
 
 Right 10 equals.
 Right 20 op_not op_bnot.
-Left 30 op_and op_or op_xor op_bitand op_bitor op_bitxor pipeline.
+Left 30 op_and op_or op_xor op_bitand op_bitor op_bitxor pipeline pipe.
 Nonassoc 40 op_eq op_leq op_geq op_neq op_lt op_gt.
 Left 45 range.
 Left 50 op_plus op_minus op_append.
@@ -306,43 +308,43 @@ export_name -> name op_div int : [fun_name, '$1', '$3'].
 %function_stmt -> def_keyword name args guards newlines body block_closer
 %               : [func, '$2', '$3', '$4','$6'].
 
-method_stmt -> def_keyword name args newlines body block_closer
-               : [func, '$2', add_self('$2', '$3'), '$5']. % [[name, {name, 0, self}] | '$3'], '$5'].
-method_stmt -> def_keyword name args guards then body block_closer
-               : [func, '$2', add_self('$2', '$3'), '$4','$6']. % [[name, {name, 0, self}] | '$3'], '$4','$6'].
-method_stmt -> def_keyword name args guards newlines body block_closer
-               : [func, '$2', add_self('$2', '$3'), '$4','$6']. % [[name, {name, 0, self}] | '$3'], '$4','$6'].
-method_stmt -> name newline def_keyword name args newlines body block_closer
+method_stmt -> def_keyword name args newlines instance_method_body block_closer
+               : [func, '$2', add_self('$2', '$3'), '$5', instance]. % [[name, {name, 0, self}] | '$3'], '$5'].
+method_stmt -> def_keyword name args guards then instance_method_body block_closer
+               : [func, '$2', add_self('$2', '$3'), '$4', '$6', instance]. % [[name, {name, 0, self}] | '$3'], '$4','$6'].
+method_stmt -> def_keyword name args guards newlines instance_method_body block_closer
+               : [func, '$2', add_self('$2', '$3'), '$4','$6', instance]. % [[name, {name, 0, self}] | '$3'], '$4','$6'].
+method_stmt -> name newline def_keyword name args newlines instance_method_body block_closer
                : [decorated_func, [attr, '$1', add_func_name_and_arity([], '$4', {int, 0, length('$5') + 1})],
-                                  [func, '$4', add_self('$4', '$5'), '$7']].
-method_stmt -> name args newline def_keyword name args newlines body block_closer
+                                  [func, '$4', add_self('$4', '$5'), '$7', instance]].
+method_stmt -> name args newline def_keyword name args newlines instance_method_body block_closer
                : [decorated_func, [attr, '$1', add_func_name_and_arity('$2', '$5', {int, 0, length('$6') + 1})],
-                                  [func, '$5', add_self('$5', '$6'), '$8']].
-method_stmt -> name newline def_keyword name args guards newlines body block_closer
+                                  [func, '$5', add_self('$5', '$6'), '$8', instance]].
+method_stmt -> name newline def_keyword name args guards newlines instance_method_body block_closer
                : [decorated_func, [attr, '$1', add_func_name_and_arity([], '$4', {int, 0, length('$5') + 1})],
-                                  [func, '$4', add_self('$4', '$5'), '$6', '$8']].
-method_stmt -> name args newline def_keyword name args guards newlines body block_closer
+                                  [func, '$4', add_self('$4', '$5'), '$6', '$8', instance]].
+method_stmt -> name args newline def_keyword name args guards newlines instance_method_body block_closer
                : [decorated_func, [attr, '$1', add_func_name_and_arity('$2', '$5', {int, 0, length('$6') + 1})],
-                                  [func, '$5', add_self('$5', '$6'), '$7', '$9']].
+                                  [func, '$5', add_self('$5', '$6'), '$7', '$9', instance]].
 
 class_method_stmt -> def_keyword self_dot name args newlines body block_closer
-               : [func, '$3', '$4', '$6'].
+               : [func, '$3', '$4', '$6', module].
 class_method_stmt -> def_keyword self_dot name args guards then body block_closer
-               : [func, '$3', '$4', '$5', '$7'].
+               : [func, '$3', '$4', '$5', '$7', module].
 class_method_stmt -> def_keyword self_dot name args guards newlines body block_closer
-               : [func, '$3', '$4', '$5', '$7'].
+               : [func, '$3', '$4', '$5', '$7', module].
 class_method_stmt -> name newline def_keyword self_dot name args newlines body block_closer
                : [decorated_func, [attr, '$1', add_func_name_and_arity([], '$5', {int, 0, length('$6')})],
-                                  [func, '$5', '$6', '$8']].
+                                  [func, '$5', '$6', '$8', module]].
 class_method_stmt -> name args newline def_keyword self_dot name args newlines body block_closer
                : [decorated_func, [attr, '$1', add_func_name_and_arity('$2', '$6', {int, 0, length('$7')})],
-                                  [func, '$6', '$7', '$9']].
+                                  [func, '$6', '$7', '$9', module]].
 class_method_stmt -> name newline def_keyword self_dot name args guards newlines body block_closer
                : [decorated_func, [attr, '$1', add_func_name_and_arity([], '$5', {int, 0, length('$6')})],
-                                  [func, '$5', '$6', '$7', '$9']].
+                                  [func, '$5', '$6', '$7', '$9', module]].
 class_method_stmt -> name args newline def_keyword self_dot name args guards newlines body block_closer
                : [decorated_func, [attr, '$1', add_func_name_and_arity('$2', '$6', {int, 0, length('$7')})],
-                                  [func, '$6', '$7', '$8', '$10']].
+                                  [func, '$6', '$7', '$8', '$10', module]].
 
 args -> paren_opener args_pattern paren_closer : '$2'.
 args -> paren_opener paren_closer : [].
@@ -379,14 +381,21 @@ newlines -> newline.
 args_pattern -> expr : ['$1'].
 args_pattern -> expr comma args_pattern : ['$1' | '$3'].
 
-body -> stmts : '$1'.
+body -> stmts : set_context('$1', class_or_module_method).
 body -> '$empty' : [].
+
+instance_method_body -> stmts : set_context('$1', instance_method).
+instance_method_body -> '$empty' : [].
 
 stmts -> stmt: ['$1'].
 stmts -> stmt delims: ['$1'].
 stmts -> stmt delims stmts : ['$1' | '$3'].
 
 stmt -> binop_expr : '$1'.
+
+%call_self_method_expr -> self_dot name app_args : [{call_method, line_of('$2')}, [name, {name, line_of('$2'), self}], '$2', '$3'].
+%call_self_method_expr -> name app_args : [{call_method, line_of('$1')}, [name, {name, line_of('$1'), self}], '$1', '$2'].
+%call_self_method_expr -> self_dot name : [{call_method, line_of('$2')}, [name, {name, line_of('$1'), self}], '$2', []].
 
 binop_expr -> binop_expr op_plus binop_expr : ['$2', '$1', '$3'].
 binop_expr -> binop_expr op_minus binop_expr : ['$2', '$1', '$3'].
@@ -395,7 +404,8 @@ binop_expr -> binop_expr percent binop_expr : ['$2', '$1', '$3'].
 binop_expr -> binop_expr op_div binop_expr : ['$2', '$1', '$3'].
 binop_expr -> binop_expr op_floor_div binop_expr : ['$2', '$1', '$3'].
 binop_expr -> binop_expr op_append binop_expr : ['$2', '$1', '$3'].
-binop_expr -> binop_expr pipeline binop_expr : ['$2', '$1', '$3'].
+%binop_expr -> binop_expr pipeline binop_expr : ['$2', '$1', '$3'].
+binop_expr -> binop_expr pipe binop_expr : ['$2', '$1', '$3'].
 binop_expr -> binop_expr equals binop_expr : ['$2', '$1', '$3'].
 binop_expr -> binop_expr op_geq binop_expr : ['$2', '$1', '$3'].
 binop_expr -> binop_expr op_leq binop_expr : ['$2', '$1', '$3'].
@@ -489,7 +499,7 @@ cons_expr -> brack_opener elem brack_closer : [cons, '$2', nil].
 cons_expr -> brack_opener cons_elems brack_closer : '$2'.
 
 cons_elems -> elem comma cons_elems : [cons, '$1', '$3'].
-cons_elems -> elem cons elem : [cons, '$1', '$3'].
+cons_elems -> elem comma op_times elem : [cons, '$1', '$4'].
 cons_elems -> elem comma elem : [cons, '$1', [cons, '$3', nil]].
 
 tuple_expr -> brace_opener elems brace_closer : [tuple | '$2'].
@@ -580,8 +590,11 @@ pattern_list -> pattern comma pattern_list : ['$1' | '$3'].
 
 pattern -> binop_expr: '$1'.
 
-app_expr -> operator app_args : [apply, '$1', '$2'].
-app_expr -> name app_args : [apply, [func_ref, '$1'], '$2'].
+app_expr -> app_operator_expr : '$1'.
+app_expr -> name app_args : [apply_name, [func_ref, '$1'], '$2'].
+%app_expr -> name app_args : emit_app_expr(get_context(), '$1', '$2').
+
+app_operator_expr -> operator app_args : [apply, '$1', '$2'].
 
 operator -> name colon_colon name : [func_ref, '$1', '$3'].
 operator -> name colon_colon str : [func_ref, '$1', {name, 1, value('$3')}].
@@ -596,16 +609,16 @@ app_args -> paren_opener paren_closer fun_expr : ['$3'].
 app_args -> paren_opener paren_closer : [].
 app_args -> fun_expr : ['$1'].
 
-args_opener -> cons.
-args_opener -> cons newlines.
-args_opener -> newlines cons.
-args_closer -> cons.
-args_closer -> cons newlines.
-args_closer -> newlines cons.
+args_opener -> pipe.
+args_opener -> pipe newlines.
+args_opener -> newlines pipe.
+args_closer -> pipe.
+args_closer -> pipe newlines.
+args_closer -> newlines pipe.
 
-fun_expr -> block_opener body block_closer : [func, [], '$2'].
-fun_expr -> block_opener args_opener args_pattern args_closer body block_closer : [func, '$3', '$5'].
-fun_expr -> block_opener args_opener args_pattern guards args_closer body block_closer : [func, '$3', '$4', '$6'].
+fun_expr -> block_opener body block_closer : [func, [], '$2', block].
+fun_expr -> block_opener args_opener args_pattern args_closer body block_closer : [func, '$3', '$5', block].
+fun_expr -> block_opener args_opener args_pattern guards args_closer body block_closer : [func, '$3', '$4', '$6', block].
 
 if_expr -> if_keyword binop_expr then body block_closer : ['$1', '$2', '$4'].
 if_expr -> if_keyword binop_expr newlines body block_closer : ['$1', '$2', '$4'].
@@ -644,7 +657,18 @@ value(Token) ->
     element(3, Token).
 
 add_self(Func_name, Args) ->
-    case Func_name of
-       {name, Line, "initialize"} -> Args;
-       _ -> [[name, {name, 0, self}] | Args]
-    end.
+    [[name, {name, 0, self}] | Args].
+
+set_context(Value, Context) ->
+    put(context, Context),
+    Value.
+
+get_context() ->
+    get(context).
+
+%emit_app_expr(class_or_module_method, Name, Args) ->
+%    [apply, [func_ref, Name], Args];
+%emit_app_expr(instance_method, Name, Args) ->
+%    io:format("~p~n", [Name]),
+%    [apply, [func_ref, Name], Args].
+    %[{call_method, line_of(Name)}, [name, {name, line_of(Name), self}], Name, Args].

@@ -1,5 +1,14 @@
 module uiro_function
   def to_task()
-    Task::call(self)
+    match erlang::fun_info(self, :arity)
+      case {:arity, 2}
+        Task::call(self)
+      case {:arity, 1}
+        Task::map(self)
+    end
+  end
+
+  def arity()
+    erlang::fun_info(self, :arity)
   end
 end

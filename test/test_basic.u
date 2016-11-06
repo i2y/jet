@@ -25,11 +25,64 @@ module test_basic
       200
     end
     test::assert_eq(value, 200)
+    [1, 2, 3].each do |item| item.display() end
+  end
+
+  test
+  def self.tuple()
+    {1, 2, 3}.size()
+  end
+
+  test
+  def self.method()
+    "aiueo".to_tuple().display()
+  end
+
+  test
+  def self.times()
+    10.times do
+      :a.display
+    end
+
+    10.times do |i|
+      i.display
+    end
   end
 
   #test
+  #def self.fafa()
+  #  "fafafafafafaf".display
+  #  "aaaaaaaaaaaaaa".display
+  #  "Elixir.String"::length(<<"aiueo">>).display
+  #  "bbbbbbbbbbbbbb".display
+  #end
+
+  test
+  def self.test_module()
+    erlang = new Module(:erlang)
+    test::assert_eq(erlang.apply(:erlang, :length, ["あいうえお"]), 5)
+  end
+
+  test
+  def self.test_class_new()
+    Seq = new Class(:Seq)
+    test::assert_eq(Seq.new_instance([1, 2, 3]), new Seq([1, 2, 3]))
+  end
+
+  #test
+  #def self.class_info()
+  #  erlang = new Module(:erlang)
+  #end
+
+  #test
+  #def self.method_missing()
+  #  operator = new PyModule(:operator)
+  #  operator.add(2, 2).display()
+  #end
+
+  #test
   #def self.pipe()
-  #  task = [1, 2, 3] |> new Printer()
+  #  task = [1, 2, 3] | new Printer()
   #  task.run()
   #  task.run()
   #end
@@ -37,16 +90,87 @@ module test_basic
   #test
   #def self.pipe_to_map()
   #  task = [1, 2, 3]
-  #         |> Task::map {|item| item + 1}
-  #         |> new Printer()
+  #         | Task::map {|item| item + 1}
+  #         | new Printer()
+  #  task.run()
+  #end
+
+  #test
+  #def self.pipe_to_map()
+  #  task = [1, 2, 3]
+  #         | Task::map {|item| item + 1}
+  #         | {|item| item.display()}
+  #  task.run()
+  #end
+
+  #test
+  #def self.pipe_to_map_each()
+  #  task = [1, 2, 3]
+  #         | Task::flat_map {|item| item + 1}
+  #         | Task::filter {|item| item > 2}
+  #         | {|item| item.display()}
+  #  task.run()
+  #end
+
+  #test
+  #def self.pipe_to_map_each()
+  #  task = [1, 2, 3]
+  #         | Task::flat_map {|item| [item + 1, 10]}
+  #         | Task::filter {|item| item > 2}
+  #         | {|item| item.display()}
+  #  task.run()
+  #end
+
+  #test
+  #def self.pipe_to_map_each()
+  #  task = [1, 2, 3]
+  #         #| Task::split(2)
+  #         #| Task::flat_map {|items| items}
+  #         | Task::call3 {|values| values.sum()}
+  #         | {|item| item.display()}
+  #  task.run()
+  #end
+
+  #test
+  #def self.pipe_to_map_each()
+  #  task = [1, 2, 3]
+  #       #| Task::split(2)
+  #       | Task::p_map {|item| item * 1}
+  #       #| Task::reduce(0) {|acc, value| acc + value}
+  #       | Task::group_by do |value|
+  #           if value % 2 == 0
+  #             :a
+  #           else
+  #             :b
+  #           end
+  #         end
+  #       | Task::flat()
+  #       #| Task::reduce_by_key {|key, values| values.sum()}
+  #       | Task::p_map do |{key, values}|
+  #           {key, values.sum()}
+  #         end
+  #       | {|item| item.display()}
   #  task.run()
   #end
 
   test
-  def self.pipe_to()
-    task = [1, 2, 3]
-           |> Task::map {|item| item + 1}
-           |> {|item| item.display()}
-    task.run()
+  def self.pipe_to_map_each2()
+    stream = new Seq([1, 2, 3])
+    stream
+      .p_map {|item| item * 1}
+      .group_by {|value|
+        if value % 2 == 0
+          :a
+        else
+          :b
+        end
+      }
+      .flat()
+      .p_map {|{key, values}|
+        {key, values.sum()}
+      }
+      .run()
+      .get()
+      .display()
   end
 end

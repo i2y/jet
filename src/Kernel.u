@@ -3,22 +3,70 @@ module Kernel
     io::format("~p", [self])
   end
 
+  def send_to(actor)
+    actor ! self
+  end
+
+  def class_obj()
+    {:object, module_name, _} = self
+    new Class(module_name)
+  end
+
   def class_info(info_type)
-    {__class__: module_name} = self
+    {:object, module_name, _} = self
     apply(module_name, :module_info, [info_type])
   end
 
   def class_info()
-    {__class__: module_name} = self
+    {:object, module_name, _} = self
     apply(module_name, :module_info, [])
   end
 
   def class_attrs()
-    {__class__: module_name} = self
+    {:object, module_name, _} = self
     apply(module_name, :module_info, [:attributes])
   end
 
   def class_attr_values(attribute_name)
-    proplists::get_all_values(attribute_name, self.class_attrs())
+    proplists::get_all_values(attribute_name, class_attrs())
+  end
+
+  def spawn(f)
+    erlang::spawn(f)
+  end
+
+  def spawn(n, f)
+    erlang::spawn(n, f)
+  end
+
+  def spawn(m, f, a)
+    erlang::spawn(m, f, a)
+  end
+
+  def spawn(n, m, f, a)
+    erlang::spawn(n, m, f, a)
+  end
+
+  def apply(f, a)
+    erlang::apply(f, a)
+  end
+
+  def apply(m, f, a)
+    erlang::apply(m, f, a)
+  end
+
+  def update_state(key, value)
+    {:object, module_name, state} = self
+    {:object, module_name, state.update(key, value)}
+  end
+
+  def put_state(key, value)
+    {:object, module_name, state} = self
+    {:object, module_name, state.put(key, value)}
+  end
+
+  def merge_state(new_state)
+    {:object, module_name, state} = self
+    {:object, module_name, state.merge(new_state)}
   end
 end

@@ -17,11 +17,11 @@ module uiro_list
     false
   end
 
-  def self.index_of(item, [item|_], index)
+  def self.index_of(item, [item, *_], index)
     index
   end
 
-  def self.index_of(item, [_|tl], index)
+  def self.index_of(item, [_, *tl], index)
     index_of(item, tl, index + 1)
   end
 
@@ -34,7 +34,7 @@ module uiro_list
   end
 
   def conj(item)
-    [item|self]
+    [item, *self]
   end
 
   def add_all(lis)
@@ -45,12 +45,16 @@ module uiro_list
     self ++ lis
   end
 
+  def to_list()
+    self
+  end
+
   def to_tuple()
-    list_to_tuple(self)
+    erlang::list_to_tuple(self)
   end
 
   def to_binary()
-    list_to_binary(self)
+    erlang::list_to_binary(self)
   end
 
   def drop_last()
@@ -62,7 +66,7 @@ module uiro_list
   end
 
   def first()
-    [head|_] = self
+    [head, *_] = self
     head
   end
 
@@ -96,5 +100,15 @@ module uiro_list
 
   def length()
     erlang::length(self)
+  end
+
+  def send_to(actor)
+    each do |item|
+      actor ! item
+    end
+  end
+
+  def sum()
+    lists::sum(self)
   end
 end

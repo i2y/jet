@@ -1,6 +1,6 @@
 module Enumerable
   def select(func)
-    self.reduce([]) {|item, acc|
+    reduce([]) {|item, acc|
       if func.(item)
         acc ++ [item]
       else
@@ -10,7 +10,7 @@ module Enumerable
   end
 
   def filter(func)
-    self.reduce([]) {|item, acc|
+    reduce([]) {|item, acc|
       if func.(item)
         acc ++ [item]
       else
@@ -20,7 +20,7 @@ module Enumerable
   end
 
   def reject(func)
-    self.reduce([]) {|item, acc|
+    reduce([]) {|item, acc|
       if func.(item)
         acc
       else
@@ -30,19 +30,19 @@ module Enumerable
   end
 
   def map(func)
-    self.reduce([]) {|item, acc|
+    reduce([]) {|item, acc|
       acc ++ [func.(item)]
     }
   end
 
   def collect(func)
-    self.reduce([]) {|item, acc|
+    reduce([]) {|item, acc|
       acc ++ [func.(item)]
     }
   end
 
   def min(func)
-    self.reduce(:infinity) {|item, acc|
+    reduce(:infinity) {|item, acc|
       match func.(acc, item)
         case -1
           0
@@ -55,7 +55,7 @@ module Enumerable
   end
 
   def min()
-    self.reduce(:infinity) {|item, acc|
+    reduce(:infinity) {|item, acc|
       if acc <= item
         acc
       else
@@ -65,7 +65,7 @@ module Enumerable
   end
 
   def unique()
-    self.reduce([]) {|item, acc|
+    reduce([]) {|item, acc|
       if acc.index_of(item)
         acc
       else
@@ -75,11 +75,11 @@ module Enumerable
   end
 
   def each(func)
-    self.reduce([]) {|item, acc|
+    reduce([]) {|item, acc|
       func.(item)
     }
   end
-  
+
   protocol
   def reduce(acc, func)
     nil

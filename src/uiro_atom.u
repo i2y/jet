@@ -1,5 +1,5 @@
 module uiro_atom
   def to_list()
-    atom_to_list(self)
+    erlang::atom_to_list(self)
   end
 end

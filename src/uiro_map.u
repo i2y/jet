@@ -4,51 +4,63 @@ module uiro_map
   def reduce(acc, func)
     lists::foldl(func, acc, maps::values(self))
   end
-  
+
   def is_key?(key)
     maps::is_key(key, self)
   end
-  
+
   def keys()
     maps::keys(self)
   end
-  
+
   def values()
     maps::values(self)
   end
-  
+
+  def map_item(func)
+    maps::map(func, self)
+  end
+
   def merge(other)
     maps::marge(self, other)
   end
-  
+
   def put(key, value)
     maps::put(key, value, self)
   end
-  
+
+  def get(key, default_value)
+    maps::get(key, self, default_value)
+  end
+
+  def get(key)
+    maps::get(key, self)
+  end
+
   def remove(key)
     maps::remove(key, self)
   end
-  
+
   def size()
     maps::size(self)
   end
-  
+
   def to_list()
     maps::to_list(self)
   end
-  
+
   def update(key, value)
     maps::update(key, value, self)
   end
-  
+
   def values()
     maps::values(self)
   end
-  
+
   def with(keys)
     maps::with(keys, self)
   end
-  
+
   def without(keys)
     maps::without(keys, self)
   end

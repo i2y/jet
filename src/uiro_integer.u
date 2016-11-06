@@ -1,19 +1,30 @@
 module uiro_integer
   include Numeric
 
-  def times(func)
+  def times(func) if is_function(func, 0)
     if self == 0
       nil
     else if self == 1
       func.()
     else
       func.()
-      times(self - 1, func)
+      (self - 1).times(func)
+    end
+  end
+
+  def times(func) if is_function(func, 1)
+    if self == 0
+      nil
+    else if self == 1
+      func.(1)
+    else
+      func.(self)
+      (self - 1).times(func)
     end
   end
 
   def to_list()
-    integer_to_list(self)
+    erlang::integer_to_list(self)
   end
 
   def pipe_to(other)

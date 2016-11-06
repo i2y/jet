@@ -1,4 +1,4 @@
-class Map
+class ReduceByKey
   include TaskBase
 
   def initialize(func)
@@ -11,21 +11,23 @@ class Map
      task_list: task_list}
   end
 
-  def self.map(next_actor, func)
+  def self.reduce_by_key(next_actor, func)
     receive
       case :eos
         next_actor ! :eos
       case value
-        next_actor ! func.(value)
-        map(next_actor, func)
+        next_actor ! value.map_item do |key ,values|
+          func.(key, values)
+        end
+        reduce_by_key(next_actor, func)
     end
   end
 
   def spawn_actor(next_actor)
-    spawn(__name__, :map, [next_actor, @func])
+    spawn(__name__, :reduce_by_key, [next_actor, @func])
   end
 
   def update_task_list(task_list)
-    new Map(@func, task_list)
+    new ReduceByKey(@func, task_list)
   end
 end

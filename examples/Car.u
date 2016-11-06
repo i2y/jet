@@ -2,12 +2,14 @@ class Car
   include parent, parent2
 
   def initialize()
-    {name: "aiueo",
+    {name: "car1",
      speed: 100}
   end
 
   def self.test()
-    1000
+    "Elixir.IO"::inspect(1000)
+    car = new Car()
+    car.class_info().display()
   end
 
   def inspect()

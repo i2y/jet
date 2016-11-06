@@ -9,7 +9,7 @@ NEWLINE = [\n\r]
 STR = "(\\x[0-9a-fA-F]+;|\\.|[^"])*"
 LAST_PIPELINE = \|>>
 PIPELINE = \|>
-CONS = \|
+PIPE = \|
 OPBITAND = band
 OPBITOR  = bor
 OPBITXOR = bxor
@@ -104,7 +104,7 @@ Rules.
 {COMMENT}+ : skipToken. % {token, {comment, TokenLine, TokenChars}}.
 {LAST_PIPELINE} : {token, {last_pipeline, TokenLine}}.
 {PIPELINE} : {token, {pipeline, TokenLine}}.
-{CONS} : {token, {cons, TokenLine}}.
+{PIPE} : {token, {pipe, TokenLine}}.
 {OPBITAND} : {token, {op_bitand, TokenLine}}.
 {OPBITOR} : {token, {op_bitor, TokenLine}}.
 {OPBITXOR} : {token, {op_bitxor, TokenLine}}.

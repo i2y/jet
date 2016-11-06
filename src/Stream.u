@@ -1,0 +1,69 @@
+module Stream
+  def p_map(func)
+    pipe_to(new PMap(func))
+  end
+
+  def p_flat_map(func)
+    pipe_to(new PFlatMap(func))
+  end
+
+  def p_each(func)
+    pipe_to(new PEach(func))
+  end
+
+  def p_filter(func)
+    pipe_to(new PFilter(func))
+  end
+
+  def map(func)
+    pipe_to(new Map(func))
+  end
+
+  def flat_map(func)
+    pipe_to(new FlatMap(func))
+  end
+
+  def call(func)
+    pipe_to(new Call(func))
+  end
+
+  def reduce(acc, func)
+    pipe_to(new Reduce(acc, func))
+  end
+
+  def reduce_by_key(func)
+    pipe_to(new ReduceByKey(func))
+  end
+
+  def group_by(func)
+    pipe_to(new Reduce({}) do |acc, value|
+      key = func.(value)
+      values = acc.get(key, [])
+      acc.put(key, [value, *values])
+    end)
+  end
+
+  def flat()
+    pipe_to(new FlatMap do |item|
+      item.to_list
+    end)
+  end
+
+  def p_flat()
+    pipe_to(new PFLatMap do |item|
+     item.to_list
+    end)
+  end
+
+  def filter(func)
+    pipe_to(new Filter(func))
+  end
+
+  def split(func)
+    pipe_to(new Split(func))
+  end
+
+  def to_list(func)
+    pipe_to(new ToList(func))
+  end
+end

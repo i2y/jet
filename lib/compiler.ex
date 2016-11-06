@@ -103,8 +103,8 @@ defmodule Compiler do
                      {:name, module_name_line, module_name},
                      func_names]) do
     attribute(set_pos(atom(:import), line),
-                  [set_pos(atom(module_name), module_name_line),
-                   list(Enum.map(func_names, &Compiler.to_erl_syntax(&1)))])
+              [set_pos(atom(module_name), module_name_line),
+              list(Enum.map(func_names, &Compiler.to_erl_syntax(&1)))])
     |> set_pos(line)
   end
 
@@ -155,37 +155,51 @@ defmodule Compiler do
     to_erl_syntax([:name, {:name, line, name}])
   end
 
-  def to_erl_syntax([:func, {:name, line, func_name}, args, body]) do
+  def to_erl_syntax([:func, {:name, line, func_name}, args, body, context]) do
+    Process.put(:context, [context|Process.get(:context)])
     clause1 = clause(Enum.map(args, &Compiler.pattern_to_erl_syntax(&1)),
                      [],
                      Enum.map(body, &Compiler.to_erl_syntax(&1)))
+    Process.put(:context, tl(Process.get(:context)))
     function(atom(func_name), [set_pos(clause1, line)])
     |> set_pos(line)
   end
 
-  def to_erl_syntax([:func, {:name, line, func_name}, args, guards, body]) do
+  def to_erl_syntax([:func, {:name, line, func_name}, args, guards, body, context]) do
+    Process.put(:context, [:guard, context | Process.get(:context)])
+    guards_erl = Enum.map(guards, &Compiler.to_erl_syntax(&1))
+    Process.put(:context, tl(Process.get(:context)))
     clause1 = clause(Enum.map(args, &Compiler.pattern_to_erl_syntax(&1)),
-                     Enum.map(guards, &Compiler.to_erl_syntax(&1)),
+                     guards_erl,
                      Enum.map(body, &Compiler.to_erl_syntax(&1)))
+    Process.put(:context, tl(Process.get(:context)))
     function(atom(func_name), [set_pos(clause1, line)])
     |> set_pos(line)
   end
 
-  def to_erl_syntax([:func, clauses]) do
-    fun_expr(Enum.map(clauses, &Compiler.to_erl_syntax(&1)))
+  def to_erl_syntax([:func, clauses, context]) do
+    Process.put(:context, [context|Process.get(:context)])
+    retval = fun_expr(Enum.map(clauses, &Compiler.to_erl_syntax(&1)))
+    Process.put(:context, tl(Process.get(:context)))
   end
 
-  def to_erl_syntax([:func, args, body]) do
+  def to_erl_syntax([:func, args, body, context]) do
+    Process.put(:context, [context|Process.get(:context)])
     clause1 = clause(Enum.map(args, &Compiler.pattern_to_erl_syntax(&1)),
                      [],
                      Enum.map(body, &Compiler.to_erl_syntax(&1)))
+    Process.put(:context, tl(Process.get(:context)))
     fun_expr([clause1])
   end
 
-  def to_erl_syntax([:func, args, guards, body]) do
+  def to_erl_syntax([:func, args, guards, body, context]) do
+    Process.put(:context, [:guard, context | Process.get(:context)])
+    guards_erl = Enum.map(guards, &Compiler.to_erl_syntax(&1))
+    Process.put(:context, tl(Process.get(:context)))
     clause1 = clause(Enum.map(args, &Compiler.pattern_to_erl_syntax(&1)),
-                     Enum.map(guards, &Compiler.to_erl_syntax(&1)),
+                     guards_erl,
                      Enum.map(body, &Compiler.to_erl_syntax(&1)))
+    Process.put(:context, tl(Process.get(:context)))
     fun_expr([clause1])
   end
 
@@ -231,8 +245,11 @@ defmodule Compiler do
   end
 
   def to_erl_syntax([:case_clause, patterns, guards, body]) do
+    Process.put(:context, [:guard|Process.get(:context)])
+    guards_erl = Enum.map(guards, &Compiler.to_erl_syntax(&1))
+    Process.put(:context, tl(Process.get(:context)))
     clause(Enum.map(patterns, &Compiler.pattern_to_erl_syntax(&1)),
-           Enum.map(guards, &Compiler.to_erl_syntax(&1)),
+           guards_erl,
            Enum.map(body, &Compiler.to_erl_syntax(&1)))
   end
 
@@ -582,8 +599,7 @@ defmodule Compiler do
     |> set_pos(line)
   end
 
-  def to_erl_syntax([{:pipeline, line}, first_arg, second_arg]) do
-    # [{:call_method, line}, first_arg, {:name, line, :pipe_to}, [second_arg]]
+  def to_erl_syntax([{:pipe, line}, first_arg, second_arg]) do
     [{:call_method, line}, first_arg, {:name, line, :pipe_to},
      [[{:call_method, line}, second_arg, {:name, line, :to_task}, []]]]
     |> to_erl_syntax()
@@ -656,11 +672,12 @@ defmodule Compiler do
   end
 
   def to_erl_syntax([:ref_attr, {:name, line, name}]) do
-    operator = module_qualifier(atom(:maps), atom(:get))
-    application(operator,
+    maps_get_operator = module_qualifier(atom(:maps), atom(:get))
+    tuple_elem_operator = module_qualifier(atom(:erlang), atom(:element))
+    application(maps_get_operator,
                 [atom(name),
-                 application(operator,
-                             [atom(:__state__),
+                 application(tuple_elem_operator,
+                             [integer(3),
                               variable(:self) |> set_pos(line)])
                  |> set_pos(line)])
     |> set_pos(line)
@@ -749,6 +766,25 @@ defmodule Compiler do
   def to_erl_syntax([{:binary_generator, line}, pattern, body]) do
     binary_generator(pattern_to_erl_syntax(pattern), to_erl_syntax(body))
     |> set_pos(line)
+  end
+
+  def to_erl_syntax([:apply_name, name, args]) do
+    context = hd(Process.get(:context))
+    if context == :instance do
+      [:func_ref, {:name, _, method_name}] = name
+      operator = module_qualifier(atom(:uiro_runtime), atom(:call_method))
+      compiled_args = Enum.map(args, &Compiler.to_erl_syntax(&1))
+      application(operator,
+                  [to_erl_syntax([:name, {:name, 0, :self}]),
+                  atom(method_name),
+                  list(compiled_args)])
+      |> set_pos(get_pos(operator))
+    else
+      operator = to_erl_syntax(name)
+      compiled_args = Enum.map(args, &Compiler.to_erl_syntax(&1))
+      application(operator, compiled_args)
+      |> set_pos(get_pos(operator))
+    end
   end
 
   def to_erl_syntax([:apply, expr, args]) do

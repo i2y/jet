@@ -16,8 +16,8 @@ class Call
       case :eos
         next_actor ! :eos
       case value
-        next_actor ! func.(value)
-        call(next_actor, func) # error message
+        func.(value, next_actor)
+        call(next_actor, func)
     end
   end
 

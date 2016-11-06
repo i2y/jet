@@ -1,37 +1,37 @@
 module kitchen
-def self.fridge2(food_list)
-  receive
-    case (sender, (:store, food))
-      sender ! (self(), :ok)
-      fridge2([food|food_list])
-    case (sender, (:take, food))
-      if lists::member(food, food_list)
-        sender ! (self(), (:ok, food))
-        fridge2(lists::delete(food, food_list))
-      else
-        sender ! (self(), :not_found)
-        fridge2(food_list)
-      end
+  def self.fridge2(food_list)
+    receive
+      case (sender, (:store, food))
+        sender ! (self(), :ok)
+        fridge2([food|food_list])
+      case (sender, (:take, food))
+        if lists::member(food, food_list)
+          sender ! (self(), (:ok, food))
+          fridge2(lists::delete(food, food_list))
+        else
+          sender ! (self(), :not_found)
+          fridge2(food_list)
+        end
+    end
   end
-end
-
-def self.store(pid, food)
-  pid ! (self(), (:store, food))
-  receive
-    case (pid, msg)
-      msg
+  
+  def self.store(pid, food)
+    pid ! (self(), (:store, food))
+    receive
+      case (pid, msg)
+        msg
+    end
   end
-end
 
-def self.take(pid, food)
-  pid ! (self(), (:take, food))
-  receive
-    case (pid, msg)
-      msg
+  def self.take(pid, food)
+    pid ! (self(), (:take, food))
+    receive
+      case (pid, msg)
+        msg
+    end
   end
-end
 
-def self.start(food_list)
-  spawn(__name__, :fridge2, [food_list])
-end
+  def self.start(food_list)
+    spawn(__name__, :fridge2, [food_list])
+  end
 end

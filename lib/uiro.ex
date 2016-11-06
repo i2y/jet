@@ -9,11 +9,12 @@ defmodule Uiro do
                                  |> Compiler.to_erl_syntax_list(%{}, [])
                                  |> Compiler.to_erl_form_list
     binary_to_path({module_name, binary}, Path.dirname(module_file_path))
-    validate_protocol(:erlang.list_to_atom(module_name))
     if options[:run] do
       [module_name, func_name] = String.split(options[:run], "::")
       apply(String.to_atom(module_name), String.to_atom(func_name), [])
     end
+    # TODO
+    # validate_protocol(:erlang.list_to_atom(module_name))
   end
 
   defp binary_to_path({module_name, binary}, compile_path) do

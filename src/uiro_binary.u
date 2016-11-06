@@ -1,13 +1,5 @@
 module uiro_binary
-  def size()
-    erlang::size(self)
-  end
-
-  def iolist_size()
-    erlang::iolist_size(self)
-  end
-
   def to_list()
-    binary_to_list(self)
+    erlang::binary_to_list(self)
   end
 end

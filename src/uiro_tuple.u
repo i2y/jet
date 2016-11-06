@@ -7,26 +7,26 @@ module uiro_tuple
   end
 
   def nth(n)
-    element(n, self)
+    erlang::element(n, self)
   end
 
   def set(n, item)
-    setelement(n, self, item)
+    erlang::setelement(n, self, item)
   end
 
   def size()
-    tuple_size(self)
+    erlang::tuple_size(self)
   end
 
   def append(item)
-    erlang::append_element(self, item) 
+    erlang::append_element(self, item)
   end
 
   def add(item)
-    erlang::append_element(self, item) 
+    erlang::append_element(self, item)
   end
 
   def to_list()
-    tuple_to_list(self)
+    erlang::tuple_to_list(self)
   end
 end
