@@ -134,13 +134,6 @@ sample_list.select {|item| item > 1}
            # => [4, 6]
 ```
 
-### Pipe operator
-```ruby
-[1, 2, 3] |> lists::append([4, 5, 6])
-          |> lists::append([7, 8, 9])
-# => [1, 2, 3, 4, 5, 6, 7, 8, 9]
-```
-
 ### Other supported features
 - Tail recursion optimization
 - Pattern matching
