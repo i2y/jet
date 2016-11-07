@@ -1,4 +1,4 @@
-class ActorSample
+class SampleActor
   include Actor
 
   def print()

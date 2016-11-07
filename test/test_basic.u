@@ -168,10 +168,10 @@ module test_basic
 
   test
   def self.test_actor()
-      sample = new ActorSample()
+      sample = new SampleActor()
       sample.print()
       sample.print()
-      sample2 = new ActorSample()
+      sample2 = new SampleActor()
       sample2.print()
       sample.stop()
       sample2.print()
@@ -180,21 +180,21 @@ module test_basic
 
   test
   def self.test_actor_2()
-      actor = new ActorSample()
+      actor = new SampleActor()
       actor.async().print()
       actor.stop()
   end
 
   test
   def self.test_actor_3()
-      actor = new ActorSample()
+      actor = new SampleActor()
       actor.call(:print, [])
       actor.stop()
   end
 
   test
   def self.test_actor_4()
-      actor = new ActorSample()
+      actor = new SampleActor()
       actor.future.print
       actor.future.print
       actor.stop()
