@@ -1,14 +1,16 @@
-class ActorAsyncWrapper
+class ActorFutureWrapper
   def initialize(instance_of_gen_server)
     {obj: instance_of_gen_server}
   end
 
   def method_missing(method_name, args)
-    @obj.send(method_name, args)
+    request(method_name, args)
   end
 
-  def send(method_name, args)
-    @obj.send(method_name, args)
+  def request(method_name, args)
+    new Future do
+      @obj.call(method_name, args)
+    end
   end
 
   def stop()

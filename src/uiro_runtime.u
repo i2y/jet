@@ -120,10 +120,16 @@ module uiro_runtime
   end
 
   def self.new_object(module_name, args)
-    %object(__class__ = module_name,
-            __state__ = call_method(%object(__class__ = module_name,
-                                            __state__ = {}),
-                                    :initialize,
-                                    args))
+    obj = call_method(%object(__class__ = module_name,
+                              __state__ = {}),
+                      :initialize,
+                      args)
+    match obj
+      case %object()
+        obj
+      case _
+        %object(__class__ = module_name,
+                __state__ = obj)
+    end
   end
 end

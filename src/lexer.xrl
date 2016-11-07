@@ -84,7 +84,7 @@ YIELD = yield
 RETURN = return
 FOR = for
 IN = in
-FROM = from
+%FROM = from
 OPAND = and
 OPOR = or
 OPXOR = xor
@@ -180,7 +180,7 @@ Rules.
 {YIELD} : {token, {yield, TokenLine}}.
 {FOR} : {token, {for, TokenLine}}.
 {IN} : {token, {in, TokenLine}}.
-{FROM} : {token, {from, TokenLine}}.
+%{FROM} : {token, {from, TokenLine}}.
 {OPAND} : {token, {op_and, TokenLine}}.
 {OPOR} : {token, {op_or, TokenLine}}.
 {OPXOR} : {token, {op_xor, TokenLine}}.

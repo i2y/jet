@@ -1,6 +1,6 @@
 module Kernel
   def display()
-    io::format("~p", [self])
+    io::format("~p~n", [self])
   end
 
   def send_to(actor)

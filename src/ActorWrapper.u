@@ -26,4 +26,8 @@ class ActorWrapper
   def async()
     new ActorAsyncWrapper(@obj)
   end
+
+  def future()
+    new ActorFutureWrapper(@obj)
+  end
 end

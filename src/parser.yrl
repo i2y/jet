@@ -16,7 +16,6 @@ Nonterminals
   export_names
   export_name
   export_all_stmt
-  import_stmt
   include_stmt
   module_names
   generic_attr_stmt
@@ -144,7 +143,6 @@ Terminals
   at
   amp
   backslash
-  import_keyword
   export_keyword
   include_keyword
   export_all
@@ -169,7 +167,6 @@ Terminals
   patterns
   for
   in
-  from
   op_and
   op_or
   op_xor
@@ -254,7 +251,7 @@ class_toplevel_stmt -> class_method_stmt : '$1'.
 %module_attr_stmt -> module_stmt : '$1'.
 %module_attr_stmt -> export_stmt : '$1'.
 %module_attr_stmt -> export_all_stmt : '$1'.
-module_attr_stmt -> import_stmt : '$1'.
+%module_attr_stmt -> import_stmt : '$1'.
 module_attr_stmt -> include_stmt : '$1'.
 module_attr_stmt -> behavior_stmt : '$1'.
 module_attr_stmt -> record_def_stmt : '$1'.
@@ -265,8 +262,8 @@ export_stmt -> export_keyword export_names : ['$1', '$2'].
 
 export_all_stmt -> export_all : ['$1'].
 
-import_stmt -> from name import_keyword export_names
-             : [{from_import, line_of('$1')}, '$2', '$4'].
+%import_stmt -> from name import_keyword export_names
+%             : [{from_import, line_of('$1')}, '$2', '$4'].
 
 behavior_stmt -> behavior name : ['$1', '$2'].
 

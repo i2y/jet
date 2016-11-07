@@ -12,10 +12,12 @@ defmodule Uiro.Mixfile do
      Uiro is a simple OOP, dynamically typed, functional language that runs on the Erlang virtual machine (BEAM).
      Uiro's sytnax is Ruby-like syntax. Uiro also got an influence from Python and Mochi.
      """,
-     deps: deps]
+     deps: deps,
+     package: package]
   end
 
   defp deps do
+    # [{:erlport, github: "hdima/erlport"}]
     []
   end
 

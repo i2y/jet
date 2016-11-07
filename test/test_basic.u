@@ -49,14 +49,6 @@ module test_basic
     end
   end
 
-  #test
-  #def self.fafa()
-  #  "fafafafafafaf".display
-  #  "aaaaaaaaaaaaaa".display
-  #  "Elixir.String"::length(<<"aiueo">>).display
-  #  "bbbbbbbbbbbbbb".display
-  #end
-
   test
   def self.test_module()
     erlang = new Module(:erlang)
@@ -172,5 +164,39 @@ module test_basic
       .run()
       .get()
       .display()
+  end
+
+  test
+  def self.test_actor()
+      sample = new ActorSample()
+      sample.print()
+      sample.print()
+      sample2 = new ActorSample()
+      sample2.print()
+      sample.stop()
+      sample2.print()
+      sample2.stop()
+  end
+
+  test
+  def self.test_actor_2()
+      actor = new ActorSample()
+      actor.async().print()
+      actor.stop()
+  end
+
+  test
+  def self.test_actor_3()
+      actor = new ActorSample()
+      actor.call(:print, [])
+      actor.stop()
+  end
+
+  test
+  def self.test_actor_4()
+      actor = new ActorSample()
+      actor.future.print
+      actor.future.print
+      actor.stop()
   end
 end
