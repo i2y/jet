@@ -144,22 +144,54 @@ sample_list.select {|item| item > 1}
 - Class inheritance
 - Macro definition
 
+## Requirements
+- Erlang/OTP >= 18.0
+- Elixir >= 1.1
+
 ## Installation
-TODO
+```sh
+$ git clone https://github.com/i2y/uiro.git
+$ cd uiro
+$ mix archive.build
+$ mix archive.install
+$ mix escript.build
+$ cp uiro <any path>
+```
 
 ## Usage
-Mixfile example
+### Command
+Compiling:
+```sh
+$ ls
+Foo.u
+$ uiro Foo.u
+$ ls
+Foo.beam Foo.u
+```
+
+Compiling and Executing:
+```sh
+$ cat Foo.u
+module Foo
+  def self.bar()
+    123.display()
+  end
+end
+$ manju -r Foo::bar Foo.u
+123
+```
+
+### Mix
+mix.exs file example:
 ```elixir
-defmodule Uiro.Mixfile do
+defmodule MyApp.Mixfile do
   use Mix.Project
 
   def project do
-    [app: :uiro,
-     version: "0.0.1",
-     elixir: "~> 1.1",
-     compilers: [:uiro] ++ Mix.compilers,
-     escript: [main_module: Uiro],
-     docs: [readme: true, main: "README.md"]]
+    [app: :my_app,
+     version: "1.0.0",
+     compilers: [:uiro|Mix.compilers],
+     deps: [{:uiro, git: "https://github.com/i2y/uiro.git"}]]
   end
 end
 ```
