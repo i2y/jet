@@ -4,7 +4,7 @@ Uiro is a simple OOP, dynamically typed, functional language that runs on the [E
 Uiro's syntax is [Ruby](https://www.ruby-lang.org)-like syntax.
 
 Uiro has actor library like [Celluloid](https://github.com/celluloid/celluloid) that supports synchronous message passing and asynchronous message passing. For the examples, please see [SampleActor.u](https://github.com/i2y/uiro/blob/master/src/SampleActor.u) and [test_basic.u](https://github.com/i2y/uiro/blob/master/test/test_basic.u).
-Uiro also has a stream processing library like [streem](). For the examples, please see [test_basic.u](https://github.com/i2y/uiro/blob/master/test/test_basic.u).
+Uiro also has a stream processing library like [Streem](https://github.com/matz/streem). For the examples, please see [test_basic.u](https://github.com/i2y/uiro/blob/master/test/test_basic.u).
 
 ## Language features
 ### Class definition
