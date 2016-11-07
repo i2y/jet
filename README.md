@@ -1,9 +1,10 @@
 # Uiro
 
 Uiro is a simple OOP, dynamically typed, functional language that runs on the [Erlang](http://www.erlang.org) virtual machine (BEAM).
-Uiro's syntax is [Ruby](https://www.ruby-lang.org)-like syntax. Uiro also got an influence from [Python](https://www.python.org) and [Mochi](https://github.com/i2y/mochi).
+Uiro's syntax is [Ruby](https://www.ruby-lang.org)-like syntax.
 
-Its interpreter is written in [Elixir](http://elixir-lang.org). The interpreter translates a program written in Uiro to Erlang's AST / bytecode.
+Uiro has actor library like [Celluloid](https://github.com/celluloid/celluloid) that supports synchronous message passing and asynchronous message passing. For the examples, please see [SampleActor.u](https://github.com/i2y/uiro/blob/master/src/SampleActor.u) and [test_basic.u](https://github.com/i2y/uiro/blob/master/test/test_basic.u).
+Uiro also has a stream processing library like [streem](). For the examples, please see [test_basic.u](https://github.com/i2y/uiro/blob/master/test/test_basic.u).
 
 ## Language features
 ### Class definition
@@ -14,7 +15,7 @@ class Car
     {name: "foo",
      speed: 100}
   end
-  
+
   def inspect()
     "Elixir.IO"::inspect(@name)
     "Elixir.IO"::inspect(@speed)
@@ -27,7 +28,7 @@ Enumerable.u
 ```ruby
 module Enumerable
   def select(func)
-    self.reduce([]) {|item, acc|
+    reduce([]) {|item, acc|
       if func.(item)
         acc ++ [item]
       else
@@ -35,9 +36,9 @@ module Enumerable
       end
     }
   end
-  
+
   def filter(func)
-    self.reduce([]) {|item, acc|
+    reduce([]) {|item, acc|
       if func.(item)
         acc ++ [item]
       else
@@ -45,9 +46,9 @@ module Enumerable
       end
     }
   end
-  
+
   def reject(func)
-    self.reduce([]) {|item, acc|
+    reduce([]) {|item, acc|
       if func.(item)
         acc
       else
@@ -55,21 +56,21 @@ module Enumerable
       end
     }
   end
-  
+
   def map(func)
-    self.reduce([]) {|item, acc|
+    reduce([]) {|item, acc|
       acc ++ [func.(item)]
     }
   end
-  
+
   def collect(func)
-    self.reduce([]) {|item, acc|
+    reduce([]) {|item, acc|
       acc ++ [func.(item)]
     }
   end
-  
+
   def min(func)
-    self.reduce(:infinity) {|item, acc|
+    reduce(:infinity) {|item, acc|
       match func.(acc, item)
         case -1
           0
@@ -80,9 +81,9 @@ module Enumerable
       end
     }
   end
-  
+
   def min()
-    self.reduce(:infinity) {|item, acc|
+    reduce(:infinity) {|item, acc|
       if acc <= item
         acc
       else
@@ -90,9 +91,9 @@ module Enumerable
       end
     }
   end
-  
+
   def unique()
-    self.reduce([]) {|item, acc|
+    reduce([]) {|item, acc|
       if acc.index_of(item)
         acc
       else
@@ -100,9 +101,9 @@ module Enumerable
       end
     }
   end
-  
+
   def each(func)
-    self.reduce([]) {|item, acc|
+    reduce([]) {|item, acc|
       func.(item)
     }
   end
@@ -114,11 +115,11 @@ SampleList.u
 ```ruby
 class SampleList
   include Enumerable
-  
+
   def initialize(items)
     {items: items}
   end
-  
+
   def reduce(acc, func)
     lists::foldl(func, acc, @items)
   end
@@ -153,7 +154,7 @@ sample_list.select {|item| item > 1}
 TODO
 
 ## Usage
-Mixfile example 
+Mixfile example
 ```elixir
 defmodule Uiro.Mixfile do
   use Mix.Project
