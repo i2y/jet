@@ -1,0 +1,13 @@
+class ActorSample
+  include Actor
+
+  def print()
+    current_val = attr(:val)
+    if current_val == :undefined
+      attr(:val, 10).display()
+    else
+      attr(:val, current_val + 10)
+      attr(:val).display()
+    end
+  end
+end
