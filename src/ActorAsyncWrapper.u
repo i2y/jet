@@ -1,0 +1,15 @@
+class ActorAsyncWrapper:
+    def __init__(self, instance_of_gen_server):
+        self.__put__('obj', instance_of_gen_server)
+
+    def __method_missing__(self, method_name, args):
+        self.obj.send(method_name, args)
+
+    def send(self, method_name, args):
+        self.obj.send(method_name, args)
+
+    def stop(self):
+        self.obj.stop()
+
+    def stop(self, reason, timeout):
+        self.obj.stop(reason, timeout)

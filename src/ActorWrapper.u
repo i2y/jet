@@ -1,0 +1,29 @@
+class ActorWrapper
+  def initialize(instance_of_gen_server)
+    {obj: instance_of_gen_server}
+  end
+
+  def method_missing(method_name, args)
+    @obj.call(method_name, args)
+  end
+
+  def call(method_name, args)
+    @obj.call(method_name, args)
+  end
+
+  def call(method_name, args, timeout)
+    @obj.call(method_name, args, timeout)
+  end
+
+  def stop()
+    @obj.stop()
+  end
+
+  def stop(reason, timeout)
+    @obj.stop(reason, timeout)
+  end
+
+  def async()
+    new ActorAsyncWrapper(@obj)
+  end
+end

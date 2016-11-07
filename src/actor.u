@@ -1,0 +1,62 @@
+behavior gen_server
+
+def start(module_name):
+    (ok, pid) = gen_server::start(__name__, [module_name], [])
+    {'pid': pid}
+
+def start_link(module_name):
+    (ok, pid) = gen_server::start_link(__name__, [module_name], [])
+    {'pid': pid}
+
+def init([module_name]):
+    ('ok', [module_name])
+
+def handle_call((receiver, method_name, args), _from, state):
+    ('object', module_name, _) = receiver
+    reply_value = apply(module_name, method_name, [receiver|args])
+    ('reply', reply_value, state)
+
+def handle_cast((receiver, method_name, args), state):
+    ('object', module_name, _) = receiver
+    apply(module_name, method_name, [receiver|args])
+    ('noreply', state)
+
+def handle_info(message, state):
+    ('noreply', state)
+
+def terminate(reason, state):
+    [module_name] = state
+    ('object', module_name, {}).__terminate__(reason)
+
+def stop(self):
+    gen_server::stop(self.pid)
+
+def stop(self, reason, timeout):
+    gen_server::stop(self.pid, reason, timeout)
+
+def code_change(old_version, state, extra):
+    ('ok', state)
+
+def call(self, method_name, args):
+    gen_server::call(self.pid, (self, method_name, args))
+
+def call(self, method_name, args, timeout):
+    gen_server::call(self.pid, (self, method_name, args), timeout)
+
+def send(self, method_name, args):
+    gen_server::cast(self.pid, (self, method_name, args))
+
+def attr(self, name, value):
+    erlang::put(name, value)
+
+def attr(self, name):
+    erlang::get(name)
+
+def __init__(self):
+    ('object', module_name, _) = self
+    new ActorWrapper(('object',
+                      module_name,
+                      actor::start(module_name)))
+
+def __terminate__(self, reason):
+    'ok'
