@@ -10,4 +10,8 @@ class SampleActor
       attr(:val).display()
     end
   end
+
+  def value()
+    attr(:val)
+  end
 end

@@ -197,6 +197,8 @@ module test_basic
       actor = new SampleActor()
       actor.future.print
       actor.future.print
+      future = actor.future.value
+      test::assert_eq(future.get, 20)
       actor.stop()
   end
 end

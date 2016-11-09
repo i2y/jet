@@ -47,6 +47,10 @@ module Kernel
     erlang::spawn(n, m, f, a)
   end
 
+  def self()
+    erlang::self()
+  end
+
   def apply(f, a)
     erlang::apply(f, a)
   end
