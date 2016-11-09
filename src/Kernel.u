@@ -73,4 +73,14 @@ module Kernel
     {:object, module_name, state} = self
     {:object, module_name, state.merge(new_state)}
   end
+
+  def clone()
+    {:object, module_name, state} = self
+    {:object, module_name, state}
+  end
+
+  def clone(new_state)
+    {:object, module_name, state} = self
+    {:object, module_name, state.merge(new_state)}
+  end
 end
