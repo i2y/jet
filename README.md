@@ -177,7 +177,7 @@ module Foo
     123.display()
   end
 end
-$ manju -r Foo::bar Foo.u
+$ uiro -r Foo::bar Foo.u
 123
 ```
 
