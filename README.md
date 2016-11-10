@@ -1,13 +1,91 @@
 # Uiro
+> "I thought of objects being like biological cells and/or individual
+> computers on a network, only able to communicate with messages"
+> _--Alan Kay, creator of Smalltalk, on the meaning of "object oriented programming"_
+
 
 Uiro is a simple OOP, dynamically typed, functional language that runs on the [Erlang](http://www.erlang.org) virtual machine (BEAM).
 Uiro's syntax is [Ruby](https://www.ruby-lang.org)-like syntax.
 
+Uiro was inspired by [Reia](https://github.com/tarcieri/reia) and [Celluloid](https://github.com/celluloid/celluloid).
 Uiro has actor library like [Celluloid](https://github.com/celluloid/celluloid) that supports synchronous message passing and asynchronous message passing. For the examples, please see [SampleActor.u](https://github.com/i2y/uiro/blob/master/src/SampleActor.u) and [test_basic.u](https://github.com/i2y/uiro/blob/master/test/test_basic.u).
 
 Uiro also has a stream processing library like [Streem](https://github.com/matz/streem). For the examples, please see [test_basic.u](https://github.com/i2y/uiro/blob/master/test/test_basic.u).
 
 ## Language features
+### Builtin Types
+```ruby
+### Numbers
+
+49  # integer
+4.9 # float
+
+### Booleans
+
+true
+false
+
+### Atoms
+
+:foo
+
+### Lists
+
+list = [2, 3, 4]
+list2 = [1, *list] # => [1, 2, 3, 4]
+[1, 2, 3, *rest] = list2
+rest # => [4]
+
+list.append(5) # => [2, 3, 4, 5]
+list # => [2, 3, 4]
+
+
+list.select {|item| item > 2}
+    .map {lambda item: item * 2} # => [6, 8]
+list # => [2, 3, 4]
+
+# list comprehensions
+[n * 2 for n in list] # => [4, 6, 8]
+
+### Tuples
+
+tuple = {1, 2, 3}
+tuple.select {|item| item > 1}
+     .map {|item| item * 2} # => [4, 6]
+
+tuple.to_list # => [1, 2, 3]
+
+
+### Maps
+
+dict = {foo: 1, bar: 2}
+dict2 = dict.put(:baz, 3) # => {foo: 1, bar: 2, baz: 3}
+dict # => {foo: 1, bar: 2}
+dict.get(:baz, 100) # => 100
+
+### Strings (Lists)
+
+"Abc"
+
+### Binaries
+
+<<1, 2, 3>>
+<<"abc">>
+<<1 , 2, x>> = <<1, 2, 3>>
+x # => 3
+
+### Anonymous functions (Blocks)
+
+add = {|x, y| x + y}
+add(40, 9) # => 49
+
+multiply = do |x, y|
+  x * y
+end
+
+multiply(7, 7) # => 49
+```
+
 ### Class definition
 Car.u
 ```ruby
@@ -17,9 +95,9 @@ class Car
      speed: 100}
   end
 
-  def inspect()
-    "Elixir.IO"::inspect(@name)
-    "Elixir.IO"::inspect(@speed)
+  def display()
+    @name.display()
+    @speed.display()
   end
 end
 ```
