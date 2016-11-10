@@ -93,6 +93,8 @@ x # => 3
 Car.u
 ```ruby
 class Car
+  # On uiro, state of an instance is immutable.
+  # The initialize method returns initial state of an instance.
   def initialize()
     {name: "foo",
      speed: 100}
