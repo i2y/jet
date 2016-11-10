@@ -67,12 +67,6 @@ dict.get(:baz, 100) # => 100
 
 "Abc"
 
-### Binaries
-
-<<1, 2, 3>>
-<<"abc">>
-<<1 , 2, x>> = <<1, 2, 3>>
-x # => 3
 
 ### Anonymous functions (Blocks)
 
@@ -84,6 +78,15 @@ multiply = do |x, y|
 end
 
 multiply(7, 7) # => 49
+
+
+### Binaries
+
+<<1, 2, 3>>
+<<"abc">>
+<<1 , 2, x>> = <<1, 2, 3>>
+x # => 3
+
 ```
 
 ### Class definition
