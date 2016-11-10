@@ -41,7 +41,7 @@ list # => [2, 3, 4]
 
 
 list.select {|item| item > 2}
-    .map {lambda item: item * 2} # => [6, 8]
+    .map {|item| item * 2} # => [6, 8]
 list # => [2, 3, 4]
 
 # list comprehensions
@@ -203,6 +203,36 @@ class SampleList
     lists::foldl(func, acc, @items)
   end
 end
+```
+
+### Module attributes
+SampleList.mj:
+```ruby
+class SampleList
+  include Enumerable
+  @@author("i2y", "others") # a module attribute
+
+  def initialize(items)
+    {items: items}
+  end
+
+  obsolete # a module attribute and an annotation
+  def reduce(acc, func)
+    lists::foldl(func, acc, @items)
+  end
+
+  obsolete("since version 12")
+  def append(item)
+    @items.append(item)
+  end
+end
+
+# # usage:
+# list = new SampleList([1, 2, 3])
+# list.class_attr_values(:author)
+# # => [["i2y", "others"]]
+# list.class_attr_values(:obsolete)
+# # => [[(:reduce, 3)], ["since version 12", (:append, 2)]]
 ```
 
 ### Trailing closures (Trailing blocks)
