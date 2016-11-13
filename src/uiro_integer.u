@@ -4,7 +4,7 @@ module uiro_integer
   def times(func) if is_function(func, 0)
     if self == 0
       nil
-    else if self == 1
+    elsif self == 1
       func.()
     else
       func.()
@@ -15,7 +15,7 @@ module uiro_integer
   def times(func) if is_function(func, 1)
     if self == 0
       nil
-    else if self == 1
+    elsif self == 1
       func.(1)
     else
       func.(self)
