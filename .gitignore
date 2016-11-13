@@ -1,8 +1,11 @@
 /_build
 /cover
 /deps
+/.idea
 erl_crash.dump
 *.ez
 *.beam
 *.erl
+mix.lock
 uiro
+uiro.iml
