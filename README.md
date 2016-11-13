@@ -251,7 +251,6 @@ sample_list.select {|item| item > 1}
 ### Other supported features
 - Tail recursion optimization
 - Pattern matching
-- List comprehension
 
 ### Not supported features
 - Class inheritance
