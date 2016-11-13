@@ -70,7 +70,7 @@ FINALLY = finally
 RAISE = raise
 IF = if
 ELSE = else
-ELSEIF = elif
+ELSIF = elsif
 THEN = then
 MATCH = match
 CASE = case
@@ -165,7 +165,7 @@ Rules.
 {RAISE} : {token, {raise_keyword, TokenLine}}.
 {IF} : {token, {if_keyword, TokenLine}}.
 {ELSE} : {token, {else_keyword, TokenLine}}.
-{ELSEIF} : {token, {elseif_keyword, TokenLine}}.
+{ELSIF} : {token, {elsif, TokenLine}}.
 {THEN} : {token, {then, TokenLine}}.
 {MATCH} : {token, {match_keyword, TokenLine}}.
 {CASE} : {token, {case_keyword, TokenLine}}.
@@ -204,9 +204,9 @@ Rules.
 Erlang code.
 
 to_atom([$:|Chars]) ->
-    list_to_atom(Chars).
+		list_to_atom(Chars).
 
 to_integer(Chars) ->
-    SharpPos = string:chr(Chars, $$) - 1,
-    Base = list_to_integer(string:sub_string(Chars, 1, SharpPos)),
-    list_to_integer(string:sub_string(Chars, SharpPos + 2), Base).
+		SharpPos = string:chr(Chars, $$) - 1,
+		Base = list_to_integer(string:sub_string(Chars, 1, SharpPos)),
+		list_to_integer(string:sub_string(Chars, SharpPos + 2), Base).
