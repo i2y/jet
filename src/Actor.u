@@ -2,13 +2,19 @@ module Actor
   behavior gen_server
 
   def self.start(module_name)
-    {:ok, pid} = gen_server::start(__name__, [module_name], [])
-    {pid: pid}
+    gen_server::start(__name__, [module_name], [])
+  end
+
+  def self.start(proc_name, module_name)
+    gen_server::start({:local, proc_name}, __name__, [module_name], [])
   end
 
   def self.start_link(module_name)
-    {:ok, pid} = gen_server::start_link(__name__, [module_name], [])
-    {pid: pid}
+    gen_server::start_link(__name__, [module_name], [])
+  end
+
+  def self.start_link(proc_name, module_name)
+    gen_server::start_link({:local, proc_name}, __name__, [module_name], [])
   end
 
   def self.init([module_name])
@@ -38,6 +44,29 @@ module Actor
 
   def self.code_change(old_version, state, extra)
     {:ok, state}
+  end
+
+  def self.find(name, module_name)
+    new ActorWrapper({
+      :object,
+      module_name,
+      {pid: erlang::whereis(name)}
+    })
+  end
+
+  def self.find(name)
+    Actor::find(name, name)
+  end
+
+  def self.spec(class_name, restart, shutdown)
+    {
+      class_name,
+      {__name__, :start_link, [class_name, class_name]},
+      restart,
+      shutdown,
+      :worker,
+      [__name__]
+    }
   end
 
   def stop()
@@ -71,9 +100,42 @@ module Actor
 
   def initialize()
     {:object, module_name, _} = self
-    new ActorWrapper({:object,
-                      module_name,
-                      Actor::start(module_name)})
+    {:ok, pid} = Actor::start(module_name)
+    new ActorWrapper({
+      :object,
+      module_name,
+      {pid: pid}
+    })
+  end
+
+  def initialize(:link)
+    {:object, module_name, _} = self
+    {:ok, pid} = Actor::start_link(module_name)
+    new ActorWrapper({
+      :object,
+      module_name,
+      {pid: pid}
+    })
+  end
+
+  def initialize(name)
+    {:object, module_name, _} = self
+    {:ok, pid} = Actor::start(name, module_name)
+    new ActorWrapper({
+      :object,
+      module_name,
+      {pid: pid}
+    })
+  end
+
+  def initialize(name, :link)
+    {:object, module_name, _} = self
+    {:ok, pid} = Actor::start_link(name, module_name)
+    new ActorWrapper({
+      :object,
+      module_name,
+      {pid: pid}
+    })
   end
 
   def __terminate__(reason)

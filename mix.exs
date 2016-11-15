@@ -10,7 +10,6 @@ defmodule Uiro.Mixfile do
      docs: [readme: true, main: "README.md"],
      description: """
      Uiro is a simple OOP, dynamically typed, functional language that runs on the Erlang virtual machine (BEAM).
-     Uiro's sytnax is Ruby-like syntax. Uiro also got an influence from Python and Mochi.
      """,
      deps: deps,
      package: package]

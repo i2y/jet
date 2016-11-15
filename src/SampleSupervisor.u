@@ -1,0 +1,12 @@
+module SampleSupervisor
+  behavior supervisor
+
+  def self.start_link()
+    supervisor::start_link(:SampleSupervisor, [])
+  end
+
+  def self.init(_args)
+    {:ok, {{:one_for_one, 1, 60},
+           [Actor::spec(:SampleActor, :permanent, :brutal_kill)]}}
+  end
+end

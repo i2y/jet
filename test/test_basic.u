@@ -67,12 +67,6 @@ module test_basic
   #end
 
   #test
-  #def self.method_missing()
-  #  operator = new PyModule(:operator)
-  #  operator.add(2, 2).display()
-  #end
-
-  #test
   #def self.pipe()
   #  task = [1, 2, 3] | new Printer()
   #  task.run()
@@ -168,37 +162,57 @@ module test_basic
 
   test
   def self.test_actor()
-      sample = new SampleActor()
-      sample.print()
-      sample.print()
-      sample2 = new SampleActor()
-      sample2.print()
-      sample.stop()
-      sample2.print()
-      sample2.stop()
+    sample = new SampleActor()
+    sample.print()
+    sample.print()
+    sample2 = new SampleActor()
+    sample2.print()
+    sample.stop()
+    sample2.print()
+    sample2.stop()
   end
 
   test
   def self.test_actor_2()
-      actor = new SampleActor()
-      actor.async().print()
-      actor.stop()
+    actor = new SampleActor()
+    actor.async().print()
+    actor.stop()
   end
 
   test
   def self.test_actor_3()
-      actor = new SampleActor()
-      actor.call(:print, [])
-      actor.stop()
+    actor = new SampleActor()
+    actor.call(:print, [])
+    actor.stop()
   end
 
   test
   def self.test_actor_4()
-      actor = new SampleActor()
-      actor.future.print
-      actor.future.print
-      future = actor.future.value
-      test::assert_eq(future.get, 20)
-      actor.stop()
+    actor = new SampleActor()
+    actor.future.print
+    actor.future.print
+    value = actor.future.value
+    test::assert_eq(value.get, 20)
+    actor.stop()
+  end
+
+  test
+  def self.test_actor_5()
+    new SampleActor(:sample)
+    actor = Actor::find(:sample, :SampleActor)
+    actor.future.print
+    actor.future.print
+    value = actor.future.value
+    test::assert_eq(value.get, 20)
+    actor.stop()
+  end
+
+  test
+  def self.test_supervisor()
+    SampleSupervisor::start_link()
+    timer::sleep(1000)
+    Actor::find(:SampleActor).stop
+    timer::sleep(1000)
+    Actor::find(:SampleActor).print
   end
 end
