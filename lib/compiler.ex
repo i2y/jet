@@ -34,8 +34,8 @@ defmodule Compiler do
 	defp lookup(key, [_|tail]) do lookup(key, tail) end
 	defp lookup(_, []) do :error end
 
-	def put_func(uiro_syntax, func_map) do
-		func_syntax = to_erl_syntax(uiro_syntax)
+	def put_func(jet_syntax, func_map) do
+		func_syntax = to_erl_syntax(jet_syntax)
 		signature = {function_name(func_syntax), function_arity(func_syntax)}
 		if Dict.has_key?(func_map, signature) do
 			prev_func_syntax = Dict.get(func_map, signature)
@@ -48,8 +48,8 @@ defmodule Compiler do
 		end
 	end
 
-	def put_patterns(patterns_uiro_ast) do
-		[:patterns, patterns_name, patterns] = patterns_uiro_ast
+	def put_patterns(patterns_jet_ast) do
+		[:patterns, patterns_name, patterns] = patterns_jet_ast
 		:erlang.put(patterns_name, patterns)
 	end
 
@@ -57,19 +57,19 @@ defmodule Compiler do
 		Enum.map(syntax_list, &revert(&1)) |> :compile.forms()
 	end
 
-	def to_erl_syntax_list([uiro_syntax | uiro_syntax_list], func_map, acc) do
-		case uiro_syntax do
+	def to_erl_syntax_list([jet_syntax | jet_syntax_list], func_map, acc) do
+		case jet_syntax do
 			[:decorated_func, attr, func_def] ->
-				to_erl_syntax_list([func_def|uiro_syntax_list],
+				to_erl_syntax_list([func_def|jet_syntax_list],
 														func_map,
 														acc ++ [to_erl_syntax(attr)])
-			[:func|_] -> to_erl_syntax_list(uiro_syntax_list,
-																			put_func(uiro_syntax, func_map),
+			[:func|_] -> to_erl_syntax_list(jet_syntax_list,
+																			put_func(jet_syntax, func_map),
 																			acc)
 			[:patterns|_] ->
-				put_patterns(uiro_syntax)
-				to_erl_syntax_list(uiro_syntax_list, func_map, acc)
-			_ -> to_erl_syntax_list(uiro_syntax_list, func_map, acc ++ [to_erl_syntax(uiro_syntax)])
+				put_patterns(jet_syntax)
+				to_erl_syntax_list(jet_syntax_list, func_map, acc)
+			_ -> to_erl_syntax_list(jet_syntax_list, func_map, acc ++ [to_erl_syntax(jet_syntax)])
 		end
 	end
 
@@ -594,14 +594,14 @@ defmodule Compiler do
 	end
 
 	def to_erl_syntax([{:call_method, line}, obj, {:name, _, method_name}, args]) do
-		operator = module_qualifier(atom(:uiro_runtime), atom(:call_method))
+		operator = module_qualifier(atom(:jet_runtime), atom(:call_method))
 		compiled_args = Enum.map(args, &Compiler.to_erl_syntax(&1))
 		application(operator, [to_erl_syntax(obj), atom(method_name), list(compiled_args)])
 		|> set_pos(line)
 	end
 
 	def to_erl_syntax([{:new, line}, {:name, _, module_name}, args]) do
-		operator = module_qualifier(atom(:uiro_runtime), atom(:new_object))
+		operator = module_qualifier(atom(:jet_runtime), atom(:new_object))
 		compiled_args = Enum.map(args, &Compiler.to_erl_syntax(&1))
 		application(operator, [atom(module_name), list(compiled_args)])
 		|> set_pos(line)
@@ -800,7 +800,7 @@ defmodule Compiler do
 		context = hd(Process.get(:context))
 		if context == :instance do
 			[:func_ref, {:name, _, method_name}] = name
-			operator = module_qualifier(atom(:uiro_runtime), atom(:call_method))
+			operator = module_qualifier(atom(:jet_runtime), atom(:call_method))
 			compiled_args = Enum.map(args, &Compiler.to_erl_syntax(&1))
 			application(operator,
 									[to_erl_syntax([:name, {:name, 0, :self}]),

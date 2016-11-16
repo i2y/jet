@@ -1,4 +1,4 @@
-defmodule Mix.Tasks.Test.Uiro do
+defmodule Mix.Tasks.Test.Jet do
   use Mix.Task
 
   def run(_) do
@@ -8,11 +8,11 @@ defmodule Mix.Tasks.Test.Uiro do
       test_paths = ["test"]
     end
     Enum.map(test_paths, fn path -> :code.add_path(String.to_char_list(path)) end)
-    files = Mix.Utils.extract_files(test_paths, "test_*.u")
-    Mix.Tasks.Compile.Uiro.compile(files)
+    files = Mix.Utils.extract_files(test_paths, "test_*.jet")
+    Mix.Tasks.Compile.Jet.compile(files)
     module_names = Enum.map(files, fn file_name ->
       hd(String.split(hd(tl(String.split(file_name, "/"))),
-                      ".u"))
+                      ".jet"))
     end)
     Enum.map(module_names, &execute_tests(&1))
     |> List.flatten

@@ -1,9 +1,9 @@
-defmodule Uiro do
+defmodule Jet do
 
   def main(args) do
     {options, targets, _} = OptionParser.parse(args, aliases: [r: :run])
     module_file_path = List.first(targets)
-    module_name = String.to_char_list(Path.basename(module_file_path, ".u"))
+    module_name = String.to_char_list(Path.basename(module_file_path, ".jet"))
     {:ok, source} = File.read(module_file_path)
     {:ok, module_atom, binary} = Parser.parse(source, module_name)
                                  |> Compiler.to_erl_syntax_list(%{}, [])

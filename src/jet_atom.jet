@@ -1,4 +1,4 @@
-module uiro_atom
+module jet_atom
   def to_list()
     erlang::atom_to_list(self)
   end

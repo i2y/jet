@@ -5,7 +5,7 @@ class Class
 
   def method_missing(method_name, args)
     if method_name == :new_instance
-      apply(:uiro_runtime, :new_object, [@module_name, args])
+      apply(:jet_runtime, :new_object, [@module_name, args])
     else
       apply(@module_name, method_name, args)
     end

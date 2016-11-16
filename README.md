@@ -1,16 +1,16 @@
-# Uiro
+# Jet
 > "I thought of objects being like biological cells and/or individual
 > computers on a network, only able to communicate with messages"
 > _--Alan Kay, creator of Smalltalk, on the meaning of "object oriented programming"_
 
 
-Uiro is a simple OOP, dynamically typed, functional language that runs on the [Erlang](http://www.erlang.org) virtual machine (BEAM).
-Uiro's syntax is [Ruby](https://www.ruby-lang.org)-like syntax.
+Jet is a simple OOP, dynamically typed, functional language that runs on the [Erlang](http://www.erlang.org) virtual machine (BEAM).
+Jet's syntax is [Ruby](https://www.ruby-lang.org)-like syntax.
 
-Uiro was inspired by [Reia](https://github.com/tarcieri/reia) and [Celluloid](https://github.com/celluloid/celluloid).
-Uiro has actor library like [Celluloid](https://github.com/celluloid/celluloid) that supports synchronous message passing and asynchronous message passing. For the examples, please see [SampleActor.u](https://github.com/i2y/uiro/blob/master/src/SampleActor.u) and [test_basic.u](https://github.com/i2y/uiro/blob/master/test/test_basic.u).
+Jet was inspired by [Reia](https://github.com/tarcieri/reia) and [Celluloid](https://github.com/celluloid/celluloid).
+Jet has actor library like [Celluloid](https://github.com/celluloid/celluloid) that supports synchronous message passing and asynchronous message passing. For the examples, please see [SampleActor.jet](https://github.com/i2y/jet/blob/master/src/SampleActor.jet) and [test_basic.jet](https://github.com/i2y/jet/blob/master/test/test_basic.jet).
 
-Uiro also has a stream processing library like [Streem](https://github.com/matz/streem). For the examples, please see [test_basic.u](https://github.com/i2y/uiro/blob/master/test/test_basic.u).
+Jet also has a stream processing library like [Streem](https://github.com/matz/streem). For the examples, please see [test_basic.jet](https://github.com/i2y/jet/blob/master/test/test_basic.jet).
 
 ## Language features
 ### Builtin Types
@@ -90,10 +90,10 @@ x # => 3
 ```
 
 ### Class definition
-Car.u
+Car.jet
 ```ruby
 class Car
-  # On uiro, state of an instance is immutable.
+  # On jet, state of an instance is immutable.
   # The initialize method returns initial state of an instance.
   def initialize()
     {name: "foo",
@@ -108,7 +108,7 @@ end
 ```
 
 ### Module definition
-Enumerable.u
+Enumerable.jet
 ```ruby
 module Enumerable
   def select(func)
@@ -195,7 +195,7 @@ end
 ```
 
 ### Mixing in Modules
-SampleList.u
+SampleList.jet
 ```ruby
 class SampleList
   include Enumerable
@@ -262,12 +262,12 @@ sample_list.select {|item| item > 1}
 
 ## Installation
 ```sh
-$ git clone https://github.com/i2y/uiro.git
-$ cd uiro
+$ git clone https://github.com/i2y/jet.git
+$ cd jet
 $ mix archive.build
 $ mix archive.install
 $ mix escript.build
-$ cp uiro <any path>
+$ cp jet <any path>
 ```
 
 ## Usage
@@ -275,21 +275,21 @@ $ cp uiro <any path>
 Compiling:
 ```sh
 $ ls
-Foo.u
-$ uiro Foo.u
+Foo.jet
+$ jet Foo.jet
 $ ls
-Foo.beam Foo.u
+Foo.beam Foo.jet
 ```
 
 Compiling and Executing:
 ```sh
-$ cat Foo.u
+$ cat Foo.jet
 module Foo
   def self.bar()
     123.display()
   end
 end
-$ uiro -r Foo::bar Foo.u
+$ jet -r Foo::bar Foo.jet
 123
 ```
 
@@ -302,9 +302,9 @@ defmodule MyApp.Mixfile do
   def project do
     [app: :my_app,
      version: "1.0.0",
-     compilers: [:uiro|Mix.compilers],
-     deps: [{:uiro, git: "https://github.com/i2y/uiro.git"}]]
+     compilers: [:jet|Mix.compilers],
+     deps: [{:jet, git: "https://github.com/i2y/jet.git"}]]
   end
 end
 ```
-".u" files in source directory(src) is automatically compiled by mix command.
+".jet" files in source directory(src) is automatically compiled by mix command.

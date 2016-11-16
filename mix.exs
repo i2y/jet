@@ -1,15 +1,15 @@
-defmodule Uiro.Mixfile do
+defmodule Jet.Mixfile do
   use Mix.Project
 
   def project do
-    [app: :uiro,
+    [app: :jet,
      version: "0.0.1",
      elixir: "~> 1.1",
-     compilers: Mix.compilers ++ [:uiro],
-     escript: [main_module: Uiro],
+     compilers: Mix.compilers ++ [:jet],
+     escript: [main_module: Jet],
      docs: [readme: true, main: "README.md"],
      description: """
-     Uiro is a simple OOP, dynamically typed, functional language that runs on the Erlang virtual machine (BEAM).
+     Jet is a simple OOP, dynamically typed, functional language that runs on the Erlang virtual machine (BEAM).
      """,
      deps: deps,
      package: package]
@@ -24,7 +24,7 @@ defmodule Uiro.Mixfile do
     %{
       licenses: ["MIT"],
       maintainers: ["Yasushi Itoh"],
-      links: %{ "GitHub" => "https://github.com/i2y/uiro" }
+      links: %{ "GitHub" => "https://github.com/i2y/jet" }
     }
   end
 end

@@ -1,4 +1,4 @@
-module uiro_float
+module jet_float
   include Numeric
 
   def to_list()

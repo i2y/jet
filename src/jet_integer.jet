@@ -1,4 +1,4 @@
-module uiro_integer
+module jet_integer
   include Numeric
 
   def times(func) if is_function(func, 0)

@@ -1,4 +1,4 @@
-module uiro_function
+module jet_function
   def to_task()
     match erlang::fun_info(self, :arity)
       case {:arity, 2}

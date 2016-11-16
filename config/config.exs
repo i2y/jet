@@ -10,11 +10,11 @@ use Mix.Config
 
 # You can configure for your application as:
 #
-#     config :uiro, key: :value
+#     config :jet, key: :value
 #
 # And access this configuration in your application as:
 #
-#     Application.get_env(:uiro, :key)
+#     Application.get_env(:jet, :key)
 #
 # Or configure a 3rd-party app:
 #

@@ -1,4 +1,4 @@
-module uiro_map
+module jet_map
   include Enumerable
 
   def reduce(acc, func)

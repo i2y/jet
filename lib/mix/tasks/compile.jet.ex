@@ -1,21 +1,21 @@
-defmodule Mix.Tasks.Compile.Uiro do
+defmodule Mix.Tasks.Compile.Jet do
   use Mix.Task
 
   @recursive true
-  @manifest ".compile.uiro"
+  @manifest ".compile.jet"
 
   def run(_) do
     project = Mix.Project.config
     src_paths = project[:erlc_paths]
     dest_path = Mix.Project.compile_path(project)
-    files = Mix.Utils.extract_files(src_paths, "*.u")
+    files = Mix.Utils.extract_files(src_paths, "*.jet")
     compile(files)
     renames(files, dest_path)
     # TODO stale
   end
 
   def compile([file|rest]) do
-    Uiro.main([file])
+    Jet.main([file])
     compile(rest)
   end
 
@@ -23,7 +23,7 @@ defmodule Mix.Tasks.Compile.Uiro do
   end
 
   def renames([file|rest], dest_path) do
-    beam_file = Path.join([Path.dirname(file), Path.basename(file, ".u")]) <> ".beam"
+    beam_file = Path.join([Path.dirname(file), Path.basename(file, ".jet")]) <> ".beam"
     rename(beam_file, dest_path)
     renames(rest, dest_path)
   end

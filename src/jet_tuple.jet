@@ -1,4 +1,4 @@
-module uiro_tuple
+module jet_tuple
   include Enumerable
 
   def reduce(acc, func)

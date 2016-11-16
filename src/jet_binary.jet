@@ -1,4 +1,4 @@
-module uiro_binary
+module jet_binary
   def to_list()
     erlang::binary_to_list(self)
   end
