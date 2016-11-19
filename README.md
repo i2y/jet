@@ -1,4 +1,4 @@
-![Jet](https://github.com/i2y/jet/raw/master/jet_logo.png)
+<img src="https://github.com/i2y/jet/raw/master/jet_logo.png" style="max-width: 300px"/>
 > "I thought of objects being like biological cells and/or individual
 > computers on a network, only able to communicate with messages"
 > _--Alan Kay, creator of Smalltalk, on the meaning of "object oriented programming"_
