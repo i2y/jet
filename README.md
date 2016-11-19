@@ -211,7 +211,7 @@ end
 ```
 
 ### Module attributes
-SampleList.mj:
+SampleList.jet:
 ```ruby
 class SampleList
   include Enumerable
