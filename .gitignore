@@ -7,5 +7,4 @@ erl_crash.dump
 *.beam
 *.erl
 mix.lock
-uiro
-uiro.iml
+jet
