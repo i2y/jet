@@ -88,7 +88,7 @@ x # => 3
 ### Class definition
 Car.jet
 ```ruby
-Module car
+Module Car
   class Car
     # On jet, state of an instance is immutable.
     # The initialize method returns initial state of an instance.
