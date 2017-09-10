@@ -88,18 +88,20 @@ x # => 3
 ### Class definition
 Car.jet
 ```ruby
-class Car
-  # On jet, state of an instance is immutable.
-  # The initialize method returns initial state of an instance.
-  def initialize()
-    {name: "foo",
-     speed: 100}
-  end
-
-  def display()
-    @name.display()
-    @speed.display()
-  end
+Module car
+  class Car
+    # On jet, state of an instance is immutable.
+    # The initialize method returns initial state of an instance.
+    def initialize()
+      {name: "foo",
+       speed: 100}
+    end
+  
+    def display()
+      @name.display()
+      @speed.display()
+    end
+ end
 end
 ```
 
@@ -193,22 +195,24 @@ end
 ### Mixing in Modules
 SampleList.jet
 ```ruby
-class SampleList
-  include Enumerable
-
-  def initialize(items)
-    {items: items}
-  end
-
-  def reduce(acc, func)
-    lists::foldl(func, acc, @items)
+module SampleList
+  class SampleList
+    include Enumerable
+  
+    def initialize(items)
+      {items: items}
+    end
+  
+    def reduce(acc, func)
+      lists::foldl(func, acc, @items)
+    end
   end
 end
 ```
 
 ### Trailing closures (Trailing blocks)
 ```ruby
-sample_list = new SampleList([1, 2, 3])
+sample_list = SampleList::SampleList.new([1, 2, 3])
 sample_list.select {|item| item > 1}
            .map {|item| item * 2}
            # => [4, 6]
