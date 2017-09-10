@@ -55,6 +55,7 @@ AMP = \&
 BACKSLASH = \\
 IMPORT = import
 INCLUDE = include
+META = meta
 MODULE = module
 CLASS = class
 BEHAVIOR = behavior
@@ -62,9 +63,8 @@ REQUIRE = require
 EXPORT = export
 EXPORT_ALL = export_all
 DEF = def
-NEW = new
 TRY = try
-EXCEPT = except
+CATCH = catch
 AS = as
 FINALLY = finally
 RAISE = raise
@@ -80,7 +80,6 @@ OF = of
 VECTOR = vector
 RECORD = record
 PATTERNS = patterns
-YIELD = yield
 RETURN = return
 FOR = for
 IN = in
@@ -151,15 +150,17 @@ Rules.
 {IMPORT} : {token, {import_keyword, TokenLine}}.
 {INCLUDE} : {token, {include_keyword, TokenLine}}.
 {MODULE} : {token, {module_keyword, TokenLine}}.
+{META} : {token, {meta, TokenLine}}.
+{N2CLASS} : {token, {n2class, TokenLine}}.
 {CLASS} : {token, {class_keyword, TokenLine}}.
+{KLASS} : {token, {klass, TokenLine}}.
 {BEHAVIOR} : {token, {behavior, TokenLine}}.
 {REQUIRE} : {token, {require, TokenLine}}.
 {EXPORT} : {token, {export_keyword, TokenLine}}.
 {EXPORT_ALL} : {token, {export_all, TokenLine}}.
 {DEF} : {token, {def_keyword, TokenLine}}.
-{NEW} : {token, {new, TokenLine}}.
 {TRY} : {token, {try_keyword, TokenLine}}.
-{EXCEPT} : {token, {except_keyword, TokenLine}}.
+{CATCH} : {token, {catch_keyword, TokenLine}}.
 {AS} : {token, {as, TokenLine}}.
 {FINALLY} : {token, {finally_keyword, TokenLine}}.
 {RAISE} : {token, {raise_keyword, TokenLine}}.
@@ -177,7 +178,6 @@ Rules.
 {RECORD} : {token, {record_keyword, TokenLine}}.
 {SHARP} : {token, {sharp, TokenLine}}.
 {NOT} : {token, {not_keyword, TokenLine}}.
-{YIELD} : {token, {yield, TokenLine}}.
 {FOR} : {token, {for, TokenLine}}.
 {IN} : {token, {in, TokenLine}}.
 %{FROM} : {token, {from, TokenLine}}.

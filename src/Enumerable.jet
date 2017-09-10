@@ -84,4 +84,11 @@ module Enumerable
   def reduce(acc, func)
     nil
   end
+
+  # def lazy(obj):
+  #   if is_list(obj):
+  #       new ListIterator(obj)
+  #   else:
+  #       obj.__lazy__()
+  # end
 end

@@ -61,11 +61,26 @@ defmodule Compiler do
 		case jet_syntax do
 			[:decorated_func, attr, func_def] ->
 				to_erl_syntax_list([func_def|jet_syntax_list],
-														func_map,
-														acc ++ [to_erl_syntax(attr)])
+		                           func_map,
+		                           acc ++ [to_erl_syntax(attr)])
 			[:func|_] -> to_erl_syntax_list(jet_syntax_list,
-																			put_func(jet_syntax, func_map),
-																			acc)
+						                    put_func(jet_syntax, func_map),
+											acc)
+            [:class, class_name, method_list] -> {:name, line_number, class_name_str} = class_name
+                                                 to_erl_syntax_list(
+                                                   [[:func,
+                                                     class_name,
+                                                     [],
+                                                     [
+                                                       [:apply, [:func_ref, {:name, 0, 'jet_runtime'},
+                                                                            {:name, 0, 'new_class'}],
+                                                                [{:atom, 0, :erlang.get(:module_name)},
+                                                                 {:atom, line_number, class_name_str}]]
+                                                     ],
+                                                     :module]] ++ method_list ++ jet_syntax_list,
+                                                   # method_list ++ jet_syntax_list,
+                                                   func_map,
+                                                   acc)
 			[:patterns|_] ->
 				put_patterns(jet_syntax)
 				to_erl_syntax_list(jet_syntax_list, func_map, acc)
@@ -79,12 +94,14 @@ defmodule Compiler do
 
 	def to_erl_syntax([{:module_keyword, line}, name]) do
 		{_, _, name_chars} = name
+		:erlang.put(:module_name, name_chars)
 		attribute(atom(:module), [atom(name_chars)])
 		|> set_pos(line)
 	end
 
 	def to_erl_syntax([{:class_keyword, line}, name]) do
 		{_, _, name_chars} = name
+		:erlang.put(:module_name, name_chars)
 		attribute(atom(:module), [atom(name_chars)])
 		|> set_pos(line)
 	end
@@ -100,8 +117,8 @@ defmodule Compiler do
 	end
 
 	def to_erl_syntax([{:from_import, line},
-										 {:name, module_name_line, module_name},
-										 func_names]) do
+					   {:name, module_name_line, module_name},
+					   func_names]) do
 		attribute(set_pos(atom(:import), line),
 							[set_pos(atom(module_name), module_name_line),
 							list(Enum.map(func_names, &Compiler.to_erl_syntax(&1)))])
@@ -131,19 +148,34 @@ defmodule Compiler do
 	end
 
 	def to_erl_syntax([:get_func, {:name, name_line, func_name}, {:int, arity_line, arity}]) do
+        implicit_fun(arity_qualifier(atom(func_name) |> set_pos(name_line),
+    													 integer(arity) |> set_pos(arity_line)))
+    	|> set_pos(name_line)
+    end
+
+    def to_erl_syntax([:get_func, {:name, name_line, func_name}, expr]) do
 		implicit_fun(arity_qualifier(atom(func_name) |> set_pos(name_line),
-																 integer(arity) |> set_pos(arity_line)))
+									 to_erl_syntax(expr) |> set_pos(name_line)))
 		|> set_pos(name_line)
 	end
 
-	def to_erl_syntax([:get_func,
-										 {:name, module_name_line, module_name},
-										 {:name, func_name_line, func_name},
-										 {:int, arity_line, arity}]) do
+	def to_erl_syntax([:get_func, {:name, module_name_line, module_name},
+                                  {:name, func_name_line, func_name},
+                                  {:int, arity_line, arity}]) do
 		implicit_fun(module_qualifier(atom(module_name) |> set_pos(module_name_line),
-																	arity_qualifier(atom(func_name) |> set_pos(func_name_line),
-																									integer(arity) |> set_pos(arity_line)))
-								 |> set_pos(module_name_line))
+                                      arity_qualifier(atom(func_name) |> set_pos(func_name_line),
+                                      integer(arity) |> set_pos(arity_line)))
+				     |> set_pos(module_name_line))
+		|> set_pos(module_name_line)
+	end
+
+	def to_erl_syntax([:get_func, {:name, module_name_line, module_name},
+                                  {:name, func_name_line, func_name},
+                                  expr]) do
+		implicit_fun(module_qualifier(atom(module_name) |> set_pos(module_name_line),
+                                      arity_qualifier(atom(func_name) |> set_pos(func_name_line),
+                                      to_erl_syntax(expr) |> set_pos(func_name_line)))
+				     |> set_pos(module_name_line))
 		|> set_pos(module_name_line)
 	end
 
@@ -178,6 +210,7 @@ defmodule Compiler do
 	end
 
 	def to_erl_syntax([:func, clauses, context]) do
+	    IO.inspect
 		Process.put(:context, [context|Process.get(:context)])
 		retval = fun_expr(Enum.map(clauses, &Compiler.to_erl_syntax(&1)))
 		Process.put(:context, tl(Process.get(:context)))
@@ -600,12 +633,11 @@ defmodule Compiler do
 		|> set_pos(line)
 	end
 
-	def to_erl_syntax([{:new, line}, {:name, _, module_name}, args]) do
-		operator = module_qualifier(atom(:jet_runtime), atom(:new_object))
-		compiled_args = Enum.map(args, &Compiler.to_erl_syntax(&1))
-		application(operator, [atom(module_name), list(compiled_args)])
-		|> set_pos(line)
-	end
+    def to_erl_syntax([{:catch_keyword, line}, expr]) do
+        to_erl_syntax(expr)
+        |> catch_expr
+        |> set_pos(line)
+    end
 
 	def to_erl_syntax([{:op_not, line}, arg]) do
 		prefix_expr(operator('not'), to_erl_syntax(arg))
@@ -823,7 +855,7 @@ defmodule Compiler do
 	end
 
 	def to_erl_syntax([:func_ref, {:name, line, module_name},
-																{:name, _, func_name}]) do
+								  {:name, _, func_name}]) do
 		module_qualifier(atom(module_name), atom(func_name))
 		|> set_pos(line)
 	end
@@ -833,7 +865,7 @@ defmodule Compiler do
 	end
 
 	def to_erl_syntax([:func_ref, {:str, line, module_name},
-																{:name, _, func_name}]) do
+								  {:name, _, func_name}]) do
 		last_index = Enum.count(module_name) - 2
 		m_name = module_name |> Enum.slice(1..last_index)
 		module_qualifier(atom(m_name), atom(func_name))

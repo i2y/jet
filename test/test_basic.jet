@@ -1,4 +1,42 @@
 module test_basic
+  class Fafa
+    include Enumerable
+
+    def initialize(x, y, z)
+      {x: x, y: y, z: z}
+    end
+
+    def fafa()
+      3
+    end
+
+    def fafa({:x, x}, y, z)
+      x - y - z
+    end
+
+    def fafa(x, y, z)
+      x + y + z
+    end
+
+    def xyz()
+      @x + @y + @z
+    end
+
+    def reduce(acc, func)
+      # TODO
+      func.(func.(func.(acc, @x), @y), @z)
+    end
+  end
+
+  test
+  def self.test_new()
+    test::assert_eq(test_basic::Fafa.new(1, 2, 3).xyz, 6)
+    test::assert_eq(test_basic::Fafa.new(1, 2, 3).min, 1)
+    # test_basic::Fafa.each do |item|
+    #   item.display
+    # end
+  end
+
   test
   def self.if_stmt()
     value = if true
@@ -50,169 +88,97 @@ module test_basic
   end
 
   test
-  def self.test_module()
-    erlang = new Module(:erlang)
-    test::assert_eq(erlang.apply(:erlang, :length, ["あいうえお"]), 5)
+  def self.bench_call_func()
+    _start = erlang::monotonic_time(:nano_seconds)
+    now()
+    _end = erlang::monotonic_time(:nano_seconds)
+    # timer::now_diff(_end, _start)
+    erlang::convert_time_unit(_end - _start, :native, :nano_seconds)
+    # {_end, _start}
+  end
+
+  class N2
+    def initialize()
+      {}
+    end
+
+    def test()
+      :ok # erlang::now()
+    end
+
+    def self.fafa()
+      10000
+    end
+
+    def method_missing(method_name, args)
+      [method_name, args]
+    end
+  end
+
+  class N2Actor
+    meta Actor
+    def initialize()
+      erlang::put(:x, 3)
+    end
+
+    def test()
+      # erlang::get(:x)
+      erlang::now()
+    end
+  end
+
+  class N3Actor
+    meta Actor
+    def initialize()
+      erlang::put(:x, 3)
+    end
+
+    def test()
+      # erlang::get(:x)
+      erlang::now()
+    end
+  end
+
+  class List
+    include Enumerable
+
+    def initialize(list)
+      {list: list}
+    end
+
+    def reduce(acc, func)
+      lists::foldl(func, acc, @list)
+    end
   end
 
   test
-  def self.test_class_new()
-    Seq = new Class(:Seq)
-    test::assert_eq(Seq.new_instance([1, 2, 3]), new Seq([1, 2, 3]))
-  end
-
-  #test
-  #def self.class_info()
-  #  erlang = new Module(:erlang)
-  #end
-
-  #test
-  #def self.pipe()
-  #  task = [1, 2, 3] | new Printer()
-  #  task.run()
-  #  task.run()
-  #end
-
-  #test
-  #def self.pipe_to_map()
-  #  task = [1, 2, 3]
-  #         | Task::map {|item| item + 1}
-  #         | new Printer()
-  #  task.run()
-  #end
-
-  #test
-  #def self.pipe_to_map()
-  #  task = [1, 2, 3]
-  #         | Task::map {|item| item + 1}
-  #         | {|item| item.display()}
-  #  task.run()
-  #end
-
-  #test
-  #def self.pipe_to_map_each()
-  #  task = [1, 2, 3]
-  #         | Task::flat_map {|item| item + 1}
-  #         | Task::filter {|item| item > 2}
-  #         | {|item| item.display()}
-  #  task.run()
-  #end
-
-  #test
-  #def self.pipe_to_map_each()
-  #  task = [1, 2, 3]
-  #         | Task::flat_map {|item| [item + 1, 10]}
-  #         | Task::filter {|item| item > 2}
-  #         | {|item| item.display()}
-  #  task.run()
-  #end
-
-  #test
-  #def self.pipe_to_map_each()
-  #  task = [1, 2, 3]
-  #         #| Task::split(2)
-  #         #| Task::flat_map {|items| items}
-  #         | Task::call3 {|values| values.sum()}
-  #         | {|item| item.display()}
-  #  task.run()
-  #end
-
-  #test
-  #def self.pipe_to_map_each()
-  #  task = [1, 2, 3]
-  #       #| Task::split(2)
-  #       | Task::p_map {|item| item * 1}
-  #       #| Task::reduce(0) {|acc, value| acc + value}
-  #       | Task::group_by do |value|
-  #           if value % 2 == 0
-  #             :a
-  #           else
-  #             :b
-  #           end
-  #         end
-  #       | Task::flat()
-  #       #| Task::reduce_by_key {|key, values| values.sum()}
-  #       | Task::p_map do |{key, values}|
-  #           {key, values.sum()}
-  #         end
-  #       | {|item| item.display()}
-  #  task.run()
-  #end
-
-  test
-  def self.pipe_to_map_each2()
-    stream = new Seq([1, 2, 3])
-    stream
-      .p_map {|item| item * 1}
-      .group_by {|value|
-        if value % 2 == 0
-          :a
-        else
-          :b
-        end
-      }
-      .flat()
-      .p_map {|{key, values}|
-        {key, values.sum()}
-      }
-      .run()
-      .get()
-      .display()
+  def self.user_list()
+    obj = test_basic::List.new([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    _start = now()
+    obj.each do |item|
+      item + 1
+    end
+    _end = now()
+    timer::now_diff(_end, _start)
   end
 
   test
-  def self.test_actor()
-    sample = new SampleActor()
-    sample.print()
-    sample.print()
-    sample2 = new SampleActor()
-    sample2.print()
-    sample.stop()
-    sample2.print()
-    sample2.stop()
+  def self.user_list2()
+    obj = test_basic::List.new([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    _start = now()
+    obj.each do |item|
+      item + 1
+    end
+    _end = now()
+    timer::now_diff(_end, _start)
   end
 
   test
-  def self.test_actor_2()
-    actor = new SampleActor()
-    actor.async().print()
-    actor.stop()
-  end
-
-  test
-  def self.test_actor_3()
-    actor = new SampleActor()
-    actor.call(:print, [])
-    actor.stop()
-  end
-
-  test
-  def self.test_actor_4()
-    actor = new SampleActor()
-    actor.future.print
-    actor.future.print
-    value = actor.future.value
-    test::assert_eq(value.get, 20)
-    actor.stop()
-  end
-
-  test
-  def self.test_actor_5()
-    new SampleActor(:sample)
-    actor = Actor::find(:sample, :SampleActor)
-    actor.future.print
-    actor.future.print
-    value = actor.future.value
-    test::assert_eq(value.get, 20)
-    actor.stop()
-  end
-
-  test
-  def self.test_supervisor()
-    SampleSupervisor::start_link()
-    timer::sleep(1000)
-    Actor::find(:SampleActor).stop
-    timer::sleep(1000)
-    Actor::find(:SampleActor).print
+  def self.list()
+    obj = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    _start = now()
+    obj.each {|item| item + 1}
+    _end = now()
+    timer::now_diff(_end, _start)
   end
 end

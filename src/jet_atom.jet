@@ -1,5 +1,15 @@
 module jet_atom
-  def to_list()
-    erlang::atom_to_list(self)
+  class Atom
+    def initialize(atom)
+      {atom: atom}
+    end
+
+    def to_list()
+      erlang::atom_to_list(@atom)
+    end
+
+    def display()
+      io::format("~p~n", [@atom])
+    end
   end
 end

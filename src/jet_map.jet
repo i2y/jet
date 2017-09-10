@@ -1,67 +1,77 @@
 module jet_map
-  include Enumerable
+  class Hash
+    include Enumerable
 
-  def reduce(acc, func)
-    lists::foldl(func, acc, maps::values(self))
-  end
+    def initialize(map)
+      {map: map}
+    end
 
-  def is_key?(key)
-    maps::is_key(key, self)
-  end
+    def reduce(acc, func)
+      lists::foldl(func, acc, maps::values(@map))
+    end
 
-  def keys()
-    maps::keys(self)
-  end
+    def is_key?(key)
+      maps::is_key(key, @map)
+    end
 
-  def values()
-    maps::values(self)
-  end
+    def keys()
+      maps::keys(@map)
+    end
 
-  def map_item(func)
-    maps::map(func, self)
-  end
+    def values()
+      maps::values(@map)
+    end
 
-  def merge(other)
-    maps::marge(self, other)
-  end
+    def map_item(func)
+      maps::map(func, @map)
+    end
 
-  def put(key, value)
-    maps::put(key, value, self)
-  end
+    def merge(other)
+      maps::marge(self, @map)
+    end
 
-  def get(key, default_value)
-    maps::get(key, self, default_value)
-  end
+    def put(key, value)
+      maps::put(key, value, @map)
+    end
 
-  def get(key)
-    maps::get(key, self)
-  end
+    def get(key, default_value)
+      maps::get(key, @map, default_value)
+    end
 
-  def remove(key)
-    maps::remove(key, self)
-  end
+    def get(key)
+      maps::get(key, @map)
+    end
 
-  def size()
-    maps::size(self)
-  end
+    def remove(key)
+      maps::remove(key, @map)
+    end
 
-  def to_list()
-    maps::to_list(self)
-  end
+    def size()
+      maps::size(@map)
+    end
 
-  def update(key, value)
-    maps::update(key, value, self)
-  end
+    def to_list()
+      maps::to_list(@map)
+    end
 
-  def values()
-    maps::values(self)
-  end
+    def update(key, value)
+      maps::update(key, value, @map)
+    end
 
-  def with(keys)
-    maps::with(keys, self)
-  end
+    def values()
+      maps::values(@map)
+    end
 
-  def without(keys)
-    maps::without(keys, self)
+    def with(keys)
+      maps::with(keys, @map)
+    end
+
+    def without(keys)
+      maps::without(keys, @map)
+    end
+
+    def display()
+      io::format("~p~n", [@map])
+    end
   end
 end

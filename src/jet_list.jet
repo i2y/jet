@@ -1,18 +1,4 @@
 module jet_list
-  include Enumerable
-
-  def reduce(acc, func)
-    lists::foldl(func, acc, self)
-  end
-
-  def each(func)
-    lists::foreach(func, self)
-  end
-
-  def index_of(item)
-    index_of(item, self, 1)
-  end
-
   def self.index_of(_, [], _)
     false
   end
@@ -25,90 +11,104 @@ module jet_list
     index_of(item, tl, index + 1)
   end
 
-  def add(item)
-    self ++ [item]
-  end
+  class List
+    include Enumerable
 
-  def append(item)
-    self ++ [item]
-  end
-
-  def conj(item)
-    [item, *self]
-  end
-
-  def add_all(lis)
-    self ++ lis
-  end
-
-  def extend(lis)
-    self ++ lis
-  end
-
-  def to_list()
-    self
-  end
-
-  def to_tuple()
-    erlang::list_to_tuple(self)
-  end
-
-  def to_binary()
-    erlang::list_to_binary(self)
-  end
-
-  def drop_last()
-    lists::droplast(self)
-  end
-
-  def drop_while(func)
-    lists::dropwhile(func, self)
-  end
-
-  def first()
-    [head, *_] = self
-    head
-  end
-
-  def last()
-    lists::last(self)
-  end
-
-  def member?(elem)
-    lists::member(elem, self)
-  end
-
-  def nth(n)
-    lists::nth(n, self)
-  end
-
-  def nth_tail(n)
-    lists::nthtail(n, self)
-  end
-
-  def reverse()
-    lists::reverse(self)
-  end
-
-  def pipe_to(other)
-    new Seq(self).pipe_to(other)
-  end
-
-  def size()
-    erlang::length(self)
-  end
-
-  def length()
-    erlang::length(self)
-  end
-
-  def send_to(actor)
-    each do |item|
-      actor ! item
+    def initialize(list)
+      {list: list}
     end
-  end
 
-  def sum()
-    lists::sum(self)
+    def reduce(acc, func)
+      lists::foldl(func, acc, @list)
+    end
+
+    def each(func)
+      lists::foreach(func, @list)
+    end
+
+    def index_of(item)
+      jet_list::index_of(item, @list, 1)
+    end
+
+    def add(item)
+      @list ++ [item]
+    end
+
+    def append(item)
+      @list ++ [item]
+    end
+
+    def conj(item)
+      [item, *@list]
+    end
+
+    def add_all(lis)
+      @list ++ lis
+    end
+
+    def extend(lis)
+      @list ++ lis
+    end
+
+    def to_list()
+      @list
+    end
+
+    def to_tuple()
+      erlang::list_to_tuple(@list)
+    end
+
+    def to_binary()
+      erlang::list_to_binary(@list)
+    end
+
+    def drop_last()
+      lists::droplast(@list)
+    end
+
+    def drop_while(func)
+      lists::dropwhile(func, @list)
+    end
+
+    def first()
+      [head, *_] = @list
+      head
+    end
+
+    def last()
+      lists::last(@list)
+    end
+
+    def member?(elem)
+      lists::member(elem, @list)
+    end
+
+    def nth(n)
+      lists::nth(n, @list)
+    end
+
+    def nth_tail(n)
+      lists::nthtail(n, @list)
+    end
+
+    def reverse()
+      lists::reverse(@list)
+    end
+
+    def size()
+      erlang::length(@list)
+    end
+
+    def length()
+      erlang::length(@list)
+    end
+
+    def sum()
+      lists::sum(@list)
+    end
+
+    def display()
+      io::format("~p~n", [@list])
+    end
   end
 end

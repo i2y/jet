@@ -1,62 +1,117 @@
 module jet_runtime
-
-  record object
+  record jet_object
     __class__,
     __state__
   end
 
+  def self.call_method(obj, method_name, args) if is_pid(obj)
+    if obj == self()
+      apply(maps::get(method_name, get(:class_definition)), [obj, *args])
+    else
+      gen_server::call(obj, {method_name, args}, :infinity)
+    end
+  end
+
+  def self.call_method(%jet_object(__class__ = {module_name, class_name}, __state__ = state), method_name, args)
+    call_method(%jet_object(__class__ = class_def(module_name, class_name), __state__ = state),
+                method_name,
+                args)
+  end
+
+  def self.call_method(%jet_object(__class__ = class_definition, __state__ = state), method_name, args)
+    key = {method_name, length(args)}
+    if maps::is_key(key, class_definition)
+      apply(maps::get(key, class_definition), [%jet_object(__class__ = class_definition, __state__ = state), *args])
+    else
+      apply(maps::get({:method_missing, 2}, class_definition), [%jet_object(__class__ = class_definition, __state__ = state), method_name, args])
+    end
+  end
+
   def self.call_method(obj, method_name, args) if is_atom(obj)
-    call_target_method(:jet_atom, obj, method_name, args)
+    class_def = erlang::get(:jet_atom)
+    if class_def == :undefined
+      _class_def = jet_atom::Atom.class_def
+      put(:jet_atom, _class_def)
+      call_method(%jet_object(__class__ = _class_def, __state__ = {atom: obj}), method_name, args)
+    else
+      call_method(%jet_object(__class__ = class_def, __state__ = {atom: obj}), method_name, args)
+    end
   end
 
   def self.call_method(obj, method_name, args) if is_list(obj)
-    call_target_method(:jet_list, obj, method_name, args)
+    class_def = erlang::get(:jet_list)
+    if class_def == :undefined
+      _class_def = jet_list::List.class_def
+      put(:jet_list, _class_def)
+      call_method(%jet_object(__class__ = _class_def, __state__ = {list: obj}), method_name, args)
+    else
+      call_method(%jet_object(__class__ = class_def, __state__ = {list: obj}), method_name, args)
+    end
   end
 
   def self.call_method(obj, method_name, args) if is_integer(obj)
-    call_target_method(:jet_integer, obj, method_name, args)
+    class_def = erlang::get(:jet_integer)
+    if class_def == :undefined
+      _class_def = jet_integer::Integer.class_def
+      put(:jet_integer, _class_def)
+      call_method(%jet_object(__class__ = _class_def, __state__ = {value: obj}), method_name, args)
+    else
+      call_method(%jet_object(__class__ = class_def, __state__ = {value: obj}), method_name, args)
+    end
   end
 
   def self.call_method(obj, method_name, args) if is_float(obj)
-    call_target_method(:jet_float, obj, method_name, args)
+    class_def = erlang::get(:jet_float)
+    if class_def == :undefined
+      _class_def = jet_float::Float.class_def
+      put(:jet_float, _class_def)
+      call_method(%jet_object(__class__ = _class_def, __state__ = {value: obj}), method_name, args)
+    else
+      call_method(%jet_object(__class__ = class_def, __state__ = {value: obj}), method_name, args)
+    end
   end
 
   def self.call_method(obj, method_name, args) if is_binary(obj)
-    call_target_method(:jet_binary, obj, method_name, args)
+    class_def = erlang::get(:jet_binary)
+    if class_def == :undefined
+      _class_def = jet_binary::Binary.class_def
+      put(:jet_binary, _class_def)
+      call_method(%jet_object(__class__ = _class_def, __state__ = {map: obj}), method_name, args)
+    else
+      call_method(%jet_object(__class__ = class_def, __state__ = {map: obj}), method_name, args)
+    end
   end
 
   def self.call_method(obj, method_name, args) if is_function(obj)
-    call_target_method(:jet_function, obj, method_name, args)
-  end
-
-  def self.call_method(obj, method_name, args) if is_pid(obj)
-    call_target_method(:jet_pid, obj, method_name, args)
-  end
-
-  def self.call_method(%object(__class__ = module_name, __state__ = state), method_name, args)
-    obj = %object(__class__ = module_name, __state__ = state)
-    exports = apply(module_name, :module_info, [:exports])
-    if lists::keyfind(method_name, 1, exports)
-      apply(module_name, method_name, [obj, *args])
+    class_def = erlang::get(:jet_function)
+    if class_def == :undefined
+      _class_def = jet_function::Function.class_def
+      put(:jet_function, _class_def)
+      call_method(%jet_object(__class__ = _class_def, __state__ = {map: obj}), method_name, args)
     else
-      call_parent_method(module_name, obj, method_name, args)
+      call_method(%jet_object(__class__ = class_def, __state__ = {map: obj}), method_name, args)
     end
   end
 
   def self.call_method(obj, method_name, args) if is_map(obj)
-    call_target_method(:jet_map, obj, method_name, args)
+    class_def = erlang::get(:jet_map)
+    if class_def == :undefined
+      _class_def = jet_map::Hash.class_def
+      put(:jet_map, _class_def)
+      call_method(%jet_object(__class__ = _class_def, __state__ = {map: obj}), method_name, args)
+    else
+      call_method(%jet_object(__class__ = class_def, __state__ = {map: obj}), method_name, args)
+    end
   end
 
   def self.call_method(obj, method_name, args) if is_tuple(obj)
-    call_target_method(:jet_tuple, obj, method_name, args)
-  end
-
-  def self.call_target_method(module_name, obj, method_name, args)
-    exports = apply(module_name, :module_info, [:exports])
-    if lists::keyfind(method_name, 1, exports)
-      apply(module_name, method_name, [obj, *args])
+    class_def = erlang::get(:jet_tuple)
+    if class_def == :undefined
+      _class_def = jet_tuple::Tuple.class_def
+      put(:jet_tuple, _class_def)
+      call_method(%jet_object(__class__ = _class_def, __state__ = {tuple: obj}), method_name, args)
     else
-      call_parent_method(module_name, obj, method_name, args)
+      call_method(%jet_object(__class__ = class_def, __state__ = {tuple: obj}), method_name, args)
     end
   end
 
@@ -80,13 +135,16 @@ module jet_runtime
     end
   end
 
-  def self.call_parent_method(module_name, obj, method_name, args)
-    include_mods = list_modules(module_name) ++ [:Kernel]
-    target_mod = find_mod({method_name, length(args) + 1}, include_mods)
-    if target_mod == false
-      apply(module_name, :method_missing, [obj, method_name, args])
-    else
-      apply(target_mod, method_name, [obj, *args])
+  def self.list_modules(module_name, class_name)
+    attributes = apply(module_name, :module_info, [:attributes])
+    include_key = list_to_atom("_" ++ atom_to_list(class_name) ++ "_include")
+    match lists::keyfind(include_key, 1, attributes)
+      case :false
+        []
+      case {include_key, :false}
+        []
+      case {include_key, include_mods}
+        list_modules_(include_mods, [])
     end
   end
 
@@ -119,17 +177,284 @@ module jet_runtime
     index_of(item, tl, index + 1)
   end
 
-  def self.new_object(module_name, args)
-    obj = call_method(%object(__class__ = module_name,
-                              __state__ = {}),
-                      :initialize,
-                      args)
-    match obj
-      case %object()
-        obj
-      case _
-        %object(__class__ = module_name,
-                __state__ = obj)
+  def self.new_class(module_name, class_name)
+    match metaclass(module_name, class_name)
+      case {metaclass_module_name, metaclass_name}
+        {:jet_object, {metaclass_module_name, metaclass_name}, {module_name: module_name, class_name: class_name}}
+      case metaclass_name
+        {:jet_object, {:jet_runtime, metaclass_name}, {module_name: module_name, class_name: class_name}}
     end
+  end
+
+  def self.erl_eval(expr, bindings)
+    {:ok, tokens, _} = erl_scan::string(expr)
+    {:ok, [expression]} = erl_parse::parse_exprs(tokens)
+    {:value, ret, _} = erl_eval::expr(expression, bindings)
+    ret
+  end
+
+  def self.get_func(mod_name, fun_name, arity)
+    erl_eval("fun Mod:Fun/" ++ integer_to_list(arity) ++ ".",
+             erl_eval::bindings(
+               erl_eval::add_binding(:Fun, fun_name,
+                 erl_eval::add_binding(:Mod, mod_name, erl_eval::new_bindings()))))
+  end
+
+  def self.to_module_maps(mod_name)
+    exported_func_names = apply(mod_name, :module_info, [:exports])
+    lists::foldl({|{func_name, arity}, module_maps|
+                  maps::put({func_name, arity - 1}, jet_runtime::get_func(mod_name, func_name, arity), module_maps)},
+                 {},
+                 exported_func_names)
+  end
+
+  def self.included_modules(mod_name, class_name)
+    attributes = apply(mod_name, :module_info, [:attributes])
+    include_key = list_to_atom("_" ++ atom_to_list(class_name) ++ "_include")
+    included_modules = match lists::keyfind(include_key, 1, attributes)
+      case :false
+        []
+      case {include_key, :false}
+        []
+      case {include_key, include_mods}
+        list_modules_(include_mods, [])
+    end
+  end
+
+  def self.metaclass(mod_name, class_name)
+    attributes = apply(mod_name, :module_info, [:attributes])
+    attr_key = list_to_atom("_" ++ atom_to_list(class_name) ++ "_meta")
+    match lists::keyfind(attr_key, 1, attributes)
+      case :false
+        :Class
+      case {attr_key, [metaclass_name]}
+        metaclass_name
+      case {attr_key, [metaclass_module_name, metaclass_name]}
+        {metaclass_module_name, metaclass_name}
+    end
+  end
+
+  def self.to_module_maps(mod_name, class_name, method_type)
+    exported_func_names = apply(mod_name, :module_info, [:exports])
+    prefix = "_" ++ atom_to_list(class_name) ++ "_" ++ method_type ++ "_method_"
+    length_of_prefix = erlang::length(prefix)
+    method_names = lists::filtermap(
+      do |{func_name, arity}|
+        _func_name = atom_to_list(func_name)
+        if lists::prefix(prefix, _func_name)
+          {true, {func_name, list_to_atom(lists::sublist(_func_name, length_of_prefix + 1, erlang::length(_func_name))), arity}}
+        else
+          false
+        end
+      end,
+      exported_func_names)
+    class_def = lists::foldl(
+                  {|{func_name, method_name, arity}, module_maps|
+                    maps::put({method_name, arity - 1}, jet_runtime::get_func(mod_name, func_name, arity), module_maps)},
+                  {},
+                  method_names)
+    # maps::put(:__metaclass__,
+    #           metaclass(mod_name, class_name),
+    maps::put(:__include__,
+              included_modules(mod_name, class_name),
+              class_def)
+  end
+
+  def self.class_def(module_name, class_name)
+    cache_key = erlang::list_to_atom(erlang::atom_to_list(module_name) ++ "_" ++ erlang::atom_to_list(class_name))
+    class_def = erlang::get(cache_key)
+    if class_def == :undefined
+      _class_def = jet_runtime::to_module_maps(module_name, class_name, "instance")
+      mod_name_list = if maps::is_key(:__include__, _class_def)
+        mod_names = maps::get(:__include__, _class_def)
+        [:Kernel, *mod_names] #erlang::tuple_to_list(mod_names)]
+      else
+        [:Kernel]
+      end
+      modules = lists::foldl({|mod_name, modules|  modules ++ [jet_runtime::to_module_maps(mod_name)]}, [], mod_name_list)
+      __class_def = maps::merge(lists::foldl({|mod, class_def| maps::merge(class_def, mod)}, {}, modules), _class_def)
+      erlang::put(cache_key, __class_def)
+      __class_def
+    else
+      class_def
+    end
+  end
+
+  class Class
+    def class_def()
+      jet_runtime::class_def(@module_name, @class_name)
+    end
+
+    def method_missing(method_name, args)
+      class_methods = jet_runtime::to_module_maps(@module_name, @class_name, "class")
+      key = {method_name, erlang::length(args)}
+      if maps::is_key(key, class_methods)
+        erlang::apply(maps::get(key, class_methods), [self, *args])
+      else
+        {:error, "TODO"}
+      end
+    end
+
+    def _new(args)
+      class_def = self.class_def
+      %jet_object(__class__ = class_def,
+                  __state__ = erlang::apply(maps::get({:initialize, erlang::length(args)}, class_def), [self, *args]))
+    end
+
+    def new()
+      self._new([])
+    end
+
+    def new(arg1)
+      self._new([arg1])
+    end
+
+    def new(arg1, arg2)
+      self._new([arg1, arg2])
+    end
+
+    def new(arg1, arg2, arg3)
+      self._new([arg1, arg2, arg3])
+    end
+
+    def new(arg1, arg2, arg3, arg4)
+      self._new([arg1, arg2, arg3, arg4])
+    end
+
+    def new(arg1, arg2, arg3, arg4, arg5)
+      self._new([arg1, arg2, arg3, arg4, arg5])
+    end
+
+    def new(arg1, arg2, arg3, arg4, arg5, arg6)
+      self._new([arg1, arg2, arg3, arg4, arg5, arg6])
+    end
+
+    def new(arg1, arg2, arg3, arg4, arg5, arg6, arg7)
+      self._new([arg1, arg2, arg3, arg4, arg5, arg6, arg7])
+    end
+
+    def new(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
+      self._new([arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8])
+    end
+
+    def new(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9)
+      self._new([arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9])
+    end
+
+    def new(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10)
+      self._new([arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10])
+    end
+  end
+
+  class Actor
+    def method_missing(method_name, args)
+      class_methods = jet_runtime::to_module_maps(@module_name, @class_name, "class")
+      key = {method_name, erlang::length(args)}
+      if maps::is_key(key, class_methods)
+        erlang::apply(maps::get(key, class_methods), [self, *args])
+      else
+        {:error, "TODO"}
+      end
+    end
+
+    def _spawn(args)
+      {:ok, pid} = gen_server::start(__name__,
+                                     [args, jet_runtime::class_def(@module_name, @class_name)],
+                                     [])
+      pid
+    end
+
+    def spawn()
+      self._spawn([])
+    end
+
+    def spawn(arg1)
+      self._spawn([arg1])
+    end
+
+    def spawn(arg1, arg2)
+      self._spawn([arg1, arg2])
+    end
+
+    def spawn(arg1, arg2, arg3)
+      self._spawn([arg1, arg2, arg3])
+    end
+
+    def spawn(arg1, arg2, arg3, arg4)
+      self._spawn([arg1, arg2, arg3, arg4])
+    end
+
+    def spawn(arg1, arg2, arg3, arg4, arg5)
+      self._spawn([arg1, arg2, arg3, arg4, arg5])
+    end
+
+    def spawn(arg1, arg2, arg3, arg4, arg5, arg6)
+      self._spawn([arg1, arg2, arg3, arg4, arg5, arg6])
+    end
+
+    def spawn(arg1, arg2, arg3, arg4, arg5, arg6, arg7)
+      self._spawn([arg1, arg2, arg3, arg4, arg5, arg6, arg7])
+    end
+
+    def spawn(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
+      self._spawn([arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8])
+    end
+
+    def spawn(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9)
+      self._spawn([arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9])
+    end
+
+    def spawn(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10)
+      self._spawn([arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10])
+    end
+  end
+
+  # This iscalled when a connection is made to the server
+  def self.init([args, class_definition])
+    put(:class_definition, class_definition)
+    match apply(maps::get({:initialize, length(args)}, class_definition), [self(), *args])
+      case {:error, reason}
+        {:error, reason}
+      case _
+        {:ok, class_definition}
+    end
+  end
+
+  # handle_call is invoked in response to gen_server::call
+  def self.handle_call({method_name, args}, _from, class_definition)
+    if maps::is_key({:__handle_call__, 2}, class_definition)
+      apply(maps::get({:__handle_call__, 2}, class_definition), [self(), *args])
+    else
+      if maps::is_key({method_name, length(args)}, class_definition)
+        response = apply(maps::get({method_name, length(args)}, class_definition), [self(), *args])
+        {:reply, response, class_definition}
+      else
+        {:reply, :error, class_definition} # TODO
+      end
+    end
+  end
+
+  # We get compile warnings from gen_server unless we define these
+  def self.handle_cast({method_name, args}, class_definition)
+    if maps::is_key({:__handle_cast__, 2}, class_definition)
+      apply(maps::get({:__handle_cast__, 2}, class_definition), [self(), *args])
+    else
+      if maps::is_key({method_name, length(args)}, class_definition)
+        apply(maps::get({method_name, length(args)}, class_definition), [self(), *args])
+        {:noreply, class_definition}
+      end
+    end
+  end
+
+  def self.handle_info(_message, class_definition)
+    {:noreply, class_definition}
+  end
+
+  def self.terminate(_reason, _library)
+    :ok
+  end
+
+  def self.code_change(_old_version, class_definition, _extra)
+    {:ok, class_definition}
   end
 end

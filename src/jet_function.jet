@@ -1,14 +1,24 @@
 module jet_function
-  def to_task()
-    match erlang::fun_info(self, :arity)
-      case {:arity, 2}
-        Task::call(self)
-      case {:arity, 1}
-        Task::map(self)
+  class Function
+    def initialize(function)
+      {function: function}
     end
-  end
 
-  def arity()
-    erlang::fun_info(self, :arity)
+    def to_task()
+      match erlang::fun_info(@function, :arity)
+        case {:arity, 2}
+          Task::call(@function)
+        case {:arity, 1}
+          Task::map(@function)
+      end
+    end
+
+    def arity()
+      erlang::fun_info(@function, :arity)
+    end
+
+    def display()
+      io::format("~p~n", [@function])
+    end
   end
 end

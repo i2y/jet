@@ -8,8 +8,16 @@ Nonterminals
   class_closer
   toplevel_stmts
   toplevel_stmt
+  class_stmt
+  n2class_stmt
+  n2class_toplevel_stmts
+  n2class_toplevel_stmt
+  n2class_method_def_stmt
+  n2class_include_stmt
   class_toplevel_stmts
   class_toplevel_stmt
+  class_include_stmt
+  instance_method_stmt
   module_attr_stmt
   module_stmt
   export_stmt
@@ -17,6 +25,7 @@ Nonterminals
   export_name
   export_all_stmt
   include_stmt
+  meta_stmt
   module_names
   generic_attr_stmt
   behavior_stmt
@@ -27,6 +36,7 @@ Nonterminals
   %function_stmt
   method_stmt
   class_method_stmt
+  module_method_stmt
   args
   args_pattern
   body
@@ -56,6 +66,7 @@ Nonterminals
   if_expr
   elsif_expr
   receive_expr
+  catch_expr
   prim_expr
   binary
   binary_fields
@@ -65,7 +76,6 @@ Nonterminals
   binary_types
   binary_type
   name_expr
-  new_expr
   get_func_expr
   app_expr
   app_args
@@ -137,7 +147,6 @@ Terminals
   op_bitsl
   op_bitsr
   op_bnot
-  new
   bang
   equals
   semi
@@ -149,11 +158,13 @@ Terminals
   export_all
   module_keyword
   class_keyword
+  meta
+  n2class
   behavior
   require
   def_keyword
   try_keyword
-  except_keyword
+  catch_keyword
   as
   finally_keyword
   raise_keyword
@@ -196,7 +207,7 @@ Right 70 bang.
 Left 80 dot colon_colon.
 
 root -> module : '$1'.
-root -> class : '$1'.
+% root -> class : '$1'.
 
 module_opener -> module_keyword : '$1'.
 module_opener -> module_keyword newlines : '$1'.
@@ -218,19 +229,19 @@ class_opener -> class_keyword newlines : '$1'.
 class_closer -> end_keyword : '$1'.
 class_closer -> end_keyword newlines : '$1'.
 
-class -> class_opener name class_closer : [['$1', '$2'], [{export_all, 1}]].
-class -> class_opener name newlines class_closer : [['$1', '$2'], [{export_all, 1}]].
-class -> class_opener name class_toplevel_stmts class_closer : [['$1', '$2'], [{export_all, 1}] | '$3'].
-class -> class_opener name newlines class_toplevel_stmts class_closer : [['$1', '$2'], [{export_all, 1}] | '$4'].
-class -> class_opener name newlines export_stmt delims class_toplevel_stmts class_closer : [['$1', '$2'], '$4' | '$6'].
+% class -> class_opener name class_closer : [['$1', '$2'], [{export_all, 1}]].
+% class -> class_opener name newlines class_closer : [['$1', '$2'], [{export_all, 1}]].
+% class -> class_opener name class_toplevel_stmts class_closer : [['$1', '$2'], [{export_all, 1}] | '$3'].
+% class -> class_opener name newlines class_toplevel_stmts class_closer : [['$1', '$2'], [{export_all, 1}] | '$4'].
+% class -> class_opener name newlines export_stmt delims class_toplevel_stmts class_closer : [['$1', '$2'], '$4' | '$6'].
 
 toplevel_stmts -> toplevel_stmt: ['$1'].
 toplevel_stmts -> toplevel_stmt delims: ['$1'].
 toplevel_stmts -> toplevel_stmt delims toplevel_stmts : ['$1' | '$3'].
 
-class_toplevel_stmts -> class_toplevel_stmt: ['$1'].
-class_toplevel_stmts -> class_toplevel_stmt delims: ['$1'].
-class_toplevel_stmts -> class_toplevel_stmt delims class_toplevel_stmts : ['$1' | '$3'].
+% class_toplevel_stmts -> class_toplevel_stmt: ['$1'].
+% class_toplevel_stmts -> class_toplevel_stmt delims: ['$1'].
+% class_toplevel_stmts -> class_toplevel_stmt delims class_toplevel_stmts : ['$1' | '$3'].
 
 delims -> delim delims.
 delims -> delim.
@@ -244,11 +255,85 @@ delim -> semi.
 
 toplevel_stmt -> module_attr_stmt : '$1'.
 toplevel_stmt -> method_stmt : '$1'.
-toplevel_stmt -> class_method_stmt : '$1'.
+toplevel_stmt -> module_method_stmt : '$1'.
+toplevel_stmt -> class_stmt : '$1'.
+%toplevel_stmt -> metaclass_stmt : '$1'.
+%toplevel_stmt -> n2class_stmt : '$1'.
 
-class_toplevel_stmt -> module_attr_stmt : '$1'.
-class_toplevel_stmt -> method_stmt : '$1'.
+%metaclass_stmt -> metaclass name n2class_toplevel_stmts block_closer
+%                 : [func, '$2', [], [[map, '$3']], module].
+%metaclass_stmt -> metaclass name newlines n2class_toplevel_stmts block_closer
+%                 : [func, '$2', [], [[map, '$4']], module].
+
+%n2class_stmt -> n2class name n2class_toplevel_stmts block_closer
+%              : [n2class, '$2', [map, '$3']].
+%n2class_stmt -> n2class name newlines n2class_toplevel_stmts block_closer
+%              : [n2class, '$2', [map, '$4']].
+
+%n2class_toplevel_stmts -> n2class_toplevel_stmt: ['$1'].
+%n2class_toplevel_stmts -> n2class_toplevel_stmt delims: ['$1'].
+%n2class_toplevel_stmts -> n2class_toplevel_stmt delims n2class_toplevel_stmts : ['$1'|'$3'].
+
+%n2class_toplevel_stmt -> n2class_method_def_stmt : '$1'.
+%n2class_toplevel_stmt -> n2class_include_stmt: '$1'.
+
+%n2class_method_def_stmt -> def_keyword name args instance_method_body block_closer
+%                         : [map_field, to_atom_token('$2'), [func, add_self('$2', '$3'), '$4', instance]].
+%n2class_method_def_stmt -> def_keyword name args newlines instance_method_body block_closer
+%                         : [map_field, to_atom_token('$2'), [func, add_self('$2', '$3'), '$5', instance]].
+%n2class_method_def_stmt -> def_keyword new args instance_method_body block_closer
+%                         : [map_field, {atom, line_of('$2'), new}, [func, add_self('$2', '$3'), '$4', instance]].
+%n2class_method_def_stmt -> def_keyword new args newlines instance_method_body block_closer
+%                         : [map_field, {atom, line_of('$2'), new}, [func, add_self('$2', '$3'), '$5', instance]].
+
+%n2class_method_def_stmt -> def_keyword name args instance_method_body block_closer
+%                         : [map_field, [tuple, to_atom_token('$2'), {int, 0, length('$3')}], [func, add_self('$2', '$3'), '$4', instance]].
+%n2class_method_def_stmt -> def_keyword name args newlines instance_method_body block_closer
+%                         : [map_field, [tuple, to_atom_token('$2'), {int, 0, length('$3')}], [func, add_self('$2', '$3'), '$5', instance]].
+%n2class_method_def_stmt -> def_keyword new args instance_method_body block_closer
+%                         : [map_field, [tuple, {atom, line_of('$2'), new}, {int, 0, length('$3')}], [func, add_self('$2', '$3'), '$4', instance]].
+%n2class_method_def_stmt -> def_keyword new args newlines instance_method_body block_closer
+%                         : [map_field, [tuple, {atom, line_of('$2'), new}, {int, 0, length('$3')}], [func, add_self('$2', '$3'), '$5', instance]].
+
+%n2class_include_stmt -> include_keyword module_names : [map_field, {atom, line_of('$1'), '__include__'},
+%                                                                   [tuple | '$2']].
+
+class_stmt -> class_opener name newlines class_toplevel_stmts block_closer
+            : [class, '$2', add_classname('$4', '$2')].
+
+class_toplevel_stmts -> class_toplevel_stmt : ['$1'].
+class_toplevel_stmts -> class_toplevel_stmt delims : ['$1'].
+class_toplevel_stmts -> class_toplevel_stmt delims class_toplevel_stmts : ['$1' | '$3'].
+
+class_toplevel_stmt -> instance_method_stmt : '$1'.
+class_toplevel_stmt -> class_include_stmt : '$1'.
+class_toplevel_stmt -> meta_stmt : '$1'.
 class_toplevel_stmt -> class_method_stmt : '$1'.
+
+class_include_stmt -> include_keyword module_names : [attr, {name, 0, include}, '$2'].
+
+meta_stmt -> meta name : [attr, {name, 0, meta}, [{atom, 0, to_atom('$2')}]].
+meta_stmt -> meta name colon_colon name : [attr, {name, 0, meta}, [{atom, 0, to_atom('$2')}, {atom, 0, to_atom('$4')}]].
+
+instance_method_stmt -> def_keyword name args instance_method_body block_closer
+                      : [func, {instance, '$2'}, add_self('$3'), '$4', instance]. % [[name, {name, 0, self}] | '$3'], '$5'].
+instance_method_stmt -> def_keyword name args newlines instance_method_body block_closer
+                      : [func, {instance, '$2'}, add_self('$3'), '$5', instance]. % [[name, {name, 0, self}] | '$3'], '$5'].
+instance_method_stmt -> def_keyword name args guards then instance_method_body block_closer
+                      : [func, {instance, '$2'}, add_self('$3'), '$4', '$6', instance]. % [[name, {name, 0, self}] | '$3'], '$4','$6'].
+instance_method_stmt -> def_keyword name args guards newlines instance_method_body block_closer
+                      : [func, {instance, '$2'}, add_self('$3'), '$4','$6', instance]. % [[name, {name, 0, self}] | '$3'], '$4','$6'].
+
+class_method_stmt -> def_keyword self_dot name args newlines body block_closer
+                   : [func, {class, '$3'}, add_self('$4'), '$6', instance].
+class_method_stmt -> def_keyword self_dot name args guards then body block_closer
+                   : [func, {class, '$3'}, add_self('$4'), '$5', '$7', instance].
+class_method_stmt -> def_keyword self_dot name args guards newlines body block_closer
+                   : [func, {class, '$3'}, add_self('$4'), '$5', '$7', instance].
+
+% class_toplevel_stmt -> module_attr_stmt : '$1'.
+% class_toplevel_stmt -> method_stmt : '$1'.
+% class_toplevel_stmt -> class_method_stmt : '$1'.
 
 %module_attr_stmt -> module_stmt : '$1'.
 %module_attr_stmt -> export_stmt : '$1'.
@@ -308,42 +393,42 @@ export_name -> name op_div int : [fun_name, '$1', '$3'].
 %               : [func, '$2', '$3', '$4','$6'].
 
 method_stmt -> def_keyword name args newlines instance_method_body block_closer
-               : [func, '$2', add_self('$2', '$3'), '$5', instance]. % [[name, {name, 0, self}] | '$3'], '$5'].
+               : [func, '$2', add_self('$3'), '$5', instance]. % [[name, {name, 0, self}] | '$3'], '$5'].
 method_stmt -> def_keyword name args guards then instance_method_body block_closer
-               : [func, '$2', add_self('$2', '$3'), '$4', '$6', instance]. % [[name, {name, 0, self}] | '$3'], '$4','$6'].
+               : [func, '$2', add_self('$3'), '$4', '$6', instance]. % [[name, {name, 0, self}] | '$3'], '$4','$6'].
 method_stmt -> def_keyword name args guards newlines instance_method_body block_closer
-               : [func, '$2', add_self('$2', '$3'), '$4','$6', instance]. % [[name, {name, 0, self}] | '$3'], '$4','$6'].
+               : [func, '$2', add_self('$3'), '$4','$6', instance]. % [[name, {name, 0, self}] | '$3'], '$4','$6'].
 method_stmt -> name newline def_keyword name args newlines instance_method_body block_closer
                : [decorated_func, [attr, '$1', add_func_name_and_arity([], '$4', {int, 0, length('$5') + 1})],
-                                  [func, '$4', add_self('$4', '$5'), '$7', instance]].
+                                  [func, '$4', add_self('$5'), '$7', instance]].
 method_stmt -> name args newline def_keyword name args newlines instance_method_body block_closer
                : [decorated_func, [attr, '$1', add_func_name_and_arity('$2', '$5', {int, 0, length('$6') + 1})],
-                                  [func, '$5', add_self('$5', '$6'), '$8', instance]].
+                                  [func, '$5', add_self('$6'), '$8', instance]].
 method_stmt -> name newline def_keyword name args guards newlines instance_method_body block_closer
                : [decorated_func, [attr, '$1', add_func_name_and_arity([], '$4', {int, 0, length('$5') + 1})],
-                                  [func, '$4', add_self('$4', '$5'), '$6', '$8', instance]].
+                                  [func, '$4', add_self('$5'), '$6', '$8', instance]].
 method_stmt -> name args newline def_keyword name args guards newlines instance_method_body block_closer
                : [decorated_func, [attr, '$1', add_func_name_and_arity('$2', '$5', {int, 0, length('$6') + 1})],
-                                  [func, '$5', add_self('$5', '$6'), '$7', '$9', instance]].
+                                  [func, '$5', add_self('$6'), '$7', '$9', instance]].
 
-class_method_stmt -> def_keyword self_dot name args newlines body block_closer
-               : [func, '$3', '$4', '$6', module].
-class_method_stmt -> def_keyword self_dot name args guards then body block_closer
-               : [func, '$3', '$4', '$5', '$7', module].
-class_method_stmt -> def_keyword self_dot name args guards newlines body block_closer
-               : [func, '$3', '$4', '$5', '$7', module].
-class_method_stmt -> name newline def_keyword self_dot name args newlines body block_closer
-               : [decorated_func, [attr, '$1', add_func_name_and_arity([], '$5', {int, 0, length('$6')})],
-                                  [func, '$5', '$6', '$8', module]].
-class_method_stmt -> name args newline def_keyword self_dot name args newlines body block_closer
-               : [decorated_func, [attr, '$1', add_func_name_and_arity('$2', '$6', {int, 0, length('$7')})],
-                                  [func, '$6', '$7', '$9', module]].
-class_method_stmt -> name newline def_keyword self_dot name args guards newlines body block_closer
-               : [decorated_func, [attr, '$1', add_func_name_and_arity([], '$5', {int, 0, length('$6')})],
-                                  [func, '$5', '$6', '$7', '$9', module]].
-class_method_stmt -> name args newline def_keyword self_dot name args guards newlines body block_closer
-               : [decorated_func, [attr, '$1', add_func_name_and_arity('$2', '$6', {int, 0, length('$7')})],
-                                  [func, '$6', '$7', '$8', '$10', module]].
+module_method_stmt -> def_keyword self_dot name args newlines body block_closer
+                    : [func, '$3', '$4', '$6', module].
+module_method_stmt -> def_keyword self_dot name args guards then body block_closer
+                    : [func, '$3', '$4', '$5', '$7', module].
+module_method_stmt -> def_keyword self_dot name args guards newlines body block_closer
+                    : [func, '$3', '$4', '$5', '$7', module].
+module_method_stmt -> name newline def_keyword self_dot name args newlines body block_closer
+                    : [decorated_func, [attr, '$1', add_func_name_and_arity([], '$5', {int, 0, length('$6')})],
+                                       [func, '$5', '$6', '$8', module]].
+module_method_stmt -> name args newline def_keyword self_dot name args newlines body block_closer
+                    : [decorated_func, [attr, '$1', add_func_name_and_arity('$2', '$6', {int, 0, length('$7')})],
+                                       [func, '$6', '$7', '$9', module]].
+module_method_stmt -> name newline def_keyword self_dot name args guards newlines body block_closer
+                    : [decorated_func, [attr, '$1', add_func_name_and_arity([], '$5', {int, 0, length('$6')})],
+                                       [func, '$5', '$6', '$7', '$9', module]].
+module_method_stmt -> name args newline def_keyword self_dot name args guards newlines body block_closer
+                    : [decorated_func, [attr, '$1', add_func_name_and_arity('$2', '$6', {int, 0, length('$7')})],
+                                       [func, '$6', '$7', '$8', '$10', module]].
 
 args -> paren_opener args_pattern paren_closer : '$2'.
 args -> paren_opener paren_closer : [].
@@ -384,7 +469,7 @@ body -> stmts : set_context('$1', class_or_module_method).
 body -> '$empty' : [].
 
 instance_method_body -> stmts : set_context('$1', instance_method).
-instance_method_body -> '$empty' : [].
+instance_method_body -> '$empty' : set_context([], instance_method).
 
 stmts -> stmt: ['$1'].
 stmts -> stmt delims: ['$1'].
@@ -429,6 +514,8 @@ binop_expr -> binop_expr dot name app_args : [{call_method, line_of('$2')}, '$1'
 binop_expr -> self_dot name : [{call_method, line_of('$2')}, [name, {name, line_of('$1'), self}], '$2', []].
 binop_expr -> binop_expr dot name : [{call_method, line_of('$2')}, '$1', '$3', []].
 binop_expr -> binop_expr dot app_args : [apply, [func_ref, '$1'], '$3'].
+binop_expr -> operator dot name : [{call_method, line_of('$2')}, [apply, '$1', []], '$3', []].
+binop_expr -> operator dot name app_args: [{call_method, line_of('$2')}, [apply, '$1', []], '$3', '$4'].
 binop_expr -> op_not binop_expr : ['$1', '$2'].
 binop_expr -> op_bnot binop_expr : ['$1', '$2'].
 binop_expr -> expr : '$1'.
@@ -437,7 +524,6 @@ expr -> case_expr : '$1'.
 expr -> paren_expr : '$1'.
 expr -> prim_expr : '$1'.
 expr -> name_expr : '$1'.
-expr -> new_expr : '$1'.
 expr -> cons_expr : '$1'.
 expr -> tuple_expr : '$1'.
 expr -> map_expr : '$1'.
@@ -451,6 +537,7 @@ expr -> get_func_expr : '$1'.
 expr -> ref_attr_expr : '$1'.
 expr -> if_expr : '$1'.
 expr -> receive_expr : '$1'.
+expr -> catch_expr: '$1'.
 
 paren_expr -> paren_opener binop_expr paren_closer : '$2'.
 
@@ -490,8 +577,6 @@ binary_types -> binary_type op_minus binary_types : ['$1'|'$3'].
 binary_type -> name : '$1'.
 
 name_expr -> name : [name] ++ ['$1'].
-
-new_expr -> new name app_args : ['$1', '$2', '$3'].
 
 cons_expr -> brack_opener brack_closer : nil.
 cons_expr -> brack_opener elem brack_closer : [cons, '$2', nil].
@@ -563,6 +648,8 @@ receive_expr -> receive_keyword newlines case_clauses block_closer
               : ['$1', '$3'].
 receive_expr -> receive_keyword newlines case_clauses newlines after_keyword int newlines body block_closer
               : ['$1', '$3', '$6', '$8'].
+
+catch_expr -> catch_keyword binop_expr : [{catch_keyword, line_of('$1')}, '$2'].
 
 case_expr -> match_keyword binop_expr newlines case_clauses block_closer : ['$1', '$2', '$4'].
 
@@ -638,7 +725,7 @@ elsif_expr -> elsif binop_expr newlines body elsif_expr
 
 get_func_expr -> amp name dot name op_div int : [get_func, '$2', '$4', '$6'].
 get_func_expr -> amp name op_div int : [get_func, '$2', '$4'].
-
+get_func_expr -> amp name op_div binop_expr : [get_func, '$2', '$4'].
 
 Erlang code.
 
@@ -647,6 +734,18 @@ count_char(String, Char) ->
            (_, N)                 -> N
         end,
     lists:foldl(F, 0, String).
+
+add_classname([attr, {name, 0, include} | Rest], {name, _, Classname}) ->
+    [attr, {name, 0, "_" ++ Classname ++ "_include"} | Rest];
+add_classname([attr, {name, 0, meta} | Rest], {name, _, Classname}) ->
+    [attr, {name, 0, "_" ++ Classname ++ "_meta"} | Rest];
+add_classname([func, {Type, Name}|Rest], {name, _, Classname}) ->
+    {name, LineNumber, FuncName} = Name,
+    [func, {name, LineNumber, "_" ++ Classname ++ "_" ++ atom_to_list(Type) ++ "_method_" ++ FuncName} | Rest];
+add_classname([Function|Functions], Classname) ->
+    [add_classname(Function, Classname)|add_classname(Functions, Classname)];
+add_classname([], Classname) ->
+    [].
 
 add_func_name_and_arity(Attr_values, Func_name, Arity) ->
     Attr_values ++ [[tuple, to_atom_token(Func_name), Arity]].
@@ -663,8 +762,11 @@ to_atom_token(Token) ->
 value(Token) ->
     element(3, Token).
 
-add_self(Func_name, Args) ->
+add_self(Args) ->
     [[name, {name, 0, self}] | Args].
+
+add_class(Func_name) ->
+    {name, line_of(Func_name), "__class_" ++ value(Func_name)}.
 
 set_context(Value, Context) ->
     put(context, Context),

@@ -1,32 +1,42 @@
 module jet_tuple
-  include Enumerable
+  class Tuple
+    include Enumerable
 
-  def reduce(acc, func)
-    list = tuple_to_list(self)
-    lists::foldl(func, acc, list)
-  end
+    def initialize(tuple)
+      {tuple: tuple}
+    end
 
-  def nth(n)
-    erlang::element(n, self)
-  end
+    def reduce(acc, func)
+      list = tuple_to_list(@tuple)
+      lists::foldl(func, acc, list)
+    end
 
-  def set(n, item)
-    erlang::setelement(n, self, item)
-  end
+    def nth(n)
+      erlang::element(n, @tuple)
+    end
 
-  def size()
-    erlang::tuple_size(self)
-  end
+    def set(n, item)
+      erlang::setelement(n, @tuple, item)
+    end
 
-  def append(item)
-    erlang::append_element(self, item)
-  end
+    def size()
+      erlang::tuple_size(@tuple)
+    end
 
-  def add(item)
-    erlang::append_element(self, item)
-  end
+    def append(item)
+      erlang::append_element(@tuple, item)
+    end
 
-  def to_list()
-    erlang::tuple_to_list(self)
+    def add(item)
+      erlang::append_element(@tuple, item)
+    end
+
+    def to_list()
+      erlang::tuple_to_list(@tuple)
+    end
+
+    def display()
+      io::format("~p~n", [@tuple])
+    end
   end
 end

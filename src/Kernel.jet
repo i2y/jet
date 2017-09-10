@@ -1,34 +1,11 @@
 module Kernel
   def display()
-    io::format("~p~n", [self])
+    {_, _, state} = self
+    io::format("~p~n", [state])
   end
 
   def send_to(actor)
     actor ! self
-  end
-
-  def class_obj()
-    {:object, module_name, _} = self
-    new Class(module_name)
-  end
-
-  def class_info(info_type)
-    {:object, module_name, _} = self
-    apply(module_name, :module_info, [info_type])
-  end
-
-  def class_info()
-    {:object, module_name, _} = self
-    apply(module_name, :module_info, [])
-  end
-
-  def class_attrs()
-    {:object, module_name, _} = self
-    apply(module_name, :module_info, [:attributes])
-  end
-
-  def class_attr_values(attribute_name)
-    proplists::get_all_values(attribute_name, class_attrs())
   end
 
   def spawn(f)
@@ -82,5 +59,71 @@ module Kernel
   def clone(new_state)
     {:object, module_name, state} = self
     {:object, module_name, state.merge(new_state)}
+  end
+
+  def cast() if is_pid(self)
+    Kernel::Caster.new(self)
+  end
+
+  def stop() if is_pid(self)
+    gen_server::stop(self)
+  end
+
+  def stop(reason, timeout) if is_pid(self)
+    gen_server::stop(self, reason, timeout)
+  end
+
+  class Future
+    def initialize(result_of_async_call)
+      {key: result_of_async_call}
+    end
+
+    def await()
+      rpc::yield(@key)
+    end
+
+    def await(timeout)
+      rpc::nb_yield(@key, timeout)
+    end
+  end
+
+  class Caster
+    def initialize(instance_of_gen_server)
+      {pid: instance_of_gen_server}
+    end
+
+    def method_missing(method_name, args)
+      gen_server::cast(@pid, {method_name, args})
+    end
+
+    def stop()
+      gen_server::stop(@pid)
+    end
+
+    def stop(reason, timeout)
+      gen_server::stop(@pid, reason, timeout)
+    end
+  end
+
+  def async() if is_pid(self)
+    Kernel::AsyncCaller.new(self)
+  end
+
+  class AsyncCaller
+    def initialize(instance_of_gen_server)
+      {pid: instance_of_gen_server}
+    end
+
+    def method_missing(method_name, args)
+      Kernel::Future.new(rpc::async_call(erlang::node(), :jet_runtime, :call_method, [@pid, method_name, args]))
+    end
+
+    def stop()
+      gen_server::stop(@pid)
+    end
+
+    def stop(reason, timeout)
+      gen_server::stop(@pid, reason, timeout)
+    end
   end
 end

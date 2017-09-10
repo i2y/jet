@@ -1,5 +1,15 @@
 module jet_binary
-  def to_list()
-    erlang::binary_to_list(self)
+  class Binary
+    def initialize(binary)
+      {binary: binary}
+    end
+
+    def to_list()
+      erlang::binary_to_list(@binary)
+    end
+
+    def display()
+      io::format("~p~n", [@binary])
+    end
   end
 end

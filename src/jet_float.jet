@@ -1,7 +1,17 @@
 module jet_float
-  include Numeric
+  class Float
+    include Numeric
 
-  def to_list()
-    erlang::float_to_list(self)
+    def initialize(value)
+      {value: value}
+    end
+
+    def to_list()
+      erlang::float_to_list(@value)
+    end
+
+    def display()
+      io::format("~p~n", [@value])
+    end
   end
 end

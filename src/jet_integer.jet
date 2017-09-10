@@ -1,33 +1,44 @@
 module jet_integer
-  include Numeric
+  class Integer
+    include Numeric
 
-  def times(func) if is_function(func, 0)
-    if self == 0
-      nil
-    elsif self == 1
-      func.()
-    else
-      func.()
-      (self - 1).times(func)
+    def initialize(value)
+      {value: value}
     end
-  end
 
-  def times(func) if is_function(func, 1)
-    if self == 0
-      nil
-    elsif self == 1
-      func.(1)
-    else
-      func.(self)
-      (self - 1).times(func)
+    def times(func)
+      value = @value
+      if value == 0
+        nil
+      else
+        if erlang::is_function(func, 0)
+          if value == 1
+            func.()
+          else
+            func.()
+            (value - 1).times(func)
+          end
+        else
+          if value == 1
+            func.(1)
+          else
+            func.(value)
+            (value - 1).times(func)
+          end
+        end
+      end
     end
-  end
 
-  def to_list()
-    erlang::integer_to_list(self)
-  end
+    def to_list()
+      erlang::integer_to_list(@value)
+    end
 
-  def pipe_to(other)
-    self + other
+    def pipe_to(other)
+      @value + other
+    end
+
+    def display()
+      io::format("~p~n", [@value])
+    end
   end
 end

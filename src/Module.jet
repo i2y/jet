@@ -1,9 +1,0 @@
-class Module
-  def initialize(module_name)
-    {module_name: module_name}
-  end
-
-  def method_missing(method_name, args)
-    apply(@module_name, method_name, args)
-  end
-end

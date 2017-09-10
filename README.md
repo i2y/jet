@@ -6,11 +6,7 @@
 
 Jet is a simple OOP, dynamically typed, functional language that runs on the [Erlang](http://www.erlang.org) virtual machine (BEAM).
 Jet's syntax is [Ruby](https://www.ruby-lang.org)-like syntax.
-
 Jet was inspired by [Reia](https://github.com/tarcieri/reia) and [Celluloid](https://github.com/celluloid/celluloid).
-Jet has actor library like [Celluloid](https://github.com/celluloid/celluloid) that supports synchronous message passing and asynchronous message passing. For the examples, please see [SampleActor.jet](https://github.com/i2y/jet/blob/master/src/SampleActor.jet) and [test_basic.jet](https://github.com/i2y/jet/blob/master/test/test_basic.jet).
-
-Jet also has a stream processing library like [Streem](https://github.com/matz/streem). For the examples, please see [test_basic.jet](https://github.com/i2y/jet/blob/master/test/test_basic.jet).
 
 ## Language features
 ### Builtin Types
@@ -210,36 +206,6 @@ class SampleList
 end
 ```
 
-### Module attributes
-SampleList.jet:
-```ruby
-class SampleList
-  include Enumerable
-  @@author("i2y", "others") # a module attribute
-
-  def initialize(items)
-    {items: items}
-  end
-
-  obsolete # a module attribute and an annotation
-  def reduce(acc, func)
-    lists::foldl(func, acc, @items)
-  end
-
-  obsolete("since version 12")
-  def append(item)
-    @items.append(item)
-  end
-end
-
-# # usage:
-# list = new SampleList([1, 2, 3])
-# list.class_attr_values(:author)
-# # => [["i2y", "others"]]
-# list.class_attr_values(:obsolete)
-# # => [[(:reduce, 3)], ["since version 12", (:append, 2)]]
-```
-
 ### Trailing closures (Trailing blocks)
 ```ruby
 sample_list = new SampleList([1, 2, 3])
@@ -252,7 +218,7 @@ sample_list.select {|item| item > 1}
 - Tail recursion optimization
 - Pattern matching
 
-### Not supported features
+### Currently unsupported features
 - Class inheritance
 - Macro definition
 
