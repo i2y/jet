@@ -4,233 +4,230 @@
 > computers on a network, only able to communicate with messages"
 > _--Alan Kay, creator of Smalltalk, on the meaning of "object oriented programming"_
 
-Jet is a simple OOP, dynamically typed, functional language that runs on the [Erlang](http://www.erlang.org) virtual machine (BEAM).
-Jet's syntax is [Ruby](https://www.ruby-lang.org)-like syntax.
-Jet was inspired by [Reia](https://github.com/tarcieri/reia) and [Celluloid](https://github.com/celluloid/celluloid).
+Jet is a dynamically typed, OOP-functional language with Ruby-like syntax that runs on the [Erlang](http://www.erlang.org) virtual machine (BEAM).
+Inspired by [Reia](https://github.com/tarcieri/reia) and [Celluloid](https://github.com/celluloid/celluloid).
 
-## Language features
-### Builtin Types
+## Language Features
+
+### Types
+
 ```ruby
-### Numbers
+# Numbers
+49        # integer
+4.9       # float
 
-49  # integer
-4.9 # float
-
-### Booleans
-
+# Booleans
 true
 false
 
-### Atoms
-
+# Atoms
 :foo
 
-### Lists
-
+# Lists
 list = [2, 3, 4]
-list2 = [1, *list] # => [1, 2, 3, 4]
-[1, 2, 3, *rest] = list2
-rest # => [4]
+[1, *list]             # => [1, 2, 3, 4]
+[head, *rest] = list   # head => 2, rest => [3, 4]
 
-list.append(5) # => [2, 3, 4, 5]
-list # => [2, 3, 4]
+# Tuples
+{1, 2, 3}
 
+# Maps
+dict = {name: "jet", version: 2}
+dict.get(:name, "?")  # => "jet"
 
-list.select {|item| item > 2}
-    .map {|item| item * 2} # => [6, 8]
-list # => [2, 3, 4]
+# Strings (charlists)
+"Hello"
 
-# list comprehensions
-[n * 2 for n in list] # => [4, 6, 8]
+# Binaries
+<<1, 2, 3>>
+<<"abc">>
 
-### Tuples
-
-tuple = {1, 2, 3}
-tuple.select {|item| item > 1}
-     .map {|item| item * 2} # => [4, 6]
-
-tuple.to_list # => [1, 2, 3]
-
-
-### Maps
-
-dict = {foo: 1, bar: 2}
-dict2 = dict.put(:baz, 3) # => {foo: 1, bar: 2, baz: 3}
-dict # => {foo: 1, bar: 2}
-dict.get(:baz, 100) # => 100
-
-### Strings (Lists)
-
-"Abc"
-
-
-### Anonymous functions (Blocks)
-
+# Anonymous functions
 add = {|x, y| x + y}
-add(40, 9) # => 49
+add.(3, 4)  # => 7
 
 multiply = do |x, y|
   x * y
 end
-
-multiply(7, 7) # => 49
-
-
-### Binaries
-
-<<1, 2, 3>>
-<<"abc">>
-<<1 , 2, x>> = <<1, 2, 3>>
-x # => 3
-
 ```
 
-### Class definition
-Car.jet
+### Variable Rebinding
+
 ```ruby
-Module Car
-  class Car
-    # On jet, state of an instance is immutable.
-    # The initialize method returns initial state of an instance.
-    def initialize()
-      {name: "foo",
-       speed: 100}
+# x = x + 1 just works — the compiler generates fresh BEAM variables
+total = 0
+total = total + 10
+total = total + 20
+total  # => 30
+```
+
+### Classes & Immutable State
+
+```ruby
+module Geometry
+  class Point
+    def initialize(x, y)
+      @x = x
+      @y = y
+      self
     end
 
-    def display()
-      @name.display()
-      @speed.display()
+    def move(dx, dy)
+      @x = @x + dx
+      @y = @y + dy
+      self
     end
- end
-end
-```
 
-### Module definition
-Enumerable.jet
-```ruby
-module Enumerable
-  def select(func)
-    reduce([]) {|item, acc|
-      if func.(item)
-        acc ++ [item]
-      else
-        acc
-      end
-    }
-  end
-
-  def filter(func)
-    reduce([]) {|item, acc|
-      if func.(item)
-        acc ++ [item]
-      else
-        acc
-      end
-    }
-  end
-
-  def reject(func)
-    reduce([]) {|item, acc|
-      if func.(item)
-        acc
-      else
-        acc ++ [item]
-      end
-    }
-  end
-
-  def map(func)
-    reduce([]) {|item, acc|
-      acc ++ [func.(item)]
-    }
-  end
-
-  def collect(func)
-    reduce([]) {|item, acc|
-      acc ++ [func.(item)]
-    }
-  end
-
-  def min(func)
-    reduce(:infinity) {|item, acc|
-      match func.(acc, item)
-        case -1
-          0
-        case 0
-          0
-        case 1
-          item
-      end
-    }
-  end
-
-  def min()
-    reduce(:infinity) {|item, acc|
-      if acc <= item
-        acc
-      else
-        item
-      end
-    }
-  end
-
-  def unique()
-    reduce([]) {|item, acc|
-      if acc.index_of(item)
-        acc
-      else
-        acc ++ [item]
-      end
-    }
-  end
-
-  def each(func)
-    reduce([]) {|item, acc|
-      func.(item)
-    }
+    def x()  @x  end
+    def y()  @y  end
   end
 end
+
+p = Geometry::Point.new(0, 0)
+p2 = p.move(3, 4)
+# p is unchanged — each mutation returns a new object
 ```
 
-### Mixing in Modules
-SampleList.jet
+### Mixins — Composition over Inheritance
+
 ```ruby
-module SampleList
-  class SampleList
+module MyStack
+  class Stack
     include Enumerable
 
-    def initialize(items)
-      {items: items}
+    def initialize()
+      @items = []
+      self
+    end
+
+    def push(item)
+      @items = [item, *@items]
+      self
     end
 
     def reduce(acc, func)
-      lists::foldl(func, acc, @items)
+      lists::foldl({|item, a| func.(a, item)}, acc, @items)
     end
   end
 end
+
+s = MyStack::Stack.new().push(10).push(20).push(30)
+s.map {|n| n * 2}                 # => [60, 40, 20]
+s.reduce(0) {|acc, n| acc + n}    # => 60
 ```
 
-### Trailing closures (Trailing blocks)
+### Actors
+
+The `actor` keyword creates a process-backed class (OTP gen_server). `expose` declares its public interface.
+
 ```ruby
-sample_list = SampleList::SampleList.new([1, 2, 3])
-sample_list.select {|item| item > 1}
-           .map {|item| item * 2}
-           # => [4, 6]
+module Chat
+  actor Room
+    expose post(user, text), recent(n), count()
+
+    def initialize(name)
+      @name = name
+      @messages = []
+    end
+
+    def post(user, text)
+      @messages = [{user, text}, *@messages]
+      :ok
+    end
+
+    def recent(n)
+      lists::sublist(@messages, n)
+    end
+
+    def count()
+      erlang::length(@messages)
+    end
+
+    def on_terminate(reason)
+      puts("Room closing: ~p", [reason])
+    end
+  end
+end
+
+room = Chat::Room.spawn("general")
+room.post("alice", "Hello!")
+room.count()  # => 1
+
+# Async & cast
+future = room.async().count()
+future.await()        # => 1
+room.cast().post("bob", "Fire and forget")
+
+# Timers & raw messages
+room ! {:custom, "message"}     # send raw message (handled by on_message)
+send_after(1000, room, :ping)   # delayed message
+
+# Monitoring
+monitor(room)  # receive {:DOWN, ref, :process, pid, reason} on exit
 ```
 
-### Other supported features
-- Tail recursion optimization
-- Pattern matching
+### Effect Declarations (`needs` / `platform`)
 
-### Currently unsupported features
-- Class inheritance
-- Macro definition
+```ruby
+module Greeter
+  needs Console
+
+  def self.greet(name)
+    Console::puts("Hello, " ++ name ++ "!")
+  end
+end
+
+# Provide concrete implementations via platform blocks
+platform Production
+  provide Console with StandardConsole
+end
+```
+
+### Pattern Matching
+
+```ruby
+match {x, y}
+  case {0, 0}
+    "origin"
+  case {0, _}
+    "on Y axis"
+  case {x, y} if x == y
+    "on diagonal"
+  case _
+    "somewhere else"
+end
+```
+
+### Erlang Interop
+
+```ruby
+# Call any Erlang/OTP module with :: syntax
+node = erlang::node()
+timer::sleep(1000)
+lists::sort([3, 1, 2])  # => [1, 2, 3]
+```
+
+### Higher-Order Functions
+
+```ruby
+nums = [5, 3, 8, 1, 9]
+
+nums.map {|n| n * 2}             # => [10, 6, 16, 2, 18]
+nums.select {|n| n > 4}          # => [5, 8, 9]
+nums.reduce(0) {|acc, n| acc + n}  # => 26
+
+3.times do |i|
+  puts("tick ~p", [i])
+end
+```
 
 ## Requirements
+
 - Erlang/OTP >= 26.0
 - Gleam >= 1.0
 
 ## Installation
+
 ```sh
 $ git clone https://github.com/i2y/jet.git
 $ cd jet
@@ -242,16 +239,19 @@ $ ./jet --help
 ## Usage
 
 ### Compiling a single file
+
 ```sh
 $ ./jet Foo.jet
 ```
 
 ### Compiling and executing
+
 ```sh
 $ ./jet -r Foo::bar Foo.jet
 ```
 
 ### Building a project
+
 ```sh
 $ ./jet build src/
 ```
@@ -274,17 +274,10 @@ $ ./jet release MyApp src/
 $ ./_release/bin/myapp
 ```
 
-**Entry point convention:** `jet escript` and `jet release` call `Module::main()`. Your app module must define `def self.main()`.
-
-```jet
-module MyApp
-  def self.main()
-    puts("Hello from Jet!")
-  end
-end
-```
+**Entry point convention:** `jet escript` and `jet release` call `Module::main()`. Define `def self.main()` in your app module.
 
 ### Running tests
+
 ```sh
 $ gleam test
 ```
