@@ -59,27 +59,27 @@ total  # => 30
 
 ### Classes & Immutable State
 
+`@attr` reads and writes instance state. Each mutation returns a new object — the original is unchanged. The compiler automatically returns `self` at the end of `initialize`.
+
 ```ruby
-module Geometry
-  class Point
-    def initialize(x, y)
-      @x = x
-      @y = y
-      self
-    end
-
-    def move(dx, dy)
-      @x = @x + dx
-      @y = @y + dy
-      self
-    end
-
-    def x()  @x  end
-    def y()  @y  end
+# Point.jet — standalone class (no module wrapper needed)
+class Point
+  def initialize(x, y)
+    @x = x
+    @y = y
   end
+
+  def move(dx, dy)
+    @x = @x + dx
+    @y = @y + dy
+    self
+  end
+
+  def x()  @x  end
+  def y()  @y  end
 end
 
-p = Geometry::Point.new(0, 0)
+p = Point.new(0, 0)
 p2 = p.move(3, 4)
 # p is unchanged — each mutation returns a new object
 ```
@@ -87,65 +87,60 @@ p2 = p.move(3, 4)
 ### Mixins — Composition over Inheritance
 
 ```ruby
-module MyStack
-  class Stack
-    include Enumerable
+class Stack
+  include Enumerable
 
-    def initialize()
-      @items = []
-      self
-    end
+  def initialize()
+    @items = []
+  end
 
-    def push(item)
-      @items = [item, *@items]
-      self
-    end
+  def push(item)
+    @items = [item, *@items]
+    self
+  end
 
-    def reduce(acc, func)
-      lists::foldl({|item, a| func.(a, item)}, acc, @items)
-    end
+  def reduce(acc, func)
+    lists::foldl({|item, a| func.(a, item)}, acc, @items)
   end
 end
 
-s = MyStack::Stack.new().push(10).push(20).push(30)
+s = Stack.new().push(10).push(20).push(30)
 s.map {|n| n * 2}                 # => [60, 40, 20]
 s.reduce(0) {|acc, n| acc + n}    # => 60
 ```
 
 ### Actors
 
-The `actor` keyword creates a process-backed class (OTP gen_server). `expose` declares its public interface.
+The `actor` keyword creates a process-backed class (OTP gen_server). `expose` declares its public interface. Actor state uses the process dictionary, so methods don't need to return `self`.
 
 ```ruby
-module Chat
-  actor Room
-    expose post(user, text), recent(n), count()
+actor ChatRoom
+  expose post(user, text), recent(n), count()
 
-    def initialize(name)
-      @name = name
-      @messages = []
-    end
+  def initialize(name)
+    @name = name
+    @messages = []
+  end
 
-    def post(user, text)
-      @messages = [{user, text}, *@messages]
-      :ok
-    end
+  def post(user, text)
+    @messages = [{user, text}, *@messages]
+    :ok
+  end
 
-    def recent(n)
-      lists::sublist(@messages, n)
-    end
+  def recent(n)
+    lists::sublist(@messages, n)
+  end
 
-    def count()
-      erlang::length(@messages)
-    end
+  def count()
+    erlang::length(@messages)
+  end
 
-    def on_terminate(reason)
-      puts("Room closing: ~p", [reason])
-    end
+  def on_terminate(reason)
+    puts("Room closing: ~p", [reason])
   end
 end
 
-room = Chat::Room.spawn("general")
+room = ChatRoom.spawn("general")
 room.post("alice", "Hello!")
 room.count()  # => 1
 
