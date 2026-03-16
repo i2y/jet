@@ -49,6 +49,8 @@ module Config
       @workflow_dir = maps::get(:workflow_dir, opts, nil)
       @workflow_router = maps::get(:workflow_router, opts, nil)
       @workflows = maps::get(:workflows, opts, nil)
+      # Agent Skills
+      @skills_dir = maps::get(:skills_dir, opts, ".agents/skills")
       self
     end
 
@@ -164,6 +166,10 @@ module Config
       @workflows
     end
 
+    def skills_dir()
+      @skills_dir
+    end
+
     # Build hooks map from config (used by Scheduler/Worker)
     def hooks()
       h = {}
@@ -217,7 +223,8 @@ module Config
       prompt_template: config.prompt_template(),
       workflow_dir: config.workflow_dir(),
       workflow_router: config.workflow_router(),
-      workflows: config.workflows()
+      workflows: config.workflows(),
+      skills_dir: config.skills_dir()
     }
     Config::Settings.new(maps::merge(base, overrides))
   end

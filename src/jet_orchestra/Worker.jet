@@ -85,7 +85,7 @@ module Worker
       # Run agent via runner protocol
       runner_mod = @runner
       if runner_mod != nil
-        runner_opts = {allowed_tools: @config.allowed_tools()}
+        runner_opts = {allowed_tools: @config.allowed_tools(), skills_dir: @config.skills_dir()}
         erlang::apply(runner_mod, :run, [@workspace, prompt, self(), runner_opts])
       else
         Runner::run(@workspace, prompt, self(), {})

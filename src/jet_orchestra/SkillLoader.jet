@@ -1,0 +1,329 @@
+# Orchestra SkillLoader — Agent Skills spec (agentskills.io) loader
+#
+# Discovers, loads, and manages Agent Skills following the official spec.
+# Skills are directories containing a SKILL.md with YAML frontmatter.
+#
+# Directory structure:
+#   .agents/skills/
+#   └── skill-name/
+#       ├── SKILL.md          # Required: YAML frontmatter + instructions
+#       ├── scripts/          # Optional: executable code
+#       ├── references/       # Optional: documentation
+#       └── assets/           # Optional: templates, resources
+#
+# Usage:
+#   skills = SkillLoader::discover("/path/to/workspace")
+#   skill = SkillLoader::load("/path/to/workspace/.agents/skills/pdf")
+#   SkillLoader::install_from_marketplace("anthropics/skills", ["pdf"], "/path")
+
+module SkillLoader
+
+  # --- Discovery ---
+
+  # Discover all skills in .agents/skills/ directory
+  # Returns: [{name, description, path, allowed_tools, ...}, ...]
+  def self.discover(workspace_root)
+    skills_dir = ensure_list(workspace_root) ++ "/.agents/skills"
+    match file::list_dir(skills_dir)
+      case {:ok, entries}
+        discover_entries(entries, skills_dir, [])
+      case {:error, :enoent}
+        []
+      case {:error, _reason}
+        []
+    end
+  end
+
+  def self.discover_entries([], _base_dir, acc)
+    lists::reverse(acc)
+  end
+
+  def self.discover_entries([entry, *rest], base_dir, acc)
+    skill_dir = base_dir ++ "/" ++ entry
+    skill_md = skill_dir ++ "/SKILL.md"
+    if filelib::is_file(skill_md)
+      match parse_skill_file(skill_md)
+        case {:ok, frontmatter, _body}
+          skill_info = {
+            name: maps::get(:name, frontmatter, entry),
+            description: maps::get(:description, frontmatter, ""),
+            path: skill_dir,
+            allowed_tools: maps::get(:allowed_tools, frontmatter, nil),
+            license: maps::get(:license, frontmatter, nil),
+            compatibility: maps::get(:compatibility, frontmatter, nil),
+            metadata_info: maps::get(:metadata_info, frontmatter, {})
+          }
+          discover_entries(rest, base_dir, [skill_info, *acc])
+        case {:error, _reason}
+          discover_entries(rest, base_dir, acc)
+      end
+    else
+      discover_entries(rest, base_dir, acc)
+    end
+  end
+
+  # --- Loading ---
+
+  # Load a skill fully (frontmatter + body + file listings)
+  def self.load(skill_path)
+    skill_md = ensure_list(skill_path) ++ "/SKILL.md"
+    match parse_skill_file(skill_md)
+      case {:ok, frontmatter, body}
+        scripts = list_dir_files(ensure_list(skill_path) ++ "/scripts")
+        references = list_dir_files(ensure_list(skill_path) ++ "/references")
+        assets = list_dir_files(ensure_list(skill_path) ++ "/assets")
+        {:ok, {
+          name: maps::get(:name, frontmatter, "unknown"),
+          description: maps::get(:description, frontmatter, ""),
+          path: ensure_list(skill_path),
+          allowed_tools: maps::get(:allowed_tools, frontmatter, nil),
+          license: maps::get(:license, frontmatter, nil),
+          compatibility: maps::get(:compatibility, frontmatter, nil),
+          metadata_info: maps::get(:metadata_info, frontmatter, {}),
+          body: body,
+          scripts: scripts,
+          references: references,
+          assets: assets
+        }}
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  # Read a specific file from a skill (scripts/, references/, assets/)
+  def self.read_file(skill_path, relative_path)
+    full_path = ensure_list(skill_path) ++ "/" ++ ensure_list(relative_path)
+    match file::read_file(full_path)
+      case {:ok, content}
+        {:ok, binary_to_list(content)}
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  # --- Marketplace ---
+
+  # List available skills from a marketplace repository
+  # repo_url: GitHub repo (e.g. "anthropics/skills")
+  def self.list_marketplace(repo_url)
+    # Clone to a temp dir and read marketplace.json
+    tmp_dir = "/tmp/jet_marketplace_" ++ sanitize(ensure_list(repo_url))
+    # Clean up previous clone
+    os::cmd("rm -rf " ++ tmp_dir)
+    clone_cmd = "gh repo clone " ++ ensure_list(repo_url) ++ " " ++ tmp_dir ++ " -- --depth 1 2>&1"
+    os::cmd(clone_cmd)
+
+    marketplace_path = tmp_dir ++ "/.claude-plugin/marketplace.json"
+    match file::read_file(marketplace_path)
+      case {:ok, content}
+        match jet_json_ffi::decode(content)
+          case {:ok, parsed}
+            plugins = maps::get(<<"plugins">>, parsed, [])
+            skills = extract_marketplace_skills(plugins, [])
+            {:ok, {name: binary_to_list(maps::get(<<"name">>, parsed, <<"">>)),
+                   skills: skills,
+                   tmp_dir: tmp_dir}}
+          case {:error, reason}
+            os::cmd("rm -rf " ++ tmp_dir)
+            {:error, {:json_decode, reason}}
+        end
+      case {:error, reason}
+        os::cmd("rm -rf " ++ tmp_dir)
+        {:error, {:no_marketplace, reason}}
+    end
+  end
+
+  def self.extract_marketplace_skills([], acc)
+    lists::reverse(acc)
+  end
+
+  def self.extract_marketplace_skills([plugin, *rest], acc)
+    plugin_name = binary_to_list(maps::get(<<"name">>, plugin, <<"">>))
+    plugin_desc = binary_to_list(maps::get(<<"description">>, plugin, <<"">>))
+    skill_paths = maps::get(<<"skills">>, plugin, [])
+    entries = lists::map(do |sp|
+      {plugin: plugin_name, plugin_description: plugin_desc, skill_path: binary_to_list(sp)}
+    end, skill_paths)
+    extract_marketplace_skills(rest, lists::append(lists::reverse(entries), acc))
+  end
+
+  # Install skills from a marketplace into .agents/skills/
+  # marketplace_info: result from list_marketplace
+  # skill_names: list of skill names to install (e.g. ["pdf", "xlsx"])
+  # target_root: workspace root (skills go to <root>/.agents/skills/)
+  def self.install_from_marketplace(marketplace_info, skill_names, target_root)
+    tmp_dir = maps::get(:tmp_dir, marketplace_info)
+    all_skills = maps::get(:skills, marketplace_info)
+    target_dir = ensure_list(target_root) ++ "/.agents/skills"
+    filelib::ensure_dir(target_dir ++ "/dummy")
+
+    results = lists::map(do |name|
+      name_str = ensure_list(name)
+      # Find the skill in marketplace entries
+      match find_skill_entry(all_skills, name_str)
+        case {:ok, entry}
+          src = tmp_dir ++ "/" ++ maps::get(:skill_path, entry)
+          # Extract just the skill directory name
+          skill_dirname = filename::basename(src)
+          dest = target_dir ++ "/" ++ skill_dirname
+          copy_cmd = "cp -r " ++ src ++ " " ++ dest ++ " 2>&1"
+          os::cmd(copy_cmd)
+          if filelib::is_dir(dest)
+            {:ok, name_str}
+          else
+            {:error, {name_str, :copy_failed}}
+          end
+        case :not_found
+          {:error, {name_str, :not_found}}
+      end
+    end, skill_names)
+
+    # Clean up temp dir
+    os::cmd("rm -rf " ++ tmp_dir)
+    results
+  end
+
+  def self.find_skill_entry([], _name)
+    :not_found
+  end
+
+  def self.find_skill_entry([entry, *rest], name)
+    skill_path = maps::get(:skill_path, entry)
+    basename = filename::basename(skill_path)
+    if basename == name
+      {:ok, entry}
+    else
+      find_skill_entry(rest, name)
+    end
+  end
+
+  # --- SKILL.md Parsing ---
+
+  # Parse a SKILL.md file into {frontmatter_map, body_string}
+  def self.parse_skill_file(path)
+    match file::read_file(path)
+      case {:ok, content}
+        parse_skill_content(binary_to_list(content))
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  def self.parse_skill_content(content)
+    # Check for YAML frontmatter (starts with ---)
+    match content
+      case [45, 45, 45, *rest]
+        # Find closing ---
+        match find_frontmatter_end(rest, [])
+          case {:ok, yaml_str, body}
+            match parse_yaml_frontmatter(yaml_str)
+              case {:ok, fm}
+                {:ok, fm, body}
+              case {:error, reason}
+                {:error, {:yaml_parse, reason}}
+            end
+          case :no_end
+            {:error, :no_frontmatter_end}
+        end
+      case _
+        # No frontmatter — entire content is body
+        {:ok, {}, content}
+    end
+  end
+
+  # Find the closing --- of YAML frontmatter
+  def self.find_frontmatter_end([], _acc)
+    :no_end
+  end
+
+  def self.find_frontmatter_end([10, 45, 45, 45, 10, *rest], acc)
+    {:ok, lists::reverse(acc), rest}
+  end
+
+  def self.find_frontmatter_end([10, 45, 45, 45], acc)
+    {:ok, lists::reverse(acc), []}
+  end
+
+  def self.find_frontmatter_end([c, *rest], acc)
+    find_frontmatter_end(rest, [c, *acc])
+  end
+
+  # Parse YAML frontmatter string into a map
+  def self.parse_yaml_frontmatter(yaml_str)
+    bin = unicode::characters_to_binary(yaml_str)
+    match jet_yaml_ffi::parse(bin)
+      case {:ok, parsed} if is_map(parsed)
+        fm = {}
+        fm = put_if_present(fm, :name, parsed, <<"name">>)
+        fm = put_if_present(fm, :description, parsed, <<"description">>)
+        fm = put_if_present(fm, :license, parsed, <<"license">>)
+        fm = put_if_present(fm, :compatibility, parsed, <<"compatibility">>)
+        fm = put_if_present(fm, :allowed_tools, parsed, <<"allowed-tools">>)
+        fm = match maps::find(<<"metadata">>, parsed)
+          case {:ok, md} if is_map(md)
+            maps::put(:metadata_info, md, fm)
+          case _
+            fm
+        end
+        {:ok, fm}
+      case {:ok, _}
+        {:ok, {}}
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  def self.put_if_present(map, key, source, source_key)
+    match maps::find(source_key, source)
+      case {:ok, val}
+        maps::put(key, convert_value(val), map)
+      case :error
+        map
+    end
+  end
+
+  def self.convert_value(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.convert_value(v)
+    v
+  end
+
+  # --- Helpers ---
+
+  def self.list_dir_files(dir)
+    match file::list_dir(dir)
+      case {:ok, entries}
+        lists::sort(entries)
+      case {:error, _}
+        []
+    end
+  end
+
+  def self.sanitize(str)
+    lists::map(do |c|
+      if (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or (c >= 48 and c <= 57) or c == 95
+        c
+      else
+        95
+      end
+    end, str)
+  end
+
+  def self.ensure_list(v) if is_list(v)
+    v
+  end
+
+  def self.ensure_list(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.ensure_list(v) if is_atom(v)
+    atom_to_list(v)
+  end
+
+  def self.ensure_list(v)
+    lists::flatten(io_lib::format("~p", [v]))
+  end
+end

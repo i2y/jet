@@ -48,14 +48,53 @@ module ClaudeApiRunner
     jet_http_ffi::ensure_started()
     model = maps::get(:model, opts, "claude-sonnet-4-20250514")
     max_tokens = maps::get(:max_tokens, opts, 8192)
-    skills = maps::get(:skills, opts, [:read, :write, :edit, :bash])
-    system = maps::get(:system, opts, "You are a software engineer. Work in the directory: " ++ workspace ++ ". Use the provided tools to complete the task.")
+    builtin_skills = maps::get(:skills, opts, [:read, :write, :edit, :bash])
+    base_system = maps::get(:system, opts, "You are a software engineer. Work in the directory: " ++ workspace ++ ". Use the provided tools to complete the task.")
 
-    tools = build_tools(skills)
+    # Discover Agent Skills in workspace
+    skills_dir = maps::get(:skills_dir, opts, ".agents/skills")
+    agent_skills = SkillLoader::discover(workspace ++ "/" ++ skills_dir)
+
+    # Build system prompt with skill discovery info
+    system = if agent_skills != []
+      skill_catalog = build_skill_catalog(agent_skills)
+      base_system ++ "\n\n## Available Agent Skills\n\nThe following skills are available. Use the `activate_skill` tool to load a skill's full instructions when relevant.\n\n" ++ skill_catalog
+    else
+      base_system
+    end
+
+    # Build tools: builtins + skill management tools
+    tools = build_tools(builtin_skills)
+    tools = if agent_skills != []
+      skill_tools = build_skill_tools()
+      lists::append(tools, skill_tools)
+    else
+      tools
+    end
+
+    # Store activated skills context for the loop
+    erlang::put(:activated_skills, {})
+    erlang::put(:agent_skills_dir, workspace ++ "/" ++ skills_dir)
+
     messages = [{:user, prompt}]
     llm_opts = {api_key: api_key, model: model, max_tokens: max_tokens, system: system, tools: tools}
 
     run_loop(workspace, messages, llm_opts, callback_pid, 0, 50)
+  end
+
+  def self.build_skill_catalog(agent_skills)
+    build_skill_catalog_rec(agent_skills, 1, [])
+  end
+
+  def self.build_skill_catalog_rec([], _n, acc)
+    lists::flatten(lists::reverse(acc))
+  end
+
+  def self.build_skill_catalog_rec([skill, *rest], n, acc)
+    name = maps::get(:name, skill, "?")
+    desc = maps::get(:description, skill, "")
+    entry = integer_to_list(n) ++ ". **" ++ name ++ "**: " ++ desc ++ "\n"
+    build_skill_catalog_rec(rest, n + 1, [entry, *acc])
   end
 
   # max_iterations prevents infinite tool loops
@@ -226,6 +265,69 @@ module ClaudeApiRunner
     if is_list(result) result else binary_to_list(result) end
   end
 
+  def self.execute_tool(_workspace, "activate_skill", args)
+    skill_name = get_arg(args, "name")
+    skills_base = erlang::get(:agent_skills_dir)
+    skill_path = skills_base ++ "/" ++ skill_name
+    match SkillLoader::load(skill_path)
+      case {:ok, skill}
+        # Store as activated
+        activated = erlang::get(:activated_skills)
+        erlang::put(:activated_skills, maps::put(skill_name, skill, activated))
+
+        body = maps::get(:body, skill, "")
+        scripts = maps::get(:scripts, skill, [])
+        refs = maps::get(:references, skill, [])
+
+        result = "# Skill activated: " ++ skill_name ++ "\n\n" ++ body
+        result = if scripts != []
+          result ++ "\n\n## Available scripts\n" ++ string::join(lists::map(do |s| "- scripts/" ++ s end, scripts), "\n")
+        else
+          result
+        end
+        result = if refs != []
+          result ++ "\n\n## Available references\n" ++ string::join(lists::map(do |r| "- references/" ++ r end, refs), "\n")
+        else
+          result
+        end
+        result
+      case {:error, reason}
+        "Error loading skill '" ++ skill_name ++ "': " ++ lists::flatten(io_lib::format("~p", [reason]))
+    end
+  end
+
+  def self.execute_tool(workspace, "run_script", args)
+    skill_name = get_arg(args, "skill")
+    script_path = get_arg(args, "script")
+    script_args = get_arg(args, "args")
+
+    skills_base = erlang::get(:agent_skills_dir)
+    full_path = skills_base ++ "/" ++ skill_name ++ "/scripts/" ++ script_path
+
+    if filelib::is_file(full_path)
+      cmd = "cd " ++ workspace ++ " && " ++ full_path ++ " " ++ script_args ++ " 2>&1"
+      result = os::cmd(cmd)
+      if is_list(result) result else binary_to_list(result) end
+    else
+      "Script not found: " ++ skill_name ++ "/scripts/" ++ script_path
+    end
+  end
+
+  def self.execute_tool(_workspace, "read_reference", args)
+    skill_name = get_arg(args, "skill")
+    ref_path = get_arg(args, "path")
+
+    skills_base = erlang::get(:agent_skills_dir)
+    skill_dir = skills_base ++ "/" ++ skill_name
+
+    match SkillLoader::read_file(skill_dir, "references/" ++ ref_path)
+      case {:ok, content}
+        content
+      case {:error, reason}
+        "Error reading reference: " ++ lists::flatten(io_lib::format("~p", [reason]))
+    end
+  end
+
   def self.execute_tool(_workspace, name, _args)
     "Unknown tool: " ++ name
   end
@@ -314,6 +416,49 @@ module ClaudeApiRunner
           false
       end
     end, skills)
+  end
+
+  # --- Skill tool definitions ---
+
+  def self.build_skill_tools()
+    [
+      {
+        name: "activate_skill",
+        description: "Load a skill's full instructions into context. Use this when you need to perform a task that matches a skill's description.",
+        parameters: {
+          <<"type">> => <<"object">>,
+          <<"properties">> => {
+            <<"name">> => {<<"type">> => <<"string">>, <<"description">> => <<"Name of the skill to activate (from the Available Agent Skills list)">>}
+          },
+          <<"required">> => [<<"name">>]
+        }
+      },
+      {
+        name: "run_script",
+        description: "Execute a script from an activated skill's scripts/ directory",
+        parameters: {
+          <<"type">> => <<"object">>,
+          <<"properties">> => {
+            <<"skill">> => {<<"type">> => <<"string">>, <<"description">> => <<"Name of the skill that owns the script">>},
+            <<"script">> => {<<"type">> => <<"string">>, <<"description">> => <<"Script filename (e.g. extract.py)">>},
+            <<"args">> => {<<"type">> => <<"string">>, <<"description">> => <<"Command-line arguments for the script">>}
+          },
+          <<"required">> => [<<"skill">>, <<"script">>]
+        }
+      },
+      {
+        name: "read_reference",
+        description: "Read a reference document from an activated skill's references/ directory",
+        parameters: {
+          <<"type">> => <<"object">>,
+          <<"properties">> => {
+            <<"skill">> => {<<"type">> => <<"string">>, <<"description">> => <<"Name of the skill">>},
+            <<"path">> => {<<"type">> => <<"string">>, <<"description">> => <<"Reference file path (e.g. REFERENCE.md, FORMS.md)">>}
+          },
+          <<"required">> => [<<"skill">>, <<"path">>]
+        }
+      }
+    ]
   end
 
   # --- Helpers ---

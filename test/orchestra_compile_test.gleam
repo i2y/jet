@@ -141,6 +141,13 @@ pub fn compile_claude_api_runner_test() {
   )
 }
 
+pub fn compile_skill_loader_test() {
+  let assert Ok(_) = compile_jet_file(
+    "src/jet_orchestra/SkillLoader.jet",
+    "SkillLoader",
+  )
+}
+
 // --- Source implementations (full compile) ---
 
 pub fn compile_github_task_source_test() {

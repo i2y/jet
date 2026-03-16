@@ -1,0 +1,158 @@
+# Test: SkillLoader — Agent Skills discovery, loading, and parsing
+#
+# Run: ./jet -r TestSkillLoader::run examples/orchestra/TestSkillLoader.jet
+
+module TestSkillLoader
+  def self.run()
+    puts("=== TestSkillLoader ===")
+    passed = 0
+    failed = 0
+    root = "/tmp/orchestra_test_skills"
+
+    # Cleanup
+    os::cmd("rm -rf " ++ root)
+    filelib::ensure_dir(root ++ "/dummy")
+
+    # --- Create test skill directories ---
+    skills_dir = root ++ "/.agents/skills"
+    pdf_dir = skills_dir ++ "/pdf-processing"
+    code_dir = skills_dir ++ "/code-review"
+
+    filelib::ensure_dir(pdf_dir ++ "/dummy")
+    filelib::ensure_dir(pdf_dir ++ "/scripts/dummy")
+    filelib::ensure_dir(pdf_dir ++ "/references/dummy")
+    filelib::ensure_dir(code_dir ++ "/dummy")
+
+    # Write SKILL.md for pdf-processing
+    pdf_skill = "---\nname: pdf-processing\ndescription: Extract PDF text, fill forms, merge files.\nlicense: Apache-2.0\nallowed-tools: Bash(python:*) Read\nmetadata:\n  author: test-org\n  version: \"1.0\"\n---\n# PDF Processing\n\nUse pypdf to read PDFs.\n"
+    file::write_file(pdf_dir ++ "/SKILL.md", pdf_skill)
+
+    # Write a test script
+    file::write_file(pdf_dir ++ "/scripts/extract.py", "#!/usr/bin/env python3\nprint('extracted')\n")
+    os::cmd("chmod +x " ++ pdf_dir ++ "/scripts/extract.py")
+
+    # Write a reference
+    file::write_file(pdf_dir ++ "/references/REFERENCE.md", "# Reference\nDetailed docs here.\n")
+
+    # Write SKILL.md for code-review (minimal)
+    code_skill = "---\nname: code-review\ndescription: Review code for bugs and style issues.\n---\n# Code Review\n\nCheck for common bugs.\n"
+    file::write_file(code_dir ++ "/SKILL.md", code_skill)
+
+    # --- Test discover ---
+    skills = SkillLoader::discover(root)
+    {passed, failed} = assert_equal("discover count", erlang::length(skills), 2, passed, failed)
+
+    names = lists::map(do |s| maps::get(:name, s) end, skills)
+    {passed, failed} = assert_true("has code-review", lists::member("code-review", names), passed, failed)
+    {passed, failed} = assert_true("has pdf-processing", lists::member("pdf-processing", names), passed, failed)
+
+    # Check pdf-processing metadata
+    {passed, failed} = test_pdf_metadata(skills, passed, failed)
+
+    # --- Test load ---
+    {passed, failed} = test_load(pdf_dir, passed, failed)
+
+    # --- Test load minimal skill ---
+    {passed, failed} = test_load_minimal(code_dir, passed, failed)
+
+    # --- Test discover empty dir ---
+    empty_root = "/tmp/orchestra_test_skills_empty"
+    os::cmd("rm -rf " ++ empty_root)
+    filelib::ensure_dir(empty_root ++ "/dummy")
+    empty_skills = SkillLoader::discover(empty_root)
+    {passed, failed} = assert_equal("empty discover", erlang::length(empty_skills), 0, passed, failed)
+
+    # --- Test read_file ---
+    {passed, failed} = test_read_file(pdf_dir, passed, failed)
+
+    # Cleanup
+    os::cmd("rm -rf " ++ root)
+    os::cmd("rm -rf " ++ empty_root)
+
+    puts("\n~p passed, ~p failed", [passed, failed])
+    if failed > 0
+      erlang::halt(1)
+    end
+  end
+
+  def self.test_pdf_metadata(skills, passed, failed)
+    pdf = find_by_name(skills, "pdf-processing")
+    if pdf != nil
+      {p, f} = assert_equal("pdf description", maps::get(:description, pdf), "Extract PDF text, fill forms, merge files.", passed, failed)
+      {p2, f2} = assert_equal("pdf license", maps::get(:license, pdf), "Apache-2.0", p, f)
+      assert_equal("pdf allowed_tools", maps::get(:allowed_tools, pdf), "Bash(python:*) Read", p2, f2)
+    else
+      puts("  FAIL: pdf-processing not found in skills")
+      {passed, failed + 1}
+    end
+  end
+
+  def self.test_load(pdf_dir, passed, failed)
+    match SkillLoader::load(pdf_dir)
+      case {:ok, skill}
+        {p, f} = assert_equal("load name", maps::get(:name, skill), "pdf-processing", passed, failed)
+        body = maps::get(:body, skill, "")
+        {p2, f2} = assert_true("load body has content", erlang::length(body) > 10, p, f)
+        scripts = maps::get(:scripts, skill, [])
+        {p3, f3} = assert_true("has extract.py", lists::member("extract.py", scripts), p2, f2)
+        refs = maps::get(:references, skill, [])
+        assert_true("has REFERENCE.md", lists::member("REFERENCE.md", refs), p3, f3)
+      case {:error, reason}
+        puts("  FAIL: load error: ~p", [reason])
+        {passed, failed + 1}
+    end
+  end
+
+  def self.test_load_minimal(code_dir, passed, failed)
+    match SkillLoader::load(code_dir)
+      case {:ok, skill}
+        {p, f} = assert_equal("minimal name", maps::get(:name, skill), "code-review", passed, failed)
+        assert_true("minimal body has content", erlang::length(maps::get(:body, skill, "")) > 5, p, f)
+      case {:error, reason}
+        puts("  FAIL: minimal load error: ~p", [reason])
+        {passed, failed + 1}
+    end
+  end
+
+  def self.test_read_file(pdf_dir, passed, failed)
+    match SkillLoader::read_file(pdf_dir, "references/REFERENCE.md")
+      case {:ok, content}
+        assert_true("read_file has content", erlang::length(content) > 5, passed, failed)
+      case {:error, reason}
+        puts("  FAIL: read_file error: ~p", [reason])
+        {passed, failed + 1}
+    end
+  end
+
+  def self.find_by_name([], _name)
+    nil
+  end
+
+  def self.find_by_name([skill, *rest], name)
+    if maps::get(:name, skill) == name
+      skill
+    else
+      find_by_name(rest, name)
+    end
+  end
+
+  def self.assert_equal(label, actual, expected, passed, failed)
+    if actual == expected
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s (got ~p, expected ~p)", [label, actual, expected])
+      {passed, failed + 1}
+    end
+  end
+
+  def self.assert_true(label, condition, passed, failed)
+    if condition
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s", [label])
+      {passed, failed + 1}
+    end
+  end
+end
