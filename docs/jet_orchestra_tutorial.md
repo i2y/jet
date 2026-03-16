@@ -80,6 +80,65 @@ src/jet_orchestra_sources/
 └── LinearTaskSource.jet       # Linear API (GraphQL)
 ```
 
+## Getting Started
+
+### Prerequisites
+
+- Erlang/OTP >= 26.0
+- Gleam >= 1.0
+- `gh` CLI (for GitHub integration)
+
+### Setup
+
+```sh
+# Clone and build the Jet compiler
+git clone https://github.com/i2y/jet.git
+cd jet
+gleam build && gleam export erlang-shipment && escript build_escript.erl
+
+# Compile the standard library and orchestra modules
+./jet build src/
+./jet build src/jet_orchestra/
+./jet build src/jet_orchestra_runners/
+./jet build src/jet_orchestra_sources/
+```
+
+The `./jet` binary and compiled `.beam` files are now ready. You can write your orchestra app anywhere inside this directory.
+
+### Your First Orchestra App
+
+Create `my_orchestra.jet`:
+
+```jet
+module MyOrchestra
+  def self.main()
+    config = Config::new({
+      mode: :push,
+      max_concurrent: 3,
+      max_turns: 5,
+      workspace_root: "/tmp/my_orchestra"
+    })
+    orch = Scheduler::Instance.spawn(config, nil, :ClaudeSimpleRunner, {
+      store: :DetsStore
+    })
+    orch.submit({id: "task-1", title: "Fix the login bug", description: "Users can't log in"})
+    timer::sleep(60000)  # wait for task to complete
+    puts("Completed: ~p", [orch.completed()])
+  end
+end
+```
+
+```sh
+./jet -r MyOrchestra::main my_orchestra.jet
+```
+
+Or build a standalone executable:
+
+```sh
+./jet escript MyOrchestra .
+./myorchestra
+```
+
 ## Quick Start
 
 ### The Simplest Way: WORKFLOW.md
