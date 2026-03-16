@@ -1,0 +1,55 @@
+# Debug: step-by-step test of each component
+
+module DebugLive
+  def self.run()
+    repo = "i2y/orchestra-test"
+    erlang::put(:orchestra_github_repo, repo)
+
+    puts("=== Step 1: Fetch issues ===")
+    issues = GitHubTaskSource::fetch_tasks({github_repo: repo, github_labels: "orchestra"})
+    puts("Result: ~p\n", [issues])
+
+    if is_list(issues) and issues != []
+      issue = lists::nth(1, issues)
+      issue_id = maps::get(:id, issue)
+      puts("=== Step 2: Prepare workspace ===")
+      root = "/tmp/orchestra_debug"
+      Workspace::delete_dir_recursive(root)
+      {path, status} = Workspace::prepare(root, issue_id)
+      puts("Workspace: ~s (~p)\n", [path, status])
+
+      puts("=== Step 3: Git clone ===")
+      cmd = "cd " ++ path ++ " && git clone https://github.com/" ++ repo ++ " . 2>&1"
+      puts("Running: ~s", [cmd])
+      clone_output = os::cmd(cmd)
+      puts("Output: ~s\n", [clone_output])
+
+      puts("=== Step 4: Create branch ===")
+      branch_cmd = "cd " ++ path ++ " && git checkout -b orchestra-" ++ issue_id ++ " 2>&1"
+      branch_output = os::cmd(branch_cmd)
+      puts("Output: ~s\n", [branch_output])
+
+      puts("=== Step 5: Run claude --print ===")
+      prompt = "Fix the bugs in calc.py so all tests in test_calc.py pass. Only modify calc.py."
+      escaped = re::replace(prompt, "'", "'\\''", [:global, {:return, :list}])
+      claude_cmd = "cd " ++ path ++ " && echo '" ++ escaped ++ "' | claude --print --allowedTools 'Read' 'Edit' 'Write' 'Bash(python:*)' 'Bash(pytest:*)' 2>&1"
+      puts("Running claude...")
+      claude_output = os::cmd(claude_cmd)
+      puts("Claude output (~p chars): ~s\n", [erlang::length(claude_output), lists::sublist(claude_output, 1000)])
+
+      puts("=== Step 6: Git add + commit + push ===")
+      push_cmd = "cd " ++ path ++ " && git add -A && git diff --cached --stat && git commit -m 'orchestra: fix #" ++ issue_id ++ "' 2>&1 && git push -u origin HEAD 2>&1"
+      push_output = os::cmd(push_cmd)
+      puts("Output: ~s\n", [push_output])
+
+      puts("=== Step 7: Create PR ===")
+      pr_cmd = "cd " ++ path ++ " && gh pr create --title 'Fix bugs in calc.py' --body 'Automated fix by jet_orchestra' --label orchestra --repo " ++ repo ++ " 2>&1"
+      pr_output = os::cmd(pr_cmd)
+      puts("Output: ~s\n", [pr_output])
+
+      puts("=== Done ===")
+    else
+      puts("No issues found or error occurred")
+    end
+  end
+end

@@ -1,0 +1,149 @@
+# Test: FileStore persistence + Scheduler crash recovery
+#
+# Run: ./jet -r TestPersistence::run examples/orchestra/TestPersistence.jet
+
+module TestPersistence
+  def self.run()
+    puts("=== TestPersistence ===")
+    passed = 0
+    failed = 0
+    root = "/tmp/orchestra_test_persist"
+
+    # Cleanup from previous runs
+    Workspace::delete_dir_recursive(root)
+
+    # --- Test FileStore round-trip ---
+    state = {
+      claimed: ["task-1", "task-2", "task-3"],
+      retry_attempts: maps::put("task-1", {0, {id: "task-1", title: "Fix bug", description: "desc"}},
+                       maps::put("task-2", {2, {id: "task-2", title: "Add feat", description: "desc2"}}, {})),
+      done: maps::put("task-3", true, {}),
+      completed: [{"task-3", :ok, "done"}]
+    }
+
+    # Save
+    result = FileStore::save(root, state)
+    {passed, failed} = assert_equal("FileStore::save", result, :ok, passed, failed)
+
+    # Verify file exists
+    path = FileStore::checkpoint_path(root)
+    {passed, failed} = assert_true("checkpoint file exists", filelib::is_file(path), passed, failed)
+
+    # Load
+    match FileStore::load(root)
+      case {:ok, loaded}
+        {passed, failed} = assert_equal("claimed count", erlang::length(maps::get(:claimed, loaded)), 3, passed, failed)
+        {passed, failed} = assert_true("task-1 in claimed", lists::member("task-1", maps::get(:claimed, loaded)), passed, failed)
+
+        # Check retry_attempts round-trip
+        ra = maps::get(:retry_attempts, loaded)
+        {count2, task2} = maps::get("task-2", ra)
+        {passed, failed} = assert_equal("retry count preserved", count2, 2, passed, failed)
+        {passed, failed} = assert_equal("task title preserved", maps::get(:title, task2), "Add feat", passed, failed)
+
+        # Check done
+        done = maps::get(:done, loaded)
+        {passed, failed} = assert_true("task-3 in done", maps::get("task-3", done, false), passed, failed)
+
+        # Check completed
+        completed = maps::get(:completed, loaded)
+        {passed, failed} = assert_equal("completed count", erlang::length(completed), 1, passed, failed)
+        {c_id, c_status, _c_output} = lists::nth(1, completed)
+        {passed, failed} = assert_equal("completed task_id", c_id, "task-3", passed, failed)
+        {passed, failed} = assert_equal("completed status atom", c_status, :ok, passed, failed)
+      case {:error, reason}
+        puts("  FAIL: FileStore::load returned error: ~p", [reason])
+        failed = failed + 1
+    end
+
+    # Delete
+    result2 = FileStore::delete(root)
+    {passed, failed} = assert_equal("FileStore::delete", result2, :ok, passed, failed)
+    {passed, failed} = assert_true("checkpoint gone", (not filelib::is_file(path)), passed, failed)
+
+    # Delete idempotent
+    result3 = FileStore::delete(root)
+    {passed, failed} = assert_equal("FileStore::delete idempotent", result3, :ok, passed, failed)
+
+    # --- Test Scheduler crash recovery ---
+    Workspace::delete_dir_recursive(root)
+
+    config = Config::Settings.new({
+      mode: :push,
+      max_concurrent: 2,
+      max_turns: 1,
+      max_retries: 0,
+      workspace_root: root
+    })
+
+    # Start scheduler with persistence, submit tasks
+    orch1 = Scheduler::Instance.spawn(config, nil, nil, {store: :FileStore})
+    orch1.submit({id: "r-1", title: "Recoverable 1", description: "First"})
+    orch1.submit({id: "r-2", title: "Recoverable 2", description: "Second"})
+    timer::sleep(1000)
+
+    # Verify tasks completed
+    completed1 = orch1.completed()
+    {passed, failed} = assert_true("orch1 completed tasks", erlang::length(completed1) > 0, passed, failed)
+
+    # Simulate crash: kill scheduler without graceful shutdown
+    erlang::exit(orch1, :kill)
+    timer::sleep(200)
+
+    # Start a NEW scheduler with same config + store — should restore state
+    orch2 = Scheduler::Instance.spawn(config, nil, nil, {store: :FileStore})
+    timer::sleep(500)
+
+    status2 = orch2.status()
+    claimed2 = maps::get(:claimed, status2)
+    {passed, failed} = assert_true("restored claimed > 0", claimed2 > 0, passed, failed)
+
+    # The previously completed tasks should be in completed list
+    completed2 = orch2.completed()
+    {passed, failed} = assert_true("restored completed > 0", erlang::length(completed2) > 0, passed, failed)
+
+    # Previously done tasks should not be re-dispatched
+    ids2 = extract_ids(completed2, [])
+    {passed, failed} = assert_true("r-1 still in completed", lists::member("r-1", ids2), passed, failed)
+
+    # Clean shutdown
+    if erlang::is_process_alive(orch2)
+      gen_server::stop(orch2)
+    end
+    timer::sleep(100)
+    Workspace::delete_dir_recursive(root)
+
+    puts("\n~p passed, ~p failed", [passed, failed])
+    if failed > 0
+      erlang::halt(1)
+    end
+  end
+
+  def self.extract_ids([], acc)
+    acc
+  end
+
+  def self.extract_ids([{id, _status, _output}, *rest], acc)
+    extract_ids(rest, [id, *acc])
+  end
+
+  def self.assert_equal(label, actual, expected, passed, failed)
+    if actual == expected
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s (got ~p, expected ~p)", [label, actual, expected])
+      {passed, failed + 1}
+    end
+  end
+
+  def self.assert_true(label, condition, passed, failed)
+    if condition
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s", [label])
+      {passed, failed + 1}
+    end
+  end
+end

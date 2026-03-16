@@ -1,0 +1,338 @@
+# Orchestra GitHubPRReviewSource — monitors PRs for review feedback
+#
+# Implements the TaskSource protocol for PR review comments.
+# Detects new review comments on open PRs and produces review-feedback
+# tasks that reuse the original task's workspace.
+#
+# PRs are matched to tasks via branch naming convention: orchestra-TASK_ID
+#
+# Config (passed via fetch_tasks):
+#   review_pending: {task_id => {pr_number, round}}
+#   max_review_rounds: N
+#
+# Environment:
+#   ORCHESTRA_GITHUB_REPO=owner/repo
+#
+# Usage:
+#   orch = Scheduler::Instance.spawn(config, :GitHubTaskSource, :MyRunner, {
+#     review_source: :GitHubPRReviewSource
+#   })
+
+module GitHubPRReviewSource
+  # Check gh auth (delegates to GitHubTaskSource)
+  def self.check_auth()
+    GitHubTaskSource::check_auth()
+  end
+
+  def self.fetch_tasks(config)
+    repo = resolve_repo(config)
+    Log::info("PRReviewSource repo", {repo: repo})
+    if repo == nil
+      []
+    else
+      review_pending = maps::get(:review_pending, config, {})
+      max_rounds = maps::get(:max_review_rounds, config, 5)
+      watermarks = erlang::get(:orchestra_pr_watermarks)
+      watermarks = if watermarks == :undefined
+        {}
+      else
+        watermarks
+      end
+      fetch_review_tasks(maps::to_list(review_pending), repo, max_rounds, watermarks, [])
+    end
+  end
+
+  def self.fetch_review_tasks([], _repo, _max_rounds, watermarks, acc)
+    erlang::put(:orchestra_pr_watermarks, watermarks)
+    lists::reverse(acc)
+  end
+
+  def self.fetch_review_tasks([{task_id, {pr_number, round}}, *rest], repo, max_rounds, watermarks, acc)
+    if round >= max_rounds
+      # Max review rounds reached — skip
+      fetch_review_tasks(rest, repo, max_rounds, watermarks, acc)
+    else
+      # Check PR state
+      pr_info = fetch_pr_info(repo, task_id)
+      # If branch search fails, try by PR number from review_pending
+      pr_info = if pr_info == {:error, :no_pr} and pr_number > 0
+        fetch_pr_by_number(repo, pr_number)
+      else
+        pr_info
+      end
+      match pr_info
+        case {:ok, pr}
+          state = maps::get(:state, pr, "open")
+          review_decision = maps::get(:review_decision, pr, nil)
+          if state == "closed" or state == "merged" or review_decision == "APPROVED" or review_decision == "approved"
+            # PR is done — no review task needed
+            fetch_review_tasks(rest, repo, max_rounds, watermarks, acc)
+          else
+            # Fetch new review comments
+            last_seen = maps::get(task_id, watermarks, "")
+            comments = fetch_review_comments(repo, maps::get(:pr_number, pr, pr_number))
+            new_comments = filter_new_comments(comments, last_seen)
+            if new_comments != []
+              # Update watermark
+              latest_id = get_latest_comment_id(new_comments)
+              new_watermarks = maps::put(task_id, latest_id, watermarks)
+              review_task = build_review_task(task_id, pr, new_comments, round + 1)
+              fetch_review_tasks(rest, repo, max_rounds, new_watermarks, [review_task, *acc])
+            else
+              fetch_review_tasks(rest, repo, max_rounds, watermarks, acc)
+            end
+          end
+        case {:error, _}
+          fetch_review_tasks(rest, repo, max_rounds, watermarks, acc)
+      end
+    end
+  end
+
+  # Fetch PR info — use pr_number from review_pending if available, else search by branch
+  def self.fetch_pr_info(repo, task_id)
+    # First try by branch name
+    branch = "orchestra-" ++ ensure_list(task_id)
+    cmd = lists::flatten(
+      "gh pr list --repo " ++ ensure_list(repo) ++
+      " --head " ++ branch ++
+      " --state open --json number,title,headRefName,state,reviewDecision --limit 1 2>/dev/null"
+    )
+    output = os::cmd(cmd)
+    match jet_json_ffi::decode(unicode::characters_to_binary(output))
+      case {:ok, [pr, *_]}
+        number = maps::get(<<"number">>, pr, 0)
+        raw_state = binary_to_list(maps::get(<<"state">>, pr, <<"open">>))
+        {:ok, {
+          pr_number: number,
+          state: string::lowercase(raw_state),
+          review_decision: to_string_or_nil(maps::get(<<"reviewDecision">>, pr, nil))
+        }}
+      case {:ok, []}
+        # Try by pr_number from review_pending
+        {:error, :no_pr}
+      case _
+        {:error, :parse_error}
+    end
+  end
+
+  # Fetch review comments from a PR
+  def self.fetch_review_comments(repo, pr_number)
+    num_str = integer_to_list(pr_number)
+    # Fetch line-level review comments
+    cmd = lists::flatten(
+      "gh api repos/" ++ ensure_list(repo) ++ "/pulls/" ++ num_str ++ "/comments 2>/dev/null"
+    )
+    output = os::cmd(cmd)
+    review_comments = parse_comment_array(output, true)
+    # Also fetch general PR comments (issue comments)
+    cmd2 = lists::flatten(
+      "gh api repos/" ++ ensure_list(repo) ++ "/issues/" ++ num_str ++ "/comments 2>/dev/null"
+    )
+    output2 = os::cmd(cmd2)
+    issue_comments = parse_comment_array(output2, false)
+    all = review_comments ++ issue_comments
+    filter_own_comments(all)
+  end
+
+  def self.parse_comment_array(output, has_path)
+    match jet_json_ffi::decode(unicode::characters_to_binary(output))
+      case {:ok, items} if is_list(items)
+        extract_comments(items, has_path, [])
+      case _
+        []
+    end
+  end
+
+  # Filter out comments from orchestra itself (prevent infinite loop)
+  def self.filter_own_comments(comments)
+    filter_own_rec(comments, [])
+  end
+
+  def self.filter_own_rec([], acc)
+    lists::reverse(acc)
+  end
+
+  def self.filter_own_rec([comment, *rest], acc)
+    body = maps::get(:body, comment, "")
+    # Skip comments that contain the orchestra marker
+    if contains_marker(body)
+      filter_own_rec(rest, acc)
+    else
+      filter_own_rec(rest, [comment, *acc])
+    end
+  end
+
+  def self.contains_marker(body)
+    match re::run(unicode::characters_to_binary(body), "\\[orchestra\\]", [:caseless])
+      case {:match, _}
+        true
+      case _
+        false
+    end
+  end
+
+  def self.extract_comments([], _has_path, acc)
+    lists::reverse(acc)
+  end
+
+  def self.extract_comments([item, *rest], has_path, acc)
+    user_map = maps::get(<<"user">>, item, {})
+    author = if is_map(user_map)
+      binary_to_list(maps::get(<<"login">>, user_map, <<"">>))
+    else
+      ""
+    end
+    comment = {
+      id: to_string_or_nil(maps::get(<<"id">>, item, nil)),
+      body: unicode::characters_to_list(maps::get(<<"body">>, item, <<"">>)),
+      path: if has_path
+        to_string_or_nil(maps::get(<<"path">>, item, nil))
+      else
+        nil
+      end,
+      author: author,
+      created_at: binary_to_list(maps::get(<<"created_at">>, item, <<"">>))
+    }
+    extract_comments(rest, has_path, [comment, *acc])
+  end
+
+  # Filter comments newer than last_seen id
+  def self.filter_new_comments(comments, last_seen)
+    if last_seen == "" or last_seen == nil
+      comments
+    else
+      filter_after(comments, last_seen, [])
+    end
+  end
+
+  def self.filter_after([], _last_seen, acc)
+    lists::reverse(acc)
+  end
+
+  def self.filter_after([comment, *rest], last_seen, acc)
+    comment_id = maps::get(:id, comment, "")
+    # Simple comparison — newer comments have higher IDs
+    if comment_id > last_seen
+      filter_after(rest, last_seen, [comment, *acc])
+    else
+      filter_after(rest, last_seen, acc)
+    end
+  end
+
+  def self.get_latest_comment_id(comments)
+    get_max_id(comments, "")
+  end
+
+  def self.get_max_id([], max)
+    max
+  end
+
+  def self.get_max_id([comment, *rest], max)
+    id = maps::get(:id, comment, "")
+    if id > max
+      get_max_id(rest, id)
+    else
+      get_max_id(rest, max)
+    end
+  end
+
+  # Build a review-feedback task
+  def self.build_review_task(parent_id, pr_info, comments, round)
+    pr_number = maps::get(:pr_number, pr_info, 0)
+    review_id = ensure_list(parent_id) ++ "-review-" ++ integer_to_list(round)
+    {
+      id: review_id,
+      parent_id: ensure_list(parent_id),
+      pr_number: pr_number,
+      workspace_reuse: true,
+      title: "Review feedback for #" ++ ensure_list(parent_id) ++ " (round " ++ integer_to_list(round) ++ ")",
+      description: "Address PR review comments",
+      review_comments: comments,
+      review_round: round
+    }
+  end
+
+  # Fetch PR info by number directly
+  def self.fetch_pr_by_number(repo, pr_number)
+    cmd = lists::flatten(
+      "gh pr view " ++ integer_to_list(pr_number) ++
+      " --repo " ++ ensure_list(repo) ++
+      " --json number,state,reviewDecision 2>/dev/null"
+    )
+    output = os::cmd(cmd)
+    match jet_json_ffi::decode(unicode::characters_to_binary(output))
+      case {:ok, pr}
+        number = maps::get(<<"number">>, pr, pr_number)
+        state = binary_to_list(maps::get(<<"state">>, pr, <<"OPEN">>))
+        # Normalize state to lowercase
+        state_lower = string::lowercase(state)
+        {:ok, {
+          pr_number: number,
+          state: state_lower,
+          review_decision: to_string_or_nil(maps::get(<<"reviewDecision">>, pr, nil))
+        }}
+      case _
+        {:error, :not_found}
+    end
+  end
+
+  def self.update_task(_id, _status, _result)
+    :ok
+  end
+
+  def self.fetch_task_state(_id, _config)
+    :active
+  end
+
+  def self.to_string_or_nil(nil)
+    nil
+  end
+
+  def self.to_string_or_nil(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.to_string_or_nil(v) if is_integer(v)
+    integer_to_list(v)
+  end
+
+  def self.to_string_or_nil(v) if is_list(v)
+    v
+  end
+
+  def self.to_string_or_nil(v)
+    lists::flatten(io_lib::format("~p", [v]))
+  end
+
+  def self.resolve_repo(config)
+    # Try config map first, then env var, then process dictionary
+    from_config = maps::get(:github_repo, config, nil)
+    if from_config != nil
+      ensure_list(from_config)
+    else
+      from_env = os::getenv("ORCHESTRA_GITHUB_REPO")
+      if from_env != false and from_env != nil
+        from_env
+      else
+        from_pdict = erlang::get(:orchestra_github_repo)
+        if from_pdict != :undefined and from_pdict != nil
+          ensure_list(from_pdict)
+        else
+          nil
+        end
+      end
+    end
+  end
+
+  def self.ensure_list(v) if is_list(v)
+    v
+  end
+
+  def self.ensure_list(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.ensure_list(v) if is_atom(v)
+    atom_to_list(v)
+  end
+end

@@ -1,0 +1,120 @@
+# Symphony LinearClient — Linear API implementation for issue tracking
+#
+# Implements the Tracker interface for Linear (linear.app).
+# Requires LINEAR_API_KEY environment variable.
+
+module LinearClient
+  def self.fetch_issues(config)
+    api_key = maps::get(:linear_api_key, config, os::getenv("LINEAR_API_KEY"))
+    team_id = maps::get(:linear_team_id, config, nil)
+    label = maps::get(:linear_label, config, "symphony")
+    if api_key == false or api_key == nil
+      {:error, "LINEAR_API_KEY not set"}
+    else
+      query = build_issues_query(team_id, label)
+      graphql_request(api_key, query)
+    end
+  end
+
+  def self.update_issue(issue_id, status, result)
+    api_key = os::getenv("LINEAR_API_KEY")
+    if api_key == false or api_key == nil
+      {:error, "LINEAR_API_KEY not set"}
+    else
+      comment_body = format_result(status, result)
+      mutation = build_comment_mutation(issue_id, comment_body)
+      graphql_request(api_key, mutation)
+    end
+  end
+
+  def self.graphql_request(api_key, query)
+    jet_http_ffi::ensure_started()
+    url = "https://api.linear.app/graphql"
+    headers = [
+      {<<"authorization">>, erlang::list_to_binary(api_key)},
+      {<<"content-type">>, <<"application/json">>}
+    ]
+    body = jet_json_ffi::encode({<<"query">> => erlang::list_to_binary(query)})
+    match jet_http_ffi::post(url, headers, body)
+      case {:ok, response}
+        status = maps::get(:status, response)
+        if status >= 200 and status < 300
+          match jet_json_ffi::decode(maps::get(:body, response))
+            case {:ok, parsed}
+              extract_issues(parsed)
+            case {:error, reason}
+              {:error, {:json_decode, reason}}
+          end
+        else
+          {:error, {:api_error, status}}
+        end
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  def self.build_issues_query(team_id, label)
+    filter = if team_id != nil
+      "filter: { team: { id: { eq: \"" ++ team_id ++ "\" } }, labels: { name: { eq: \"" ++ label ++ "\" } }, state: { type: { eq: \"triage\" } } }"
+    else
+      "filter: { labels: { name: { eq: \"" ++ label ++ "\" } }, state: { type: { eq: \"triage\" } } }"
+    end
+    "{ issues(" ++ filter ++ ", first: 50) { nodes { id identifier title description url labels { nodes { name } } } } }"
+  end
+
+  def self.build_comment_mutation(issue_id, body)
+    "mutation { commentCreate(input: { issueId: \"" ++ issue_id ++ "\", body: \"" ++ escape_graphql(body) ++ "\" }) { success } }"
+  end
+
+  def self.extract_issues(parsed)
+    data = maps::get(<<"data">>, parsed, {})
+    issues_data = maps::get(<<"issues">>, data, {})
+    nodes = maps::get(<<"nodes">>, issues_data, [])
+    lists::map(do |node|
+      {id: binary_to_list(maps::get(<<"id">>, node)),
+       identifier: binary_to_list(maps::get(<<"identifier">>, node, <<"">>)),
+       title: binary_to_list(maps::get(<<"title">>, node, <<"">>)),
+       description: binary_to_list(maps::get(<<"description">>, node, <<"">>)),
+       url: binary_to_list(maps::get(<<"url">>, node, <<"">>))}
+    end, nodes)
+  end
+
+  def self.format_result(status, result)
+    output = maps::get(:output, result, "")
+    match status
+      case :ok
+        "Symphony completed successfully.\n\n" ++ output
+      case :error
+        "Symphony encountered an error.\n\n" ++ output
+    end
+  end
+
+  def self.fetch_issue_state(issue_id, config)
+    api_key = maps::get(:linear_api_key, config, os::getenv("LINEAR_API_KEY"))
+    if api_key == false or api_key == nil
+      :active
+    else
+      query = "{ issue(id: \"" ++ issue_id ++ "\") { state { type } } }"
+      match graphql_request(api_key, query)
+        case {:ok, parsed} if is_map(parsed)
+          data = maps::get(<<"data">>, parsed, {})
+          issue_data = maps::get(<<"issue">>, data, {})
+          state = maps::get(<<"state">>, issue_data, {})
+          state_type = maps::get(<<"type">>, state, <<"active">>)
+          if state_type == <<"done">> or state_type == <<"canceled">> or state_type == <<"completed">>
+            :terminal
+          else
+            :active
+          end
+        case _
+          :active
+      end
+    end
+  end
+
+  def self.escape_graphql(str)
+    s1 = re::replace(str, "\\\\", "\\\\\\\\", [:global, {:return, :list}])
+    s2 = re::replace(s1, "\"", "\\\\\"", [:global, {:return, :list}])
+    re::replace(s2, "\n", "\\\\n", [:global, {:return, :list}])
+  end
+end

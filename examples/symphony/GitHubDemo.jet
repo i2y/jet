@@ -1,0 +1,70 @@
+# GitHub-First Symphony Demo
+#
+# Demonstrates Symphony with GitHub Issues as the tracker:
+#   1. Orchestrator polls MockGitHubTracker for issues
+#   2. Workers prepare workspace with hooks (env vars available)
+#   3. Agent runs, results reported back
+#   4. after_run hook runs with issue context
+#   5. Continuation retry re-checks issue state
+#   6. Terminal issues are released
+#
+# Run:
+#   ./jet examples/symphony/MockGitHubTracker.jet
+#   ./jet -r GitHubDemo::run examples/symphony/GitHubDemo.jet
+
+module GitHubDemo
+  def self.run()
+    puts("=== GitHub-First Symphony Demo ===\n")
+
+    config = Config::new({
+      poll_interval_ms: 500,
+      max_turns: 3,
+      max_concurrent: 2,
+      max_retries: 1,
+      retry_delay_ms: 200,
+      workspace_root: "/tmp/symphony_github_demo",
+      agent_runner: nil,
+      tracker: :MockGitHubTracker,
+      # Hooks with issue context env vars
+      before_run_hook: "echo \"[before_run] Issue #$SYMPHONY_ISSUE_NUMBER: $SYMPHONY_ISSUE_TITLE\"",
+      after_run_hook: "echo \"[after_run] Issue #$SYMPHONY_ISSUE_NUMBER done, would create PR here\""
+    })
+
+    puts("--- Config ---")
+    puts("  Tracker:       MockGitHubTracker")
+    puts("  before_run:    echoes issue context via env vars")
+    puts("  after_run:     echoes PR creation placeholder")
+    puts("  max_turns:     3")
+    puts("  max_concurrent: 2\n")
+
+    puts("--- Starting Orchestrator ---")
+    orch = Orchestrator::Instance.spawn(config)
+
+    # Wait for polling + dispatch + continuation retries
+    timer::sleep(4000)
+
+    status = orch.status()
+    puts("\n--- Orchestrator Status ---")
+    puts("  Running:   ~p", [maps::get(:running, status)])
+    puts("  Claimed:   ~p", [maps::get(:claimed, status)])
+    puts("  Completed: ~p", [maps::get(:completed, status)])
+
+    completed = orch.completed()
+    puts("\n--- Completed Issues ---")
+    print_completed(completed)
+
+    puts("\n--- Stopping ---")
+    gen_server::stop(orch)
+    timer::sleep(100)
+    puts("\n=== Done ===")
+  end
+
+  def self.print_completed([])
+    :ok
+  end
+
+  def self.print_completed([{id, status, output}, *rest])
+    puts("  #~s: ~p — ~s", [id, status, output])
+    print_completed(rest)
+  end
+end

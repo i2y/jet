@@ -1,0 +1,100 @@
+# E2E Demo — full cycle using WORKFLOW.md configuration
+#
+# Flow: Issue detection → Claude fix → PR creation → Review loop
+#
+# Prerequisites:
+#   - ORCHESTRA_GITHUB_REPO env var set
+#   - gh CLI authenticated
+#   - claude CLI installed
+#
+# Run:
+#   ORCHESTRA_GITHUB_REPO=i2y/orchestra-test \
+#     ./jet -r E2EDemo::run examples/orchestra/E2EDemo.jet
+
+module E2EDemo
+  def self.run()
+    puts("=== E2E Demo (WORKFLOW.md) ===\n")
+
+    # Load config from WORKFLOW.md
+    match Config::from_workflow("examples/orchestra/WORKFLOW.md")
+      case {:error, reason}
+        puts("Error loading WORKFLOW.md: ~p", [reason])
+        erlang::halt(1)
+      case config
+        puts("Config loaded from WORKFLOW.md")
+        puts("  repo:      ~s", [config.github_repo()])
+        puts("  mode:      ~s", [config.mode()])
+        puts("  turns:     ~p", [config.max_turns()])
+        puts("  concurrent:~p", [config.max_concurrent()])
+        puts("  reviews:   ~p", [config.max_review_rounds()])
+
+        # Check auth
+        match GitHubTaskSource::check_auth()
+          case {:error, msg}
+            puts("Error: ~s", [msg])
+            erlang::halt(1)
+          case :ok
+            puts("GitHub auth: OK")
+        end
+
+        # Override for this demo
+        config = Config::merge(config, {
+          workspace_root: "/tmp/orchestra_e2e",
+          poll_interval_ms: 5000,
+          max_concurrent: 1,
+          max_retries: 1,
+          mode: :poll
+        })
+
+        puts("  workspace: ~s\n", [config.workspace_root()])
+        # Set env for hooks that reference $ORCHESTRA_GITHUB_REPO
+        os::putenv("ORCHESTRA_GITHUB_REPO", config.github_repo())
+
+        # Clean previous workspace
+        Workspace::delete_dir_recursive("/tmp/orchestra_e2e")
+
+        orch = Scheduler::Instance.spawn(config, :GitHubTaskSource, :ClaudeSimpleRunner, {
+          store: :FileStore,
+          review_source: :GitHubPRReviewSource
+        })
+
+        puts("Scheduler running. Polling for issues...\n")
+        wait_loop(orch, 0, 300)
+    end
+  end
+
+  def self.wait_loop(orch, elapsed, max_seconds)
+    if elapsed >= max_seconds
+      puts("\nTimeout after ~ps", [max_seconds])
+      gen_server::stop(orch)
+    else
+      timer::sleep(10000)
+      status = orch.status()
+      completed_count = maps::get(:completed, status)
+      running = maps::get(:running, status)
+      puts("[~ps] running=~p completed=~p claimed=~p",
+           [elapsed + 10, running, completed_count, maps::get(:claimed, status)])
+
+      if completed_count > 0 and running == 0
+        puts("\n=== Task completed! ===")
+        completed = orch.completed()
+        print_ids(completed)
+        puts("\nChecking PR...")
+        pr_output = os::cmd("gh pr list --repo " ++ os::getenv("ORCHESTRA_GITHUB_REPO") ++ " --json number,title,state --label orchestra 2>/dev/null")
+        puts(pr_output)
+        gen_server::stop(orch)
+      else
+        wait_loop(orch, elapsed + 10, max_seconds)
+      end
+    end
+  end
+
+  def self.print_ids([])
+    :ok
+  end
+
+  def self.print_ids([{id, result_status, _output}, *rest])
+    puts("  ~s: ~p", [id, result_status])
+    print_ids(rest)
+  end
+end

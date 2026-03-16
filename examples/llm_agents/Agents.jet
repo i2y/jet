@@ -1,0 +1,252 @@
+# マルチエージェントLLMシステム
+# Jetの全機能を1ファイルで: needs / platform / peers / Actor / Supervisor
+#
+# テスト:         ./jet -r Agents::test_run examples/llm_agents/Agents.jet
+# 本番:           ANTHROPIC_API_KEY=... ./jet -r Agents::run examples/llm_agents/Agents.jet
+# クラッシュ復旧: ./jet -r Agents::crash_demo examples/llm_agents/Agents.jet
+# 並列リサーチ:   ./jet -r Agents::parallel_demo examples/llm_agents/Agents.jet
+# モニタリング:   ./jet -r Agents::monitor_demo examples/llm_agents/Agents.jet
+
+module Agents
+  behavior supervisor
+
+  # --- needs: 副作用の抽象宣言 ---
+  needs LlmProvider
+
+  # --- platform: 実装の注入 ---
+  platform Production
+    provide LlmProvider with ClaudeLlmProvider
+  end
+
+  platform Test
+    provide LlmProvider with MockLlmProvider
+  end
+
+  def self.activate(platform_name)
+    func = list_to_atom("activate_" ++ atom_to_list(platform_name))
+    erlang::apply(:Agents, func, [])
+  end
+
+  # --- Actor + expose ---
+  actor Researcher
+    expose research(topic)
+
+    def initialize(activate)
+      @system = "You are a research assistant. Provide 3-5 key facts. Be concise."
+      @queries = 0
+      Agents::activate(activate)
+    end
+
+    def research(topic)
+      @queries = @queries + 1
+      puts("[Researcher] Query #~p: ~s", [@queries, topic])
+      LlmProvider::chat(@system, "Research: " ++ topic)
+    end
+
+    def on_terminate(reason)
+      puts("[Researcher] Shutting down (reason: ~p, total queries: ~p)", [reason, @queries])
+    end
+  end
+
+  # --- peers: Actor間依存の宣言 ---
+  actor Writer
+    peers researcher: Researcher
+    expose write(topic)
+
+    def initialize(activate)
+      @system = "You are a skilled writer. Write a short paragraph (3-4 sentences)."
+      @articles = 0
+      Agents::activate(activate)
+    end
+
+    def write(topic)
+      @articles = @articles + 1
+      puts("[Writer] Researching: ~s", [topic])
+      facts = researcher().research(topic)
+      puts("[Writer] Got facts, writing article #~p...", [@articles])
+      LlmProvider::chat(@system, "Write based on: " ++ facts)
+    end
+
+    def write_from_facts(facts)
+      @articles = @articles + 1
+      puts("[Writer] Writing article #~p from provided facts...", [@articles])
+      LlmProvider::chat(@system, "Write based on: " ++ facts)
+    end
+
+    def on_terminate(reason)
+      puts("[Writer] Shutting down (reason: ~p, articles written: ~p)", [reason, @articles])
+    end
+  end
+
+  # --- 監視付き Writer（monitor + on_message デモ用）---
+  actor MonitoredWriter
+    expose write(topic), crash_count()
+
+    def initialize(activate, researcher_pid)
+      @system = "You are a skilled writer. Write a short paragraph (3-4 sentences)."
+      @researcher = researcher_pid
+      @crash_count = 0
+      # Researcher を監視 — クラッシュしたら {:DOWN, ...} が飛んでくる
+      monitor(@researcher)
+      Agents::activate(activate)
+    end
+
+    def on_message({:DOWN, _ref, :process, _pid, reason})
+      @crash_count = @crash_count + 1
+      puts("[MonitoredWriter] Researcher crashed! (reason: ~p, crash #~p)", [reason, @crash_count])
+      # Supervisor が再起動するのを待って再監視
+      timer::sleep(50)
+      new_pid = pid(:researcher)
+      @researcher = new_pid
+      monitor(new_pid)
+      puts("[MonitoredWriter] Re-monitoring new researcher (pid: ~p)", [new_pid])
+    end
+
+    def write(topic)
+      puts("[MonitoredWriter] Asking researcher...")
+      facts = gen_server::call(@researcher, {:research, [topic]}, :infinity)
+      puts("[MonitoredWriter] Writing article...")
+      LlmProvider::chat(@system, "Write based on: " ++ facts)
+    end
+
+    def crash_count()
+      @crash_count
+    end
+
+    def on_terminate(reason)
+      puts("[MonitoredWriter] Shutting down (reason: ~p)", [reason])
+    end
+  end
+
+  # --- Supervisor ---
+
+  def self.start_link(activate)
+    supervisor::start_link({:local, :agents_sup}, :Agents, [activate])
+  end
+
+  def self.init([activate])
+    children = [
+      child_spec_researcher(activate),
+      child_spec_writer(activate)
+    ]
+    {:ok, {{:one_for_one, 3, 60}, children}}
+  end
+
+  # --- 本番実行（Claude API使用）---
+
+  def self.run()
+    Agents::start_link(:Production)
+    writer = Agents::writer()
+
+    article = writer.write("the Erlang programming language")
+    puts("\n=== Article ===")
+    puts(article)
+  end
+
+  # --- テスト実行（モック、APIキー不要）---
+
+  def self.test_run()
+    Agents::start_link(:Test)
+    writer = Agents::writer()
+
+    article = writer.write("Erlang")
+    puts("\n=== Test Result ===")
+    puts(article)
+  end
+
+  # --- クラッシュ復旧デモ（Supervisor による自動復旧）---
+
+  def self.crash_demo()
+    Agents::start_link(:Test)
+    writer = Agents::writer()
+
+    puts("=== 1. Normal operation ===")
+    result1 = writer.write("Erlang")
+    puts("Result: ~s", [result1])
+
+    old_pid = pid(:researcher)
+    puts("\n=== 2. Killing researcher (pid: ~p) ===", [old_pid])
+    kill(:researcher)
+    timer::sleep(100)
+
+    new_pid = pid(:researcher)
+    puts("Researcher restarted (new pid: ~p)", [new_pid])
+
+    puts("\n=== 3. Writer still works after crash ===")
+    result2 = writer.write("BEAM")
+    puts("Result: ~s", [result2])
+
+    puts("\n=== 4. Graceful shutdown (on_terminate fires) ===")
+    supervisor::terminate_child(:agents_sup, :writer)
+    supervisor::terminate_child(:agents_sup, :researcher)
+    timer::sleep(50)
+  end
+
+  # --- 並列リサーチデモ（async/await）---
+
+  def self.parallel_demo()
+    Agents::start_link(:Test)
+    researcher = Agents::researcher()
+    writer = Agents::writer()
+
+    puts("=== Parallel Research with async/await ===\n")
+
+    topics = ["Erlang", "BEAM VM", "OTP framework"]
+    puts("Researching ~p topics in parallel...\n", [topics.length()])
+
+    # map で全トピックを同時に非同期発行 → map で全結果を収集
+    results = topics.map {|t| researcher.async().research(t)}
+                    .map {|f| f.await()}
+
+    puts("--- Results ---")
+    results.each {|r| puts("  ~s", [r])}
+
+    # Writer に全リサーチ結果をまとめて渡す
+    combined = results.reduce("") {|acc, r| acc ++ r ++ "\n"}
+    puts("\n--- Writer combines all research ---")
+    article = writer.write_from_facts(combined)
+    puts("Article: ~s", [article])
+
+    puts("\n=== Shutdown ===")
+    supervisor::terminate_child(:agents_sup, :writer)
+    supervisor::terminate_child(:agents_sup, :researcher)
+    timer::sleep(50)
+  end
+
+  # --- モニタリングデモ（monitor + on_message でクラッシュ検知）---
+
+  def self.monitor_demo()
+    Agents::start_link(:Test)
+
+    researcher_pid = pid(:researcher)
+    puts("=== Monitor Demo ===\n")
+    puts("Researcher pid: ~p", [researcher_pid])
+
+    # MonitoredWriter は Researcher を monitor する
+    mw = Agents::MonitoredWriter.spawn(:Test, researcher_pid)
+
+    puts("\n--- 1. Normal write ---")
+    result = mw.write("Erlang")
+    puts("Result: ~s", [result])
+
+    puts("\n--- 2. Crash the researcher ---")
+    kill(:researcher)
+    # on_message が {:DOWN, ...} を受け取り、再監視するのを待つ
+    timer::sleep(200)
+
+    puts("\n--- 3. Write again (auto-reconnected) ---")
+    result2 = mw.write("fault tolerance")
+    puts("Result: ~s", [result2])
+
+    puts("\n--- 4. Crash again ---")
+    kill(:researcher)
+    timer::sleep(200)
+
+    puts("\nTotal crashes detected: ~p", [mw.crash_count()])
+
+    puts("\n=== Shutdown ===")
+    gen_server::stop(mw)
+    supervisor::terminate_child(:agents_sup, :writer)
+    supervisor::terminate_child(:agents_sup, :researcher)
+  end
+end

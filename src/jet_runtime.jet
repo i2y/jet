@@ -4,9 +4,17 @@ module jet_runtime
     __state__
   end
 
+  def self.call_method(obj, :stop, args) if is_pid(obj)
+    if obj == self()
+      apply(maps::get({:stop, length(args)}, get(:class_definition)), [obj, *args])
+    else
+      erlang::apply(:gen_server, :stop, [obj, *args])
+    end
+  end
+
   def self.call_method(obj, method_name, args) if is_pid(obj)
     if obj == self()
-      apply(maps::get(method_name, get(:class_definition)), [obj, *args])
+      apply(maps::get({method_name, length(args)}, get(:class_definition)), [obj, *args])
     else
       gen_server::call(obj, {method_name, args}, :infinity)
     end
@@ -28,13 +36,18 @@ module jet_runtime
   end
 
   def self.call_method(obj, method_name, args) if is_atom(obj)
-    class_def = erlang::get(:jet_atom)
-    if class_def == :undefined
-      _class_def = jet_atom::Atom.class_def
-      put(:jet_atom, _class_def)
-      call_method(%jet_object(__class__ = _class_def, __state__ = {atom: obj}), method_name, args)
+    pid = erlang::whereis(obj)
+    if pid == :undefined
+      class_def = erlang::get(:jet_atom)
+      if class_def == :undefined
+        _class_def = jet_atom::Atom.class_def
+        put(:jet_atom, _class_def)
+        call_method(%jet_object(__class__ = _class_def, __state__ = {atom: obj}), method_name, args)
+      else
+        call_method(%jet_object(__class__ = class_def, __state__ = {atom: obj}), method_name, args)
+      end
     else
-      call_method(%jet_object(__class__ = class_def, __state__ = {atom: obj}), method_name, args)
+      call_method(pid, method_name, args)
     end
   end
 
@@ -297,8 +310,8 @@ module jet_runtime
 
     def _new(args)
       class_def = self.class_def
-      %jet_object(__class__ = class_def,
-                  __state__ = erlang::apply(maps::get({:initialize, erlang::length(args)}, class_def), [self, *args]))
+      fresh = %jet_object(__class__ = class_def, __state__ = {})
+      erlang::apply(maps::get({:initialize, erlang::length(args)}, class_def), [fresh, *args])
     end
 
     def new()
@@ -407,11 +420,98 @@ module jet_runtime
     def spawn(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10)
       self._spawn([arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10])
     end
+
+    def _spawn_named(name, args)
+      {:ok, _pid} = gen_server::start({:local, name},
+                                       __name__,
+                                       [args, jet_runtime::class_def(@module_name, @class_name)],
+                                       [])
+      name
+    end
+
+    def spawn_named(name)
+      self._spawn_named(name, [])
+    end
+
+    def spawn_named(name, arg1)
+      self._spawn_named(name, [arg1])
+    end
+
+    def spawn_named(name, arg1, arg2)
+      self._spawn_named(name, [arg1, arg2])
+    end
+
+    def spawn_named(name, arg1, arg2, arg3)
+      self._spawn_named(name, [arg1, arg2, arg3])
+    end
+
+    def spawn_named(name, arg1, arg2, arg3, arg4)
+      self._spawn_named(name, [arg1, arg2, arg3, arg4])
+    end
+
+    def spawn_named(name, arg1, arg2, arg3, arg4, arg5)
+      self._spawn_named(name, [arg1, arg2, arg3, arg4, arg5])
+    end
+
+    def spawn_named(name, arg1, arg2, arg3, arg4, arg5, arg6)
+      self._spawn_named(name, [arg1, arg2, arg3, arg4, arg5, arg6])
+    end
+
+    def spawn_named(name, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
+      self._spawn_named(name, [arg1, arg2, arg3, arg4, arg5, arg6, arg7])
+    end
+
+    def spawn_named(name, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
+      self._spawn_named(name, [arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8])
+    end
+
+    def spawn_named(name, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9)
+      self._spawn_named(name, [arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9])
+    end
+
+    def spawn_named(name, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10)
+      self._spawn_named(name, [arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10])
+    end
+
+    def _spawn_global(name, args)
+      {:ok, pid} = gen_server::start({:global, name},
+                                      __name__,
+                                      [args, jet_runtime::class_def(@module_name, @class_name)],
+                                      [])
+      pid
+    end
+
+    def spawn_global(name)
+      self._spawn_global(name, [])
+    end
+
+    def spawn_global(name, arg1)
+      self._spawn_global(name, [arg1])
+    end
+
+    def spawn_global(name, arg1, arg2)
+      self._spawn_global(name, [arg1, arg2])
+    end
+
+    def spawn_global(name, arg1, arg2, arg3)
+      self._spawn_global(name, [arg1, arg2, arg3])
+    end
+
+    def spawn_global(name, arg1, arg2, arg3, arg4)
+      self._spawn_global(name, [arg1, arg2, arg3, arg4])
+    end
+
+    def spawn_global(name, arg1, arg2, arg3, arg4, arg5)
+      self._spawn_global(name, [arg1, arg2, arg3, arg4, arg5])
+    end
+
   end
 
-  # This iscalled when a connection is made to the server
+  # Called when gen_server starts
   def self.init([args, class_definition])
     put(:class_definition, class_definition)
+    # Trap exits so on_terminate is called on shutdown
+    erlang::process_flag(:trap_exit, true)
     match apply(maps::get({:initialize, length(args)}, class_definition), [self(), *args])
       case {:error, reason}
         {:error, reason}
@@ -424,33 +524,45 @@ module jet_runtime
   def self.handle_call({method_name, args}, _from, class_definition)
     if maps::is_key({:__handle_call__, 2}, class_definition)
       apply(maps::get({:__handle_call__, 2}, class_definition), [self(), *args])
+    elsif maps::is_key({method_name, length(args)}, class_definition)
+      response = apply(maps::get({method_name, length(args)}, class_definition), [self(), *args])
+      {:reply, response, class_definition}
     else
-      if maps::is_key({method_name, length(args)}, class_definition)
-        response = apply(maps::get({method_name, length(args)}, class_definition), [self(), *args])
-        {:reply, response, class_definition}
-      else
-        {:reply, :error, class_definition} # TODO
-      end
+      {:reply, :error, class_definition}
     end
   end
 
-  # We get compile warnings from gen_server unless we define these
   def self.handle_cast({method_name, args}, class_definition)
     if maps::is_key({:__handle_cast__, 2}, class_definition)
       apply(maps::get({:__handle_cast__, 2}, class_definition), [self(), *args])
+    elsif maps::is_key({method_name, length(args)}, class_definition)
+      apply(maps::get({method_name, length(args)}, class_definition), [self(), *args])
+      {:noreply, class_definition}
     else
-      if maps::is_key({method_name, length(args)}, class_definition)
-        apply(maps::get({method_name, length(args)}, class_definition), [self(), *args])
-        {:noreply, class_definition}
-      end
+      {:noreply, class_definition}
     end
   end
 
-  def self.handle_info(_message, class_definition)
-    {:noreply, class_definition}
+  def self.handle_info(message, class_definition)
+    if maps::is_key({:on_message, 1}, class_definition)
+      result = apply(maps::get({:on_message, 1}, class_definition), [self(), message])
+      match result
+        case :stop
+          {:stop, :normal, class_definition}
+        case {:stop, reason}
+          {:stop, reason, class_definition}
+        case _
+          {:noreply, class_definition}
+      end
+    else
+      {:noreply, class_definition}
+    end
   end
 
-  def self.terminate(_reason, _library)
+  def self.terminate(reason, class_definition)
+    if maps::is_key({:on_terminate, 1}, class_definition)
+      apply(maps::get({:on_terminate, 1}, class_definition), [self(), reason])
+    end
     :ok
   end
 

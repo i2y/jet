@@ -1,0 +1,14 @@
+# App uses Console through the needs system
+module NeedsApp
+  # Normal usage: activates platform, calls Console::puts
+  def self.run()
+    DemoPlatform::activate_Main()
+    Console::puts("Hello from Jet needs system!")
+  end
+
+  # Test usage: temporarily overrides Console with MockConsole
+  def self.test_run() using MockConsole for Console
+    result = Console::puts("This won't actually print")
+    result
+  end
+end

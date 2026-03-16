@@ -1,0 +1,6 @@
+# Real implementation of Console effect
+module StandardConsole
+  def self.puts(msg)
+    io::format("~s~n", [msg])
+  end
+end

@@ -1,0 +1,40 @@
+# Demo: @attr = expr (instance attribute assignment)
+class Counter
+  def initialize()
+    @count = 0
+    self
+  end
+
+  def increment()
+    @count = @count + 1
+    self
+  end
+
+  def add(n)
+    @count = @count + n
+    self
+  end
+
+  def get_count()
+    @count
+  end
+
+  def display()
+    io::format("Counter: ~p~n", [@count])
+    self
+  end
+
+  def self.demo()
+    c = Counter::Counter.new()
+    c2 = c.initialize()
+    c2.display()
+    c3 = c2.increment()
+    c3.display()
+    c4 = c3.increment()
+    c4.display()
+    c5 = c4.add(10)
+    c5.display()
+    count = c5.get_count()
+    io::format("Final count: ~p~n", [count])
+  end
+end

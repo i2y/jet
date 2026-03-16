@@ -1,0 +1,312 @@
+# Orchestra Config — typed configuration for jet_orchestra
+#
+# Usage:
+#   config = Config::new({
+#     poll_interval_ms: 30000,
+#     max_concurrent: 5,
+#     max_turns: 10,
+#     workspace_root: "/tmp/orchestra",
+#     after_create_hook: "git clone https://github.com/org/repo .",
+#     before_run_hook: "npm install",
+#     after_run_hook: "git push && gh pr create --fill"
+#   })
+#
+#   # Or from a WORKFLOW.md file:
+#   config = Config::from_workflow("WORKFLOW.md")
+
+module Config
+  class Settings
+    def initialize(opts)
+      @mode = maps::get(:mode, opts, :poll)
+      @poll_interval_ms = maps::get(:poll_interval_ms, opts, 30000)
+      @max_turns = maps::get(:max_turns, opts, 10)
+      @max_concurrent = maps::get(:max_concurrent, opts, 5)
+      @max_retries = maps::get(:max_retries, opts, 3)
+      @max_retry_backoff_ms = maps::get(:max_retry_backoff_ms, opts, 300000)
+      @stall_timeout_ms = maps::get(:stall_timeout_ms, opts, 300000)
+      @workspace_root = maps::get(:workspace_root, opts, "/tmp/orchestra")
+      @hook_timeout_ms = maps::get(:hook_timeout_ms, opts, 60000)
+      @max_concurrent_by_state = maps::get(:max_concurrent_by_state, opts, {})
+      @max_review_rounds = maps::get(:max_review_rounds, opts, 5)
+      @review_poll_interval_ms = maps::get(:review_poll_interval_ms, opts, 60000)
+      @allowed_tools = maps::get(:allowed_tools, opts, "Read Edit Write Bash(python:*) Bash(pytest:*) Bash(git:*)")
+      @active_states = maps::get(:active_states, opts, ["open", "todo", "in progress"])
+      @terminal_states = maps::get(:terminal_states, opts, ["closed", "done", "cancelled"])
+      # Hooks
+      @after_create_hook = maps::get(:after_create_hook, opts, nil)
+      @before_run_hook = maps::get(:before_run_hook, opts, nil)
+      @after_run_hook = maps::get(:after_run_hook, opts, nil)
+      @before_remove_hook = maps::get(:before_remove_hook, opts, nil)
+      @before_review_run_hook = maps::get(:before_review_run_hook, opts, nil)
+      @after_review_run_hook = maps::get(:after_review_run_hook, opts, nil)
+      # Source config
+      @github_repo = maps::get(:github_repo, opts, nil)
+      @github_labels = maps::get(:github_labels, opts, "orchestra")
+      # Workflow
+      @workflow_path = maps::get(:workflow_path, opts, nil)
+      @prompt_template = maps::get(:prompt_template, opts, nil)
+      # Multi-workflow routing
+      @workflow_dir = maps::get(:workflow_dir, opts, nil)
+      @workflow_router = maps::get(:workflow_router, opts, nil)
+      @workflows = maps::get(:workflows, opts, nil)
+      self
+    end
+
+    def mode()
+      @mode
+    end
+
+    def poll_interval_ms()
+      @poll_interval_ms
+    end
+
+    def max_turns()
+      @max_turns
+    end
+
+    def max_concurrent()
+      @max_concurrent
+    end
+
+    def max_retries()
+      @max_retries
+    end
+
+    def max_retry_backoff_ms()
+      @max_retry_backoff_ms
+    end
+
+    def stall_timeout_ms()
+      @stall_timeout_ms
+    end
+
+    def workspace_root()
+      @workspace_root
+    end
+
+    def hook_timeout_ms()
+      @hook_timeout_ms
+    end
+
+    def max_concurrent_by_state()
+      @max_concurrent_by_state
+    end
+
+    def max_review_rounds()
+      @max_review_rounds
+    end
+
+    def review_poll_interval_ms()
+      @review_poll_interval_ms
+    end
+
+    def allowed_tools()
+      @allowed_tools
+    end
+
+    def active_states()
+      @active_states
+    end
+
+    def terminal_states()
+      @terminal_states
+    end
+
+    def after_create_hook()
+      @after_create_hook
+    end
+
+    def before_run_hook()
+      @before_run_hook
+    end
+
+    def after_run_hook()
+      @after_run_hook
+    end
+
+    def before_remove_hook()
+      @before_remove_hook
+    end
+
+    def before_review_run_hook()
+      @before_review_run_hook
+    end
+
+    def after_review_run_hook()
+      @after_review_run_hook
+    end
+
+    def github_repo()
+      @github_repo
+    end
+
+    def github_labels()
+      @github_labels
+    end
+
+    def workflow_path()
+      @workflow_path
+    end
+
+    def prompt_template()
+      @prompt_template
+    end
+
+    def workflow_dir()
+      @workflow_dir
+    end
+
+    def workflow_router()
+      @workflow_router
+    end
+
+    def workflows()
+      @workflows
+    end
+
+    # Build hooks map from config (used by Scheduler/Worker)
+    def hooks()
+      h = {}
+      h = if @after_create_hook != nil; maps::put(:after_create, @after_create_hook, h); else; h; end
+      h = if @before_run_hook != nil; maps::put(:before_run, @before_run_hook, h); else; h; end
+      h = if @after_run_hook != nil; maps::put(:after_run, @after_run_hook, h); else; h; end
+      h = if @before_remove_hook != nil; maps::put(:before_remove, @before_remove_hook, h); else; h; end
+      h = if @before_review_run_hook != nil; maps::put(:before_review_run, @before_review_run_hook, h); else; h; end
+      h = if @after_review_run_hook != nil; maps::put(:after_review_run, @after_review_run_hook, h); else; h; end
+      h
+    end
+  end
+
+  # Create a config from a map of options
+  def self.new(opts)
+    Config::Settings.new(opts)
+  end
+
+  # Create a default config
+  def self.default()
+    Config::Settings.new({})
+  end
+
+  # Merge additional options into an existing config
+  def self.merge(config, overrides)
+    base = {
+      mode: config.mode(),
+      poll_interval_ms: config.poll_interval_ms(),
+      max_turns: config.max_turns(),
+      max_concurrent: config.max_concurrent(),
+      max_retries: config.max_retries(),
+      max_retry_backoff_ms: config.max_retry_backoff_ms(),
+      stall_timeout_ms: config.stall_timeout_ms(),
+      workspace_root: config.workspace_root(),
+      hook_timeout_ms: config.hook_timeout_ms(),
+      max_concurrent_by_state: config.max_concurrent_by_state(),
+      max_review_rounds: config.max_review_rounds(),
+      review_poll_interval_ms: config.review_poll_interval_ms(),
+      allowed_tools: config.allowed_tools(),
+      active_states: config.active_states(),
+      terminal_states: config.terminal_states(),
+      after_create_hook: config.after_create_hook(),
+      before_run_hook: config.before_run_hook(),
+      after_run_hook: config.after_run_hook(),
+      before_remove_hook: config.before_remove_hook(),
+      before_review_run_hook: config.before_review_run_hook(),
+      after_review_run_hook: config.after_review_run_hook(),
+      github_repo: config.github_repo(),
+      github_labels: config.github_labels(),
+      workflow_path: config.workflow_path(),
+      prompt_template: config.prompt_template(),
+      workflow_dir: config.workflow_dir(),
+      workflow_router: config.workflow_router(),
+      workflows: config.workflows()
+    }
+    Config::Settings.new(maps::merge(base, overrides))
+  end
+
+  # Create a config from a WORKFLOW.md file
+  def self.from_workflow(path)
+    match Workflow::load(path)
+      case {:ok, wf_config, template}
+        opts = map_workflow_keys(wf_config)
+        opts = maps::put(:workflow_path, path, opts)
+        opts = maps::put(:prompt_template, template, opts)
+        Config::Settings.new(opts)
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  # Map WORKFLOW.md YAML keys to internal config keys
+  def self.map_workflow_keys(wf)
+    mappings = [
+      {<<"polling">>, <<"interval_ms">>, :poll_interval_ms},
+      {<<"agent">>, <<"max_turns">>, :max_turns},
+      {<<"agent">>, <<"max_concurrent">>, :max_concurrent},
+      {<<"agent">>, <<"max_retries">>, :max_retries},
+      {<<"agent">>, <<"max_retry_backoff_ms">>, :max_retry_backoff_ms},
+      {<<"workspace">>, <<"root">>, :workspace_root},
+      {<<"hooks">>, <<"after_create">>, :after_create_hook},
+      {<<"hooks">>, <<"before_run">>, :before_run_hook},
+      {<<"hooks">>, <<"after_run">>, :after_run_hook},
+      {<<"hooks">>, <<"before_remove">>, :before_remove_hook},
+      {<<"hooks">>, <<"before_review_run">>, :before_review_run_hook},
+      {<<"hooks">>, <<"after_review_run">>, :after_review_run_hook},
+      {<<"hooks">>, <<"timeout_ms">>, :hook_timeout_ms},
+      {<<"review">>, <<"max_rounds">>, :max_review_rounds},
+      {<<"review">>, <<"poll_interval_ms">>, :review_poll_interval_ms}
+    ]
+    flat_mappings = [
+      {<<"max_turns">>, :max_turns},
+      {<<"max_concurrent">>, :max_concurrent},
+      {<<"poll_interval_ms">>, :poll_interval_ms},
+      {<<"workspace_root">>, :workspace_root},
+      {<<"mode">>, :mode},
+      {<<"allowed_tools">>, :allowed_tools},
+      {<<"github_repo">>, :github_repo},
+      {<<"github_labels">>, :github_labels},
+      {<<"workflow_dir">>, :workflow_dir},
+      {<<"workflow_router">>, :workflow_router},
+      {<<"workflows">>, :workflows}
+    ]
+    opts = apply_nested_mappings(mappings, wf, {})
+    apply_flat_mappings(flat_mappings, wf, opts)
+  end
+
+  def self.apply_nested_mappings([], _wf, acc)
+    acc
+  end
+
+  def self.apply_nested_mappings([{section, key, config_key}, *rest], wf, acc)
+    section_map = maps::get(section, wf, nil)
+    if section_map != nil and is_map(section_map)
+      val = maps::get(key, section_map, nil)
+      if val != nil
+        apply_nested_mappings(rest, wf, maps::put(config_key, convert_workflow_value(val), acc))
+      else
+        apply_nested_mappings(rest, wf, acc)
+      end
+    else
+      apply_nested_mappings(rest, wf, acc)
+    end
+  end
+
+  def self.apply_flat_mappings([], _wf, acc)
+    acc
+  end
+
+  def self.apply_flat_mappings([{key, config_key}, *rest], wf, acc)
+    val = maps::get(key, wf, nil)
+    if val != nil
+      apply_flat_mappings(rest, wf, maps::put(config_key, convert_workflow_value(val), acc))
+    else
+      apply_flat_mappings(rest, wf, acc)
+    end
+  end
+
+  def self.convert_workflow_value(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.convert_workflow_value(v)
+    v
+  end
+end

@@ -1,0 +1,45 @@
+# Path Safety — validates and sanitizes file paths
+# Prevents path traversal attacks and ensures workspace isolation
+
+module PathSafety
+  # Sanitize an identifier for use as directory name
+  # Replaces anything not [A-Za-z0-9._-] with underscore
+  def self.sanitize(identifier)
+    id_bin = ensure_list(identifier)
+    re::replace(id_bin, "[^A-Za-z0-9._-]", "_", [:global, {:return, :list}])
+  end
+
+  # Validate that a path is within the allowed root directory
+  def self.validate_path(path, root)
+    abs_path = filename::absname(ensure_list(path))
+    abs_root = filename::absname(ensure_list(root))
+    lists::prefix(abs_root, abs_path)
+  end
+
+  # Join paths safely — validates the result is within root
+  def self.safe_join(root, parts)
+    root_str = ensure_list(root)
+    joined = lists::foldl(do |part, acc|
+      filename::join(acc, ensure_list(part))
+    end, root_str, parts)
+    abs_joined = filename::absname(joined)
+    abs_root = filename::absname(root_str)
+    if lists::prefix(abs_root, abs_joined)
+      {:ok, abs_joined}
+    else
+      {:error, :path_traversal}
+    end
+  end
+
+  def self.ensure_list(v) if is_list(v)
+    v
+  end
+
+  def self.ensure_list(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.ensure_list(v) if is_atom(v)
+    atom_to_list(v)
+  end
+end

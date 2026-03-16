@@ -1,0 +1,58 @@
+# Debug: simulate the full reconcile_reviews flow
+
+module DebugReview2
+  def self.run()
+    repo = "i2y/orchestra-test"
+    erlang::put(:orchestra_github_repo, repo)
+
+    puts("=== Simulating reconcile_reviews ===\n")
+
+    # Simulate what the Scheduler does
+    review_pending = maps::put("1", {2, 0}, {})
+    puts("review_pending: ~p", [review_pending])
+
+    review_config = {
+      review_pending: review_pending,
+      max_review_rounds: 5
+    }
+
+    puts("\nCalling GitHubPRReviewSource::fetch_tasks...")
+    tasks = GitHubPRReviewSource::fetch_tasks(review_config)
+    puts("Got ~p tasks", [erlang::length(tasks)])
+
+    if tasks != []
+      task = lists::nth(1, tasks)
+      puts("\nTask: ~p", [maps::get(:id, task)])
+      puts("parent_id: ~p", [maps::get(:parent_id, task)])
+      puts("workspace_reuse: ~p", [maps::get(:workspace_reuse, task)])
+      comments = maps::get(:review_comments, task, [])
+      puts("review_comments: ~p", [erlang::length(comments)])
+      puts("(comments omitted for safety)")
+
+      # Now test: would submit() accept this?
+      puts("\n=== Testing submit flow ===")
+      id = maps::get(:id, task)
+      claimed = ["1"]
+      done = maps::put("1", true, {})
+      already = lists::member(id, claimed)
+      in_done = maps::is_key(id, done)
+      puts("id=~p already_claimed=~p in_done=~p", [id, already, in_done])
+      puts("Would be accepted: ~p", [(not already) and (not in_done)])
+    else
+      puts("No tasks returned!")
+    end
+  end
+
+  def self.print_comments([])
+    :ok
+  end
+
+  def self.print_comments([c, *rest])
+    puts("  [~s] (~s): ~s", [
+      maps::get(:path, c, ""),
+      maps::get(:author, c, ""),
+      lists::sublist(maps::get(:body, c, ""), 50)
+    ])
+    print_comments(rest)
+  end
+end

@@ -1,0 +1,128 @@
+# Symphony Worker — executes agent turns for a single issue
+#
+# Each Worker is an actor that:
+#   1. Prepares workspace
+#   2. Renders the prompt from the workflow template
+#   3. Runs the agent (via AgentRunner)
+#   4. Handles streaming events
+#   5. Reports completion back to the Orchestrator
+
+module Worker
+  actor Instance
+    expose status(), turn(), issue_id()
+
+    def initialize(issue, config, orchestrator_pid)
+      @issue = issue
+      @config = config
+      @orchestrator = orchestrator_pid
+      @turn = 0
+      @max_turns = config.max_turns()
+      @status = :starting
+      @events = []
+      @runner = config.agent_runner()
+      @workspace_root = config.workspace_root()
+      @workflow_path = config.workflow_path()
+      @output = ""
+
+      # Prepare workspace (with after_create hook if configured)
+      issue_id = maps::get(:id, @issue, maps::get(:identifier, @issue, "unknown"))
+      {ws_path, _} = Workspace::prepare(@workspace_root, issue_id, @config)
+      @workspace = ws_path
+
+      # Load workflow if configured
+      @prompt_template = if @workflow_path != nil
+        match Workflow::load(@workflow_path)
+          case {:ok, _wf_config, template}
+            template
+          case {:error, _}
+            "Fix this issue:\nTitle: {{issue.title}}\nDescription: {{issue.description}}"
+        end
+      else
+        "Fix this issue:\nTitle: {{issue.title}}\nDescription: {{issue.description}}"
+      end
+
+      # Start first turn
+      run_turn()
+    end
+
+    def run_turn()
+      @turn = @turn + 1
+      @status = :running
+      puts("[Worker] Turn ~p/~p for issue ~s", [@turn, @max_turns, maps::get(:title, @issue, "?")])
+
+      # Run before_run hook
+      Workspace::run_before_run(@workspace, @issue, @config)
+
+      # Build prompt with template variables
+      vars = {
+        <<"issue">> => {
+          <<"title">> => erlang::list_to_binary(maps::get(:title, @issue, "")),
+          <<"description">> => erlang::list_to_binary(maps::get(:description, @issue, "")),
+          <<"id">> => erlang::list_to_binary(maps::get(:id, @issue, "")),
+          <<"identifier">> => erlang::list_to_binary(maps::get(:identifier, @issue, ""))
+        },
+        <<"attempt">> => erlang::list_to_binary(erlang::integer_to_list(@turn))
+      }
+      prompt = Workflow::render_prompt(@prompt_template, vars)
+
+      # Run agent
+      if @runner != nil
+        erlang::apply(@runner, :run, [@workspace, prompt, self()])
+      else
+        # Default: use mock runner
+        AgentRunner::run(@workspace, prompt, self())
+      end
+    end
+
+    def on_message({:agent_event, event})
+      @events = [event, *@events]
+      # Forward to orchestrator for logging
+      @orchestrator ! {:worker_event, maps::get(:id, @issue, "?"), event}
+    end
+
+    def on_message({:agent_done, result})
+      @output = maps::get(:output, result, "")
+      result_status = maps::get(:status, result, :ok)
+      completed = maps::get(:completed, result, false)
+
+      if result_status == :error and @turn < @max_turns
+        puts("[Worker] Turn ~p failed, retrying...", [@turn])
+        run_turn()
+      elsif result_status == :ok and (not completed) and @turn < @max_turns
+        puts("[Worker] Turn ~p done, continuing...", [@turn])
+        run_turn()
+      else
+        # Run after_run hook
+        Workspace::run_after_run(@workspace, @issue, @config)
+
+        if result_status == :ok
+          @status = :done
+        else
+          @status = :failed
+        end
+        @orchestrator ! {:worker_done, maps::get(:id, @issue, "?"), {result_status, @output}}
+      end
+    end
+
+    def status()
+      @status
+    end
+
+    def turn()
+      @turn
+    end
+
+    def issue_id()
+      maps::get(:id, @issue, "unknown")
+    end
+
+    def on_terminate(reason)
+      puts("[Worker] Shutting down (issue: ~s, reason: ~p)", [maps::get(:title, @issue, "?"), reason])
+      # Cleanup workspace on error
+      if reason != :normal and reason != :shutdown
+        issue_id = maps::get(:id, @issue, maps::get(:identifier, @issue, "unknown"))
+        Workspace::cleanup(@workspace_root, issue_id)
+      end
+    end
+  end
+end

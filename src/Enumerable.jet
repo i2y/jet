@@ -1,6 +1,6 @@
 module Enumerable
   def select(func)
-    reduce([]) {|item, acc|
+    reduce([]) {|acc, item|
       if func.(item)
         acc ++ [item]
       else
@@ -10,7 +10,7 @@ module Enumerable
   end
 
   def filter(func)
-    reduce([]) {|item, acc|
+    reduce([]) {|acc, item|
       if func.(item)
         acc ++ [item]
       else
@@ -20,7 +20,7 @@ module Enumerable
   end
 
   def reject(func)
-    reduce([]) {|item, acc|
+    reduce([]) {|acc, item|
       if func.(item)
         acc
       else
@@ -30,19 +30,19 @@ module Enumerable
   end
 
   def map(func)
-    reduce([]) {|item, acc|
+    reduce([]) {|acc, item|
       acc ++ [func.(item)]
     }
   end
 
   def collect(func)
-    reduce([]) {|item, acc|
+    reduce([]) {|acc, item|
       acc ++ [func.(item)]
     }
   end
 
   def min(func)
-    reduce(:infinity) {|item, acc|
+    reduce(:infinity) {|acc, item|
       match func.(acc, item)
         case -1
           0
@@ -55,7 +55,7 @@ module Enumerable
   end
 
   def min()
-    reduce(:infinity) {|item, acc|
+    reduce(:infinity) {|acc, item|
       if acc <= item
         acc
       else
@@ -65,7 +65,7 @@ module Enumerable
   end
 
   def unique()
-    reduce([]) {|item, acc|
+    reduce([]) {|acc, item|
       if acc.index_of(item)
         acc
       else
@@ -75,7 +75,7 @@ module Enumerable
   end
 
   def each(func)
-    reduce([]) {|item, acc|
+    reduce([]) {|acc, item|
       func.(item)
     }
   end

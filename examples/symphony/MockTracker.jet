@@ -1,0 +1,62 @@
+# Mock issue tracker for Symphony demo
+module MockTracker
+  def self.fetch_issues(_config)
+    done = erlang::get(:mock_tracker_done)
+    done_set = if done == :undefined
+      []
+    else
+      done
+    end
+    all = [
+      {id: "ISSUE-1", identifier: "PROJ-1", title: "Fix login button",
+       description: "The login button does not respond on mobile devices"},
+      {id: "ISSUE-2", identifier: "PROJ-2", title: "Add dark mode",
+       description: "Users have requested a dark mode toggle in settings"},
+      {id: "ISSUE-3", identifier: "PROJ-3", title: "Optimize queries",
+       description: "Database queries on the dashboard page are slow"}
+    ]
+    filter_active(all, done_set, [])
+  end
+
+  def self.filter_active([], _done, acc)
+    lists::reverse(acc)
+  end
+
+  def self.filter_active([issue, *rest], done, acc)
+    id = maps::get(:id, issue)
+    if lists::member(id, done)
+      filter_active(rest, done, acc)
+    else
+      filter_active(rest, done, [issue, *acc])
+    end
+  end
+
+  def self.update_issue(issue_id, status, result)
+    output = maps::get(:output, result, "")
+    puts("[MockTracker] Issue ~s updated: ~p — ~s", [issue_id, status, output])
+    # Mark as done on success
+    if status == :ok
+      done = erlang::get(:mock_tracker_done)
+      done = if done == :undefined
+        [issue_id]
+      else
+        [issue_id, *done]
+      end
+      erlang::put(:mock_tracker_done, done)
+    end
+    :ok
+  end
+
+  def self.fetch_issue_state(issue_id, _config)
+    done = erlang::get(:mock_tracker_done)
+    if done == :undefined
+      :active
+    else
+      if lists::member(issue_id, done)
+        :terminal
+      else
+        :active
+      end
+    end
+  end
+end

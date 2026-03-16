@@ -1,0 +1,26 @@
+# Orchestra TaskSource — task source protocol definition
+#
+# TaskSource modules must implement:
+#   fetch_tasks(config) → [task] | {:error, reason}
+#   update_task(task_id, status, result) → :ok
+#   fetch_task_state(task_id, config) → :active | :terminal
+#
+# A task is a map with at least:
+#   {id: string, title: string, description: string, ...}
+#
+# This module provides a default mock implementation for testing.
+
+module TaskSource
+  # Mock source — returns empty list
+  def self.fetch_tasks(_config)
+    []
+  end
+
+  def self.update_task(_id, _status, _result)
+    :ok
+  end
+
+  def self.fetch_task_state(_id, _config)
+    :active
+  end
+end

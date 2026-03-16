@@ -1,0 +1,389 @@
+# Symphony Orchestrator — polls for issues, dispatches workers, manages lifecycle
+#
+# State machine per issue:
+#   Unclaimed → Claimed → Running → Done | RetryQueued
+#   RetryQueued → Running (after delay)
+#
+# Usage:
+#   config = Config::new({
+#     poll_interval_ms: 30000,
+#     max_turns: 5,
+#     max_concurrent: 3,
+#     workspace_root: "/tmp/symphony",
+#     agent_runner: :ClaudeCodeRunner,
+#     tracker: :LinearClient
+#   })
+#   orch = Orchestrator::Instance.spawn(config)
+#   orch.status()
+#   gen_server::stop(orch)
+
+module Orchestrator
+  actor Instance
+    expose start(), stop(), status(), running_count(), completed()
+
+    def initialize(config)
+      @config = config
+      @running = {}         # issue_id => {pid, issue}
+      @claimed = []         # [issue_id, ...]
+      @retry_attempts = {}  # issue_id => {count, issue}
+      @done = {}            # issue_id => true (completed or max-retried)
+      @completed = []       # [{issue_id, status, output}, ...]
+      @stopped = false
+      @workflow_mtime = nil
+
+      puts("[Orchestrator] Starting (poll=~pms, max_concurrent=~p, max_retries=~p)",
+           [@config.poll_interval_ms(), @config.max_concurrent(), @config.max_retries()])
+
+      # Startup terminal workspace cleanup
+      run_terminal_cleanup()
+
+      # Start polling loop
+      send_after(0, self(), :tick)
+    end
+
+    def on_message(:tick)
+      if @stopped != true
+        check_config_reload()
+        reconcile()
+        reconcile_terminal()
+        dispatch()
+        send_after(@config.poll_interval_ms(), self(), :tick)
+      end
+    end
+
+    def on_message({:worker_done, issue_id, result})
+      puts("[Orchestrator] Worker done for ~s: ~p", [issue_id, erlang::element(1, result)])
+
+      # Remove from running
+      @running = maps::remove(issue_id, @running)
+
+      match result
+        case {:ok, output}
+          # Success — schedule continuation retry (1s) to re-check issue state
+          @completed = [{issue_id, :ok, output}, *@completed]
+          tracker = @config.tracker()
+          if tracker != nil
+            erlang::apply(tracker, :update_issue, [issue_id, :ok, {output: output}])
+          end
+          # Schedule continuation retry — mark as done temporarily to prevent
+          # dispatch loop from re-dispatching during the 1s wait
+          @done = maps::put(issue_id, true, @done)
+          attempts = maps::get(issue_id, @retry_attempts, {0, nil})
+          issue = erlang::element(2, attempts)
+          if issue != nil
+            puts("[Orchestrator] Scheduling continuation check for ~s (1s)", [issue_id])
+            @retry_attempts = maps::put(issue_id, {0, issue}, @retry_attempts)
+            send_after(1000, self(), {:retry, issue_id})
+          end
+
+        case {:error, output}
+          # Failure — retry if attempts remain
+          attempts = maps::get(issue_id, @retry_attempts, {0, nil})
+          count = erlang::element(1, attempts)
+          issue = erlang::element(2, attempts)
+          if count < @config.max_retries()
+            puts("[Orchestrator] Queuing retry ~p/~p for ~s",
+                 [count + 1, @config.max_retries(), issue_id])
+            @retry_attempts = maps::put(issue_id, {count + 1, issue}, @retry_attempts)
+            backoff = compute_backoff(count + 1)
+            puts("[Orchestrator] Retry backoff: ~pms", [backoff])
+            send_after(backoff, self(), {:retry, issue_id})
+          else
+            puts("[Orchestrator] Max retries reached for ~s", [issue_id])
+            @done = maps::put(issue_id, true, @done)
+            @completed = [{issue_id, :error, output}, *@completed]
+            @retry_attempts = maps::remove(issue_id, @retry_attempts)
+            tracker = @config.tracker()
+            if tracker != nil
+              erlang::apply(tracker, :update_issue, [issue_id, :error, {output: output}])
+            end
+          end
+      end
+    end
+
+    def on_message({:worker_event, _issue_id, _event})
+      :ok
+    end
+
+    def on_message({:retry, issue_id})
+      match maps::find(issue_id, @retry_attempts)
+        case {:ok, {count, issue}}
+          if issue != nil
+            # Re-check issue state before dispatching
+            tracker = @config.tracker()
+            state = if tracker != nil
+              erlang::apply(tracker, :fetch_issue_state, [issue_id, @config.llm_opts()])
+            else
+              :active
+            end
+            if state == :terminal
+              puts("[Orchestrator] Issue ~s is now terminal, releasing claim", [issue_id])
+              @done = maps::put(issue_id, true, @done)
+              @retry_attempts = maps::remove(issue_id, @retry_attempts)
+              ws_identifier = maps::get(:identifier, issue, maps::get(:id, issue, issue_id))
+              Workspace::cleanup(@config.workspace_root(), ws_identifier)
+            else
+              puts("[Orchestrator] Retrying ~s (attempt ~p)", [issue_id, count])
+              # Remove from done so dispatch can track it again
+              @done = maps::remove(issue_id, @done)
+              spawn_worker(issue)
+            end
+          end
+        case :error
+          :ok
+      end
+    end
+
+    # Fetch new issues from tracker and reconcile state
+    def reconcile()
+      tracker = @config.tracker()
+      if tracker != nil
+        match erlang::apply(tracker, :fetch_issues, [@config.llm_opts()])
+          case issues if is_list(issues)
+            new_issues = find_new_issues(issues)
+            claim_issues(new_issues)
+          case {:error, reason}
+            puts("[Orchestrator] Tracker error: ~p", [reason])
+          case _
+            :ok
+        end
+      end
+    end
+
+    # Filter issues not yet known — recursive, no lambdas
+    def find_new_issues(issues)
+      find_new_issues_rec(issues, [])
+    end
+
+    def find_new_issues_rec([], acc)
+      lists::reverse(acc)
+    end
+
+    def find_new_issues_rec([issue, *rest], acc)
+      id = maps::get(:id, issue)
+      if (not lists::member(id, @claimed)) and (not maps::is_key(id, @running)) and (not maps::is_key(id, @done))
+        find_new_issues_rec(rest, [issue, *acc])
+      else
+        find_new_issues_rec(rest, acc)
+      end
+    end
+
+    # Claim new issues — recursive
+    def claim_issues([])
+      :ok
+    end
+
+    def claim_issues([issue, *rest])
+      id = maps::get(:id, issue)
+      @claimed = [id, *@claimed]
+      @retry_attempts = maps::put(id, {0, issue}, @retry_attempts)
+      claim_issues(rest)
+    end
+
+    # Dispatch workers up to max_concurrent — recursive, no lambdas
+    def dispatch()
+      running_count = maps::size(@running)
+      available = @config.max_concurrent() - running_count
+      if available > 0
+        dispatchable = find_dispatchable(@claimed, available, [])
+        dispatch_list(dispatchable)
+      end
+    end
+
+    def find_dispatchable([], _limit, acc)
+      lists::reverse(acc)
+    end
+
+    def find_dispatchable(_, 0, acc)
+      lists::reverse(acc)
+    end
+
+    def find_dispatchable([id, *rest], limit, acc)
+      if (not maps::is_key(id, @running)) and (not maps::is_key(id, @done))
+        find_dispatchable(rest, limit - 1, [id, *acc])
+      else
+        find_dispatchable(rest, limit, acc)
+      end
+    end
+
+    # Dispatch a list of issue IDs — recursive
+    def dispatch_list([])
+      :ok
+    end
+
+    def dispatch_list([issue_id, *rest])
+      match maps::find(issue_id, @retry_attempts)
+        case {:ok, {_count, issue}} if issue != nil
+          spawn_worker(issue)
+        case _
+          :ok
+      end
+      dispatch_list(rest)
+    end
+
+    def spawn_worker(issue)
+      issue_id = maps::get(:id, issue)
+      puts("[Orchestrator] Spawning worker for ~s: ~s",
+           [issue_id, maps::get(:title, issue, "?")])
+      worker_pid = Worker::Instance.spawn(issue, @config, self())
+      monitor(worker_pid)
+      @running = maps::put(issue_id, {worker_pid, issue}, @running)
+    end
+
+    def on_message({:DOWN, _ref, :process, pid, reason})
+      # Worker crashed — find which issue it was handling
+      crashed = maps::fold(do |id, {wpid, _issue}, acc|
+        if wpid == pid
+          [id, *acc]
+        else
+          acc
+        end
+      end, [], @running)
+      handle_crashes(crashed, reason)
+    end
+
+    # Handle crashed workers — recursive
+    def handle_crashes([], _reason)
+      :ok
+    end
+
+    def handle_crashes([id, *rest], reason)
+      puts("[Orchestrator] Worker crashed for ~s (reason: ~p)", [id, reason])
+      @running = maps::remove(id, @running)
+      self() ! {:worker_done, id, {:error, "worker crashed: " ++ lists::flatten(io_lib::format("~p", [reason]))}}
+      handle_crashes(rest, reason)
+    end
+
+    def start()
+      @stopped = false
+      send_after(0, self(), :tick)
+      :ok
+    end
+
+    def stop()
+      @stopped = true
+      stop_workers(maps::to_list(@running))
+      :ok
+    end
+
+    # Stop running workers — recursive
+    def stop_workers([])
+      :ok
+    end
+
+    def stop_workers([{_id, {pid, _issue}}, *rest])
+      if erlang::is_process_alive(pid)
+        gen_server::stop(pid)
+      end
+      stop_workers(rest)
+    end
+
+    def status()
+      {running: maps::size(@running),
+       claimed: erlang::length(@claimed),
+       completed: erlang::length(@completed),
+       stopped: @stopped}
+    end
+
+    def running_count()
+      maps::size(@running)
+    end
+
+    def completed()
+      lists::reverse(@completed)
+    end
+
+    # Startup: clean workspaces for issues already in terminal states
+    def run_terminal_cleanup()
+      tracker = @config.tracker()
+      if tracker != nil
+        ws_root = @config.workspace_root()
+        entries = Workspace::list(ws_root)
+        cleanup_terminal_workspaces(entries, tracker, ws_root)
+      end
+    end
+
+    def cleanup_terminal_workspaces([], _tracker, _root)
+      :ok
+    end
+
+    def cleanup_terminal_workspaces([entry, *rest], tracker, root)
+      # Entry is the sanitized issue identifier (directory name)
+      state = erlang::apply(tracker, :fetch_issue_state, [entry, @config.llm_opts()])
+      if state == :terminal
+        puts("[Orchestrator] Startup cleanup: removing terminal workspace ~s", [entry])
+        Workspace::cleanup(root, entry)
+      end
+      cleanup_terminal_workspaces(rest, tracker, root)
+    end
+
+    # Compute exponential backoff: min(1000 * 2^count, max_retry_backoff_ms)
+    def compute_backoff(count)
+      base = erlang::trunc(math::pow(2.0, count)) * 1000
+      max_backoff = @config.max_retry_backoff_ms()
+      if base < max_backoff
+        base
+      else
+        max_backoff
+      end
+    end
+
+    # Check running issues for terminal state and stop their workers
+    def reconcile_terminal()
+      tracker = @config.tracker()
+      if tracker != nil
+        running_list = maps::to_list(@running)
+        check_terminal_issues(running_list, tracker)
+      end
+    end
+
+    def check_terminal_issues([], _tracker)
+      :ok
+    end
+
+    def check_terminal_issues([{issue_id, {pid, issue}}, *rest], tracker)
+      state = erlang::apply(tracker, :fetch_issue_state, [issue_id, @config.llm_opts()])
+      if state == :terminal
+        puts("[Orchestrator] Issue ~s is terminal, stopping worker", [issue_id])
+        if erlang::is_process_alive(pid)
+          gen_server::stop(pid)
+        end
+        @running = maps::remove(issue_id, @running)
+        @done = maps::put(issue_id, true, @done)
+        # Cleanup workspace
+        ws_identifier = maps::get(:identifier, issue, maps::get(:id, issue, issue_id))
+        Workspace::cleanup(@config.workspace_root(), ws_identifier)
+      end
+      check_terminal_issues(rest, tracker)
+    end
+
+    # Reload config from WORKFLOW.md if it has changed
+    def check_config_reload()
+      wf_path = @config.workflow_path()
+      if wf_path != nil
+        mtime = filelib::last_modified(wf_path)
+        if mtime != 0 and mtime != @workflow_mtime
+          if @workflow_mtime != nil
+            puts("[Orchestrator] WORKFLOW.md changed, reloading config")
+            match Config::from_workflow(wf_path)
+              case {:error, _reason}
+                :ok
+              case new_config
+                # Preserve runtime-only fields from current config
+                @config = Config::merge(new_config, {
+                  tracker: @config.tracker(),
+                  agent_runner: @config.agent_runner()
+                })
+            end
+          end
+          @workflow_mtime = mtime
+        end
+      end
+    end
+
+    def on_terminate(reason)
+      puts("[Orchestrator] Shutting down (reason: ~p)", [reason])
+      stop_workers(maps::to_list(@running))
+    end
+  end
+end

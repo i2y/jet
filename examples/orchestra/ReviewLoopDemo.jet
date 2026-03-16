@@ -1,0 +1,107 @@
+# ReviewLoopDemo — PR review feedback loop test
+#
+# 1. Detects the already-created PR on orchestra-1 branch
+# 2. Polls for review comments every 10 seconds
+# 3. When comments found, spawns worker to address them
+# 4. Worker reuses the existing workspace, pushes fix
+#
+# Run:
+#   ./jet -r ReviewLoopDemo::run examples/orchestra/ReviewLoopDemo.jet
+
+module ReviewLoopDemo
+  def self.run()
+    puts("=== Review Loop Demo ===\n")
+
+    repo = "i2y/orchestra-test"
+    erlang::put(:orchestra_github_repo, repo)
+    os::putenv("ORCHESTRA_GITHUB_REPO", repo)
+
+    config = Config::new({
+      mode: :push,
+      max_concurrent: 1,
+      max_turns: 3,
+      max_retries: 0,
+      max_review_rounds: 5,
+      review_poll_interval_ms: 10000,
+      allowed_tools: "Read Edit Write Bash(python:*) Bash(pytest:*)",
+      workspace_root: "/tmp/orchestra_debug"
+    })
+
+    hooks = {
+      before_run: "true",
+      after_run: "true",
+      before_review_run: "cd /tmp/orchestra_debug/1 && git fetch origin && git pull --no-edit 2>/dev/null; true",
+      after_review_run: "cd /tmp/orchestra_debug/1 && git add -A && git commit -m 'orchestra: address review feedback' && git push 2>&1; true"
+    }
+
+    # Seed checkpoint BEFORE starting scheduler
+    seed_review_pending(config)
+
+    orch = Scheduler::Instance.spawn(config, nil, :ClaudeSimpleRunner, {
+      store: :FileStore,
+      review_source: :GitHubPRReviewSource,
+      hooks: hooks
+    })
+
+    puts("Scheduler running. Waiting for review comments on PR #2...")
+    puts("Go to https://github.com/i2y/orchestra-test/pull/2 and add a review comment.\n")
+
+    wait_loop(orch, 0, 300)
+  end
+
+  def self.seed_review_pending(config)
+    root = config.workspace_root()
+    # Write checkpoint JSON directly to avoid serialization issues
+    dir = root ++ "/.orchestra"
+    filelib::ensure_dir(dir ++ "/dummy")
+    json = jet_json_ffi::encode({
+      <<"version">> => 1,
+      <<"created_at">> => erlang::system_time(:millisecond),
+      <<"claimed">> => [<<"1">>],
+      <<"retry_attempts">> => {},
+      <<"done">> => {<<"1">> => true},
+      <<"completed">> => [{<<"task_id">> => <<"1">>, <<"status">> => <<"ok">>, <<"output">> => <<"fixed">>}],
+      <<"review_pending">> => {<<"1">> => {<<"pr_number">> => 2, <<"round">> => 0}}
+    })
+    file::write_file(dir ++ "/checkpoint.json", json)
+    puts("Seeded checkpoint with review_pending: task '1' -> PR #2, round 0")
+  end
+
+  def self.wait_loop(orch, elapsed, max_seconds)
+    if elapsed >= max_seconds
+      puts("\nTimeout after ~p seconds", [max_seconds])
+      gen_server::stop(orch)
+    else
+      timer::sleep(10000)
+      status = orch.status()
+      completed_count = maps::get(:completed, status)
+      running = maps::get(:running, status)
+      puts("[~ps] running=~p completed=~p claimed=~p",
+           [elapsed + 10, running, completed_count, maps::get(:claimed, status)])
+
+      if completed_count > 1 and running == 0
+        puts("\n=== Review task completed! ===\n")
+        completed = orch.completed()
+        print_results(completed)
+        gen_server::stop(orch)
+      else
+        wait_loop(orch, elapsed + 10, max_seconds)
+      end
+    end
+  end
+
+  def self.print_results([])
+    :ok
+  end
+
+  def self.print_results([{id, status, output}, *rest])
+    puts("Task ~s: ~p", [id, status])
+    short = if erlang::length(output) > 300
+      lists::sublist(output, 300) ++ "..."
+    else
+      output
+    end
+    puts("Output: ~s\n", [short])
+    print_results(rest)
+  end
+end

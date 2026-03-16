@@ -1,0 +1,59 @@
+# Orchestra ClaudeSimpleRunner — runs Claude Code via os::cmd
+#
+# Uses stdin to pass the prompt to avoid argument parsing issues.
+# Respects allowed_tools from opts to control what Claude can do.
+#
+# Usage (via Scheduler):
+#   config = Config::new({allowed_tools: "Read Edit Write Bash(python:*)"})
+#   Scheduler::Instance.spawn(config, :MySource, :ClaudeSimpleRunner, {})
+
+module ClaudeSimpleRunner
+  def self.run(workspace, prompt, callback_pid, opts)
+    erlang::spawn(do ||
+      escaped_prompt = escape_shell(prompt)
+      tools = maps::get(:allowed_tools, opts, "Read Edit Write Bash(python:*) Bash(pytest:*) Bash(git:*)")
+      tools_args = build_tools_args(string::split(tools, " ", :all), [])
+      # Write prompt to temp file, pass via stdin, then clean up
+      tmp_file = workspace ++ "/.orchestra_prompt.txt"
+      file::write_file(tmp_file, unicode::characters_to_binary(prompt))
+      cmd = "cd " ++ workspace ++ " && claude --print " ++ tools_args ++ " < " ++ tmp_file ++ " 2>&1; rm -f " ++ tmp_file
+      output = os::cmd(cmd)
+      callback_pid ! {:agent_done, {status: :ok, output: output, completed: true}}
+    end)
+    :ok
+  end
+
+  def self.run(workspace, prompt, callback_pid)
+    run(workspace, prompt, callback_pid, {})
+  end
+
+  def self.stop(_workspace)
+    :ok
+  end
+
+  # Build --allowedTools 'Tool1' 'Tool2' ... args
+  def self.build_tools_args(tools, acc)
+    joined = join_tools(tools, [])
+    "--allowedTools " ++ joined
+  end
+
+  def self.join_tools([], acc)
+    lists::flatten(lists::reverse(acc))
+  end
+
+  def self.join_tools(["", *rest], acc)
+    join_tools(rest, acc)
+  end
+
+  def self.join_tools([tool, *rest], acc)
+    entry = escape_shell(tool) ++ " "
+    join_tools(rest, [entry, *acc])
+  end
+
+  def self.escape_shell(str)
+    # Convert to binary for re::replace to handle Unicode properly
+    bin = unicode::characters_to_binary(str)
+    escaped = re::replace(bin, "'", "'\\''", [:global, {:return, :list}])
+    "'" ++ escaped ++ "'"
+  end
+end

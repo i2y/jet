@@ -1,0 +1,59 @@
+# Orchestra Simple Demo — minimal orchestration with mock runner + mock source
+#
+# Demonstrates the full jet_orchestra pipeline without external dependencies:
+#   1. Scheduler polls MockTaskSource for tasks
+#   2. Workers prepare workspaces and run mock agent
+#   3. Agent completes, results are tracked
+#
+# Compile and run:
+#   ./jet examples/orchestra/MockTaskSource.jet
+#   ./jet -r SimpleDemo::run examples/orchestra/SimpleDemo.jet
+
+module SimpleDemo
+  def self.run()
+    puts("=== Orchestra Simple Demo ===\n")
+
+    # Create config
+    config = Config::Settings.new({
+      poll_interval_ms: 500,
+      max_turns: 2,
+      max_concurrent: 2,
+      max_retries: 1,
+      workspace_root: "/tmp/orchestra_demo"
+    })
+
+    puts("--- Starting Scheduler ---")
+    orch = Scheduler::Instance.spawn(config, :MockTaskSource, nil, {})
+
+    # Wait for the scheduler to poll, dispatch, and complete
+    timer::sleep(3000)
+
+    status = orch.status()
+    puts("\n--- Scheduler Status ---")
+    puts("  Running:   ~p", [maps::get(:running, status)])
+    puts("  Claimed:   ~p", [maps::get(:claimed, status)])
+    puts("  Completed: ~p", [maps::get(:completed, status)])
+
+    completed = orch.completed()
+    puts("\n--- Completed Tasks ---")
+    print_completed(completed)
+
+    puts("\n--- Stopping ---")
+    gen_server::stop(orch)
+    timer::sleep(100)
+
+    # Cleanup workspace
+    Workspace::delete_dir_recursive("/tmp/orchestra_demo")
+
+    puts("\n=== Done ===")
+  end
+
+  def self.print_completed([])
+    :ok
+  end
+
+  def self.print_completed([{id, status, output}, *rest])
+    puts("  ~s: ~p — ~s", [id, status, output])
+    print_completed(rest)
+  end
+end

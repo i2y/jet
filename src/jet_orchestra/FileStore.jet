@@ -1,0 +1,300 @@
+# Orchestra FileStore — JSON checkpoint persistence
+#
+# Implements the Store protocol using JSON files on disk.
+# Checkpoint is stored at <workspace_root>/.orchestra/checkpoint.json
+#
+# Features:
+#   - Atomic writes (write to .tmp, then rename)
+#   - Version field for future schema migration
+#   - Binary key → atom key conversion on load
+#
+# Per-task API is NOT supported (bulk only).
+# Use DetsStore for efficient per-task persistence.
+#
+# Usage:
+#   FileStore::save("/tmp/orchestra", state_map)
+#   {:ok, state} = FileStore::load("/tmp/orchestra")
+#   FileStore::delete("/tmp/orchestra")
+
+module FileStore
+  def self.save(root, state)
+    path = checkpoint_path(root)
+    tmp_path = path ++ ".tmp"
+    dir = checkpoint_dir(root)
+    filelib::ensure_dir(dir ++ "/dummy")
+
+    # Serialize state to JSON
+    json_map = serialize_state(state)
+    json = jet_json_ffi::encode(json_map)
+
+    # Atomic write: write to .tmp then rename
+    match file::write_file(tmp_path, json)
+      case :ok
+        match file::rename(tmp_path, path)
+          case :ok
+            :ok
+          case {:error, reason}
+            Log::error("Checkpoint rename failed", {reason: reason})
+            {:error, reason}
+        end
+      case {:error, reason}
+        Log::error("Checkpoint write failed", {reason: reason})
+        {:error, reason}
+    end
+  end
+
+  def self.load(root)
+    path = checkpoint_path(root)
+    match file::read_file(path)
+      case {:ok, bin}
+        match jet_json_ffi::decode(bin)
+          case {:ok, decoded}
+            version = maps::get(<<"version">>, decoded, 0)
+            if version == 1
+              {:ok, deserialize_state(decoded)}
+            else
+              Log::warn("Unknown checkpoint version, ignoring", {version: version})
+              {:error, :unknown_version}
+            end
+          case {:error, reason}
+            Log::warn("Checkpoint JSON decode failed", {reason: reason})
+            {:error, :decode_error}
+        end
+      case {:error, :enoent}
+        {:error, :not_found}
+      case {:error, reason}
+        Log::warn("Checkpoint read failed", {reason: reason})
+        {:error, reason}
+    end
+  end
+
+  def self.delete(root)
+    path = checkpoint_path(root)
+    match file::delete(path)
+      case :ok
+        :ok
+      case {:error, :enoent}
+        :ok
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  # --- Path helpers ---
+
+  def self.checkpoint_dir(root)
+    ensure_list(root) ++ "/.orchestra"
+  end
+
+  def self.checkpoint_path(root)
+    checkpoint_dir(root) ++ "/checkpoint.json"
+  end
+
+  # --- Serialization ---
+
+  # Convert internal state to a JSON-friendly map
+  def self.serialize_state(state)
+    {
+      <<"version">> => 1,
+      <<"created_at">> => erlang::system_time(:millisecond),
+      <<"claimed">> => serialize_claimed(maps::get(:claimed, state, [])),
+      <<"retry_attempts">> => serialize_retry_attempts(maps::get(:retry_attempts, state, {})),
+      <<"done">> => maps::get(:done, state, {}),
+      <<"completed">> => serialize_completed(maps::get(:completed, state, [])),
+      <<"review_pending">> => serialize_review_pending(maps::get(:review_pending, state, {}))
+    }
+  end
+
+  # claimed is a list of task_ids (charlists) — encode as binaries
+  def self.serialize_claimed(claimed)
+    lists::map(do |id|
+      unicode::characters_to_binary(ensure_list(id))
+    end, claimed)
+  end
+
+  # retry_attempts: {task_id => {count, task_map}} → JSON object
+  def self.serialize_retry_attempts(attempts)
+    maps::fold(do |id, {count, task}, acc|
+      key = unicode::characters_to_binary(ensure_list(id))
+      entry = {<<"count">> => count, <<"task">> => serialize_task(task)}
+      maps::put(key, entry, acc)
+    end, {}, attempts)
+  end
+
+  # Serialize a task map: convert atom keys to binary keys
+  def self.serialize_task(task)
+    if task == nil
+      nil
+    else
+      maps::fold(do |k, v, acc|
+        key = if is_atom(k)
+          atom_to_binary(k)
+        elsif is_list(k)
+          unicode::characters_to_binary(k)
+        else
+          k
+        end
+        val = serialize_value(v)
+        maps::put(key, val, acc)
+      end, {}, task)
+    end
+  end
+
+  # Serialize a value: handle nested structures (lists of maps, etc.)
+  def self.serialize_value(v) if is_list(v)
+    # Check if it's a charlist (string) or a list of complex values
+    match v
+      case [head, *_] if is_map(head)
+        # List of maps — serialize each
+        lists::map(do |item|
+          serialize_task(item)
+        end, v)
+      case _
+        # Charlist or list of simple values — try to convert to binary
+        if v == []
+          v
+        else
+          match unicode::characters_to_binary(v)
+            case bin if is_binary(bin)
+              bin
+            case _
+              v
+          end
+        end
+    end
+  end
+
+  def self.serialize_value(v) if is_map(v)
+    serialize_task(v)
+  end
+
+  def self.serialize_value(v)
+    v
+  end
+
+  # completed: [{task_id, status, output}, ...] → JSON array
+  def self.serialize_completed(completed)
+    lists::map(do |entry|
+      {task_id, status, output} = entry
+      {
+        <<"task_id">> => unicode::characters_to_binary(ensure_list(task_id)),
+        <<"status">> => atom_to_binary(status),
+        <<"output">> => unicode::characters_to_binary(ensure_list(truncate(output, 4000)))
+      }
+    end, completed)
+  end
+
+  # review_pending: {task_id => {pr_number, round}} → JSON object
+  def self.serialize_review_pending(pending)
+    maps::fold(do |id, {pr_num, round}, acc|
+      key = unicode::characters_to_binary(ensure_list(id))
+      maps::put(key, {<<"pr_number">> => pr_num, <<"round">> => round}, acc)
+    end, {}, pending)
+  end
+
+  # --- Deserialization ---
+
+  # Convert decoded JSON (binary keys) back to internal format
+  def self.deserialize_state(decoded)
+    {
+      claimed: deserialize_claimed(maps::get(<<"claimed">>, decoded, [])),
+      retry_attempts: deserialize_retry_attempts(maps::get(<<"retry_attempts">>, decoded, {})),
+      done: deserialize_done(maps::get(<<"done">>, decoded, {})),
+      completed: deserialize_completed(maps::get(<<"completed">>, decoded, [])),
+      review_pending: deserialize_review_pending(maps::get(<<"review_pending">>, decoded, {}))
+    }
+  end
+
+  # claimed: ["task-1", "task-2"] → charlists
+  def self.deserialize_claimed(claimed)
+    lists::map(do |id|
+      binary_to_list(id)
+    end, claimed)
+  end
+
+  # retry_attempts: {"task-1" => {count: N, task: ...}} → {charlist => {N, task_map}}
+  def self.deserialize_retry_attempts(attempts)
+    maps::fold(do |id_bin, entry, acc|
+      id = binary_to_list(id_bin)
+      count = maps::get(<<"count">>, entry, 0)
+      task_json = maps::get(<<"task">>, entry, nil)
+      task = deserialize_task(task_json)
+      maps::put(id, {count, task}, acc)
+    end, {}, attempts)
+  end
+
+  # Convert a JSON task map (binary keys/values) back to atom keys/charlists
+  def self.deserialize_task(task)
+    if task == nil
+      nil
+    else
+      maps::fold(do |k_bin, v, acc|
+        key = binary_to_atom(k_bin)
+        val = if is_binary(v)
+          binary_to_list(v)
+        else
+          v
+        end
+        maps::put(key, val, acc)
+      end, {}, task)
+    end
+  end
+
+  # done: {"task-1" => true} → {charlist => true}
+  def self.deserialize_done(done)
+    maps::fold(do |id_bin, val, acc|
+      maps::put(binary_to_list(id_bin), val, acc)
+    end, {}, done)
+  end
+
+  # completed: [{task_id: "...", status: "ok", output: "..."}, ...] → [{charlist, atom, charlist}]
+  def self.deserialize_completed(completed)
+    lists::map(do |entry|
+      task_id = binary_to_list(maps::get(<<"task_id">>, entry, <<"">>))
+      status = binary_to_atom(maps::get(<<"status">>, entry, <<"error">>))
+      output = binary_to_list(maps::get(<<"output">>, entry, <<"">>))
+      {task_id, status, output}
+    end, completed)
+  end
+
+  # review_pending: {"task-1" => {pr_number: N, round: M}} → {charlist => {N, M}}
+  def self.deserialize_review_pending(pending)
+    maps::fold(do |id_bin, entry, acc|
+      id = binary_to_list(id_bin)
+      pr_num = maps::get(<<"pr_number">>, entry, 0)
+      round = maps::get(<<"round">>, entry, 0)
+      maps::put(id, {pr_num, round}, acc)
+    end, {}, pending)
+  end
+
+  # --- Helpers ---
+
+  def self.truncate(str, max)
+    s = ensure_list(str)
+    if erlang::length(s) > max
+      lists::sublist(s, max)
+    else
+      s
+    end
+  end
+
+  def self.ensure_list(v) if is_list(v)
+    v
+  end
+
+  def self.ensure_list(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.ensure_list(v) if is_atom(v)
+    atom_to_list(v)
+  end
+
+  def self.ensure_list(v)
+    lists::flatten(io_lib::format("~p", [v]))
+  end
+
+  def self.supports_per_task?()
+    false
+  end
+end

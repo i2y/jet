@@ -1,0 +1,30 @@
+# Test: Log module
+#
+# Run: ./jet -r TestLog::run examples/orchestra/TestLog.jet
+
+module TestLog
+  def self.run()
+    puts("=== TestLog ===")
+
+    # Test that all log levels run without error
+    puts("  Testing Log::info/2...")
+    Log::info("test message", {key: "value", num: 42})
+
+    puts("  Testing Log::info/1...")
+    Log::info("simple message")
+
+    puts("  Testing Log::warn/2...")
+    Log::warn("warning message", {reason: :timeout})
+
+    puts("  Testing Log::warn/1...")
+    Log::warn("simple warning")
+
+    puts("  Testing Log::error/2...")
+    Log::error("error message", {task_id: "123", error: "oops"})
+
+    puts("  Testing Log::error/1...")
+    Log::error("simple error")
+
+    puts("\n  All log tests passed (no crashes)")
+  end
+end

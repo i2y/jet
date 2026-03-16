@@ -1,0 +1,172 @@
+# Orchestra GitHubTaskSource — GitHub Issues as task source
+#
+# Implements the TaskSource protocol for GitHub Issues.
+# Requires `gh` CLI to be installed and authenticated.
+#
+# Config (passed via fetch_tasks config map):
+#   github_repo: "owner/repo"
+#   github_labels: "orchestra"
+#
+# Usage:
+#   tasks = GitHubTaskSource::fetch_tasks({github_repo: "owner/repo"})
+#   GitHubTaskSource::update_task("123", :ok, {output: "done"})
+
+module GitHubTaskSource
+  # Check if gh CLI is authenticated. Call once at startup.
+  def self.check_auth()
+    output = os::cmd("gh auth status 2>&1")
+    if lists::prefix("You are not logged in", output)
+      {:error, "gh CLI not authenticated. Run: gh auth login"}
+    else
+      :ok
+    end
+  end
+
+  def self.fetch_tasks(config)
+    repo = resolve_repo(config)
+    labels = maps::get(:github_labels, config, "orchestra")
+    if repo == nil
+      {:error, "github_repo not configured"}
+    else
+      erlang::put(:orchestra_github_repo, repo)
+      cmd = lists::flatten(
+        "gh issue list --repo " ++ ensure_list(repo) ++
+        " --label " ++ ensure_list(labels) ++
+        " --state open --json number,title,body,labels,state,createdAt,url --limit 50 2>/dev/null"
+      )
+      output = os::cmd(cmd)
+      parse_issues(output, repo)
+    end
+  end
+
+  def self.update_task(task_id, status, result)
+    repo = erlang::get(:orchestra_github_repo)
+    if repo != :undefined and repo != nil
+      output = maps::get(:output, result, "")
+      body = format_comment(status, output)
+      cmd = lists::flatten(
+        "gh issue comment " ++ ensure_list(task_id) ++
+        " --repo " ++ ensure_list(repo) ++
+        " --body " ++ shell_escape(body) ++ " 2>/dev/null"
+      )
+      os::cmd(cmd)
+    end
+    :ok
+  end
+
+  def self.fetch_task_state(task_id, config)
+    repo = maps::get(:github_repo, config, erlang::get(:orchestra_github_repo))
+    if repo == nil or repo == :undefined
+      :active
+    else
+      cmd = lists::flatten(
+        "gh issue view " ++ ensure_list(task_id) ++
+        " --repo " ++ ensure_list(repo) ++
+        " --json state --jq .state 2>/dev/null"
+      )
+      output = string::trim(os::cmd(cmd))
+      if output == "CLOSED" or output == "closed"
+        :terminal
+      else
+        :active
+      end
+    end
+  end
+
+  def self.parse_issues(output, repo)
+    match jet_json_ffi::decode(unicode::characters_to_binary(output))
+      case {:ok, issues} if is_list(issues)
+        lists::map(do |issue|
+          number = maps::get(<<"number">>, issue, 0)
+          number_str = integer_to_list(number)
+          raw_labels = maps::get(<<"labels">>, issue, [])
+          label_names = lists::map(do |l|
+            if is_map(l)
+              safe_to_list(maps::get(<<"name">>, l, <<"">>))
+            else
+              safe_to_list(l)
+            end
+          end, raw_labels)
+          {id: number_str,
+           identifier: short_repo(repo) ++ "-" ++ number_str,
+           number: number,
+           title: safe_to_list(maps::get(<<"title">>, issue, <<"">>)),
+           description: safe_to_list(maps::get(<<"body">>, issue, <<"">>)),
+           url: safe_to_list(maps::get(<<"url">>, issue, <<"">>)),
+           labels: label_names,
+           state: "open",
+           created_at: safe_to_list(maps::get(<<"createdAt">>, issue, <<"">>))}
+        end, issues)
+      case _
+        []
+    end
+  end
+
+  def self.format_comment(status, output)
+    prefix = match status
+      case :ok
+        "## Orchestra completed successfully\n\n"
+      case :error
+        "## Orchestra encountered an error\n\n"
+    end
+    prefix ++ truncate(output, 4000)
+  end
+
+  def self.truncate(str, max)
+    s = ensure_list(str)
+    if erlang::length(s) > max
+      lists::sublist(s, max) ++ "\n... (truncated)"
+    else
+      s
+    end
+  end
+
+  def self.short_repo(repo)
+    parts = string::split(ensure_list(repo), "/", :all)
+    lists::last(parts)
+  end
+
+  def self.shell_escape(str)
+    escaped = re::replace(ensure_list(str), "'", "'\\''", [:global, {:return, :list}])
+    "'" ++ escaped ++ "'"
+  end
+
+  # Safe binary-to-list that handles UTF-8 multi-byte characters
+  def self.safe_to_list(v) if is_binary(v)
+    unicode::characters_to_list(v)
+  end
+
+  def self.safe_to_list(v) if is_list(v)
+    v
+  end
+
+  def self.safe_to_list(v)
+    ensure_list(v)
+  end
+
+  def self.resolve_repo(config)
+    from_config = maps::get(:github_repo, config, nil)
+    if from_config != nil
+      ensure_list(from_config)
+    else
+      from_env = os::getenv("ORCHESTRA_GITHUB_REPO")
+      if from_env != false and from_env != nil
+        from_env
+      else
+        nil
+      end
+    end
+  end
+
+  def self.ensure_list(v) if is_list(v)
+    v
+  end
+
+  def self.ensure_list(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.ensure_list(v) if is_atom(v)
+    atom_to_list(v)
+  end
+end

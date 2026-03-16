@@ -1,0 +1,10 @@
+# Effect interface - declares dependency on "Console" effect.
+# Calls resolve_need at runtime to find the real implementation.
+module Console
+  needs Console
+
+  def self.puts(msg)
+    impl = jet_platform_ffi::resolve_need(:Console)
+    erlang::apply(impl, :puts, [msg])
+  end
+end

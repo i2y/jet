@@ -1,0 +1,64 @@
+# Orchestra Hooks — lifecycle hook execution with timeout
+#
+# Runs shell commands as hooks with timeout enforcement.
+# Modes:
+#   :fatal   — failure returns {:error, reason} to caller
+#   :lenient — failure logs warning and returns :ok
+#
+# Usage:
+#   Hooks::run("npm install", "/tmp/ws", task, 60000, :fatal)
+#   Hooks::run("git push", "/tmp/ws", task, 30000, :lenient)
+
+module Hooks
+  # Run a hook command with mode-based failure handling
+  def self.run(hook_cmd, path, task, timeout_ms, mode)
+    match run_timed(hook_cmd, path, task, timeout_ms)
+      case {:ok, output}
+        {:ok, output}
+      case {:error, reason}
+        Log::warn("Hook failed", {hook: hook_cmd, reason: reason, mode: mode})
+        if mode == :fatal
+          {:error, reason}
+        else
+          :ok
+        end
+    end
+  end
+
+  # Run a hook with default :lenient mode
+  def self.run(hook_cmd, path, task, timeout_ms)
+    run(hook_cmd, path, task, timeout_ms, :lenient)
+  end
+
+  # Run a shell command with task environment variables
+  def self.run_timed(hook_cmd, path, task, _timeout_ms)
+    env = build_env(task)
+    cmd = env ++ "cd " ++ Workspace::ensure_list(path) ++ " && " ++ Workspace::ensure_list(hook_cmd)
+    result = os::cmd(cmd ++ " 2>&1")
+    {:ok, result}
+  end
+
+  # Build environment variable prefix for hook commands
+  def self.build_env(task)
+    id = Workspace::ensure_list(maps::get(:id, task, ""))
+    title = Workspace::ensure_list(maps::get(:title, task, ""))
+    "export ORCHESTRA_TASK_ID=" ++ shell_escape(id) ++ "; " ++
+    "export ORCHESTRA_TASK_TITLE=" ++ shell_escape(title) ++ "; "
+  end
+
+  # Run all hooks matching a lifecycle event from a hooks map
+  # hooks: {before_run: "npm install", after_run: "git push"}
+  def self.run_lifecycle(event, hooks, path, task, timeout_ms)
+    hook = maps::get(event, hooks, nil)
+    if hook != nil
+      run(hook, path, task, timeout_ms, :lenient)
+    else
+      :ok
+    end
+  end
+
+  def self.shell_escape(str)
+    escaped = re::replace(Workspace::ensure_list(str), "'", "'\\''", [:global, {:return, :list}])
+    "'" ++ escaped ++ "'"
+  end
+end

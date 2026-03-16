@@ -1,0 +1,239 @@
+# LLM Provider Adapters
+# Abstracts differences between Claude (Anthropic) and OpenAI APIs
+
+module LlmAdapter
+  # --- Provider URLs ---
+
+  def self.api_url(:claude)
+    "https://api.anthropic.com/v1/messages"
+  end
+
+  def self.api_url(:openai)
+    "https://api.openai.com/v1/chat/completions"
+  end
+
+  # --- Default Models ---
+
+  def self.default_model(:claude)
+    "claude-sonnet-4-20250514"
+  end
+
+  def self.default_model(:openai)
+    "gpt-4o"
+  end
+
+  # --- Headers ---
+
+  def self.build_headers(:claude, opts)
+    api_key = maps::get(:api_key, opts)
+    [{erlang::list_to_binary("x-api-key"), erlang::list_to_binary(api_key)},
+     {erlang::list_to_binary("anthropic-version"), erlang::list_to_binary("2023-06-01")},
+     {erlang::list_to_binary("content-type"), erlang::list_to_binary("application/json")}]
+  end
+
+  def self.build_headers(:openai, opts)
+    api_key = maps::get(:api_key, opts)
+    auth = erlang::list_to_binary("Bearer " ++ api_key)
+    [{erlang::list_to_binary("authorization"), auth},
+     {erlang::list_to_binary("content-type"), erlang::list_to_binary("application/json")}]
+  end
+
+  # --- Request Body ---
+
+  def self.build_body(:claude, model, max_tokens, messages, opts)
+    body = {<<"model">> => erlang::list_to_binary(model),
+            <<"max_tokens">> => max_tokens,
+            <<"messages">> => format_messages(messages)}
+    body = match maps::find(:system, opts)
+      case {:ok, system}
+        maps::put(<<"system">>, erlang::list_to_binary(system), body)
+      case :error
+        body
+    end
+    body = match maps::find(:tools, opts)
+      case {:ok, tools}
+        maps::put(<<"tools">>, format_tools(:claude, tools), body)
+      case :error
+        body
+    end
+    body = match maps::find(:stream, opts)
+      case {:ok, true}
+        maps::put(<<"stream">>, true, body)
+      case _
+        body
+    end
+    body
+  end
+
+  def self.build_body(:openai, model, max_tokens, messages, opts)
+    formatted = format_messages(messages)
+    msgs = match maps::find(:system, opts)
+      case {:ok, system}
+        system_msg = {<<"role">> => <<"system">>,
+                      <<"content">> => erlang::list_to_binary(system)}
+        [system_msg, *formatted]
+      case :error
+        formatted
+    end
+    body = {<<"model">> => erlang::list_to_binary(model),
+            <<"max_tokens">> => max_tokens,
+            <<"messages">> => msgs}
+    body = match maps::find(:tools, opts)
+      case {:ok, tools}
+        maps::put(<<"tools">>, format_tools(:openai, tools), body)
+      case :error
+        body
+    end
+    body = match maps::find(:stream, opts)
+      case {:ok, true}
+        maps::put(<<"stream">>, true, body)
+      case _
+        body
+    end
+    body
+  end
+
+  # --- Message Formatting ---
+
+  def self.format_messages(messages)
+    lists::map(do |msg|
+      {role, content} = msg
+      role_bin = match role
+        case :user
+          <<"user">>
+        case :assistant
+          <<"assistant">>
+        case :system
+          <<"system">>
+        case :tool
+          <<"tool">>
+      end
+      {<<"role">> => role_bin, <<"content">> => ensure_binary(content)}
+    end, messages)
+  end
+
+  # --- Tool Formatting ---
+
+  def self.format_tools(:claude, tools)
+    lists::map(do |tool|
+      {<<"name">> => erlang::list_to_binary(maps::get(:name, tool)),
+       <<"description">> => erlang::list_to_binary(maps::get(:description, tool)),
+       <<"input_schema">> => maps::get(:parameters, tool)}
+    end, tools)
+  end
+
+  def self.format_tools(:openai, tools)
+    lists::map(do |tool|
+      {<<"type">> => <<"function">>,
+       <<"function">> => {
+         <<"name">> => erlang::list_to_binary(maps::get(:name, tool)),
+         <<"description">> => erlang::list_to_binary(maps::get(:description, tool)),
+         <<"parameters">> => maps::get(:parameters, tool)
+       }}
+    end, tools)
+  end
+
+  # --- Response Extraction ---
+
+  def self.extract_response(:claude, parsed)
+    content = maps::get(<<"content">>, parsed)
+    extract_claude_content(content, [], [])
+  end
+
+  def self.extract_response(:openai, parsed)
+    choices = maps::get(<<"choices">>, parsed)
+    first = lists::nth(1, choices)
+    message = maps::get(<<"message">>, first)
+    text = binary_to_list(maps::get(<<"content">>, message, <<"">>))
+    tool_calls = extract_openai_tool_calls(maps::get(<<"tool_calls">>, message, []))
+    {text: text, tool_calls: tool_calls}
+  end
+
+  def self.extract_claude_content([], text_acc, tool_acc)
+    text = lists::flatten(lists::reverse(text_acc))
+    {text: text, tool_calls: lists::reverse(tool_acc)}
+  end
+
+  def self.extract_claude_content([block, *rest], text_acc, tool_acc)
+    block_type = maps::get(<<"type">>, block)
+    if block_type == <<"text">>
+      t = binary_to_list(maps::get(<<"text">>, block))
+      extract_claude_content(rest, [t, *text_acc], tool_acc)
+    elsif block_type == <<"tool_use">>
+      tc = {name: binary_to_list(maps::get(<<"name">>, block)),
+            id: binary_to_list(maps::get(<<"id">>, block)),
+            arguments: maps::get(<<"input">>, block)}
+      extract_claude_content(rest, text_acc, [tc, *tool_acc])
+    else
+      extract_claude_content(rest, text_acc, tool_acc)
+    end
+  end
+
+  def self.extract_openai_tool_calls([])
+    []
+  end
+
+  def self.extract_openai_tool_calls(tool_calls)
+    lists::map(do |tc|
+      func = maps::get(<<"function">>, tc)
+      args_str = maps::get(<<"arguments">>, func)
+      {:ok, args} = jet_json_ffi::decode(args_str)
+      {name: binary_to_list(maps::get(<<"name">>, func)),
+       id: binary_to_list(maps::get(<<"id">>, tc)),
+       arguments: args}
+    end, tool_calls)
+  end
+
+  # --- Stream Event Extraction ---
+
+  def self.extract_stream_event(:claude, parsed)
+    event_type = maps::get(<<"type">>, parsed, <<"unknown">>)
+    match event_type
+      case <<"content_block_delta">>
+        delta = maps::get(<<"delta">>, parsed)
+        delta_type = maps::get(<<"type">>, delta)
+        if delta_type == <<"text_delta">>
+          {type: :content_delta, text: binary_to_list(maps::get(<<"text">>, delta))}
+        else
+          {type: :other, data: delta}
+        end
+      case <<"message_stop">>
+        {type: :done}
+      case <<"message_delta">>
+        {type: :message_delta, data: parsed}
+      case _
+        {type: :other, data: parsed}
+    end
+  end
+
+  def self.extract_stream_event(:openai, parsed)
+    choices = maps::get(<<"choices">>, parsed, [])
+    if choices == []
+      {type: :other, data: parsed}
+    else
+      first = lists::nth(1, choices)
+      delta = maps::get(<<"delta">>, first, {})
+      finish = maps::get(<<"finish_reason">>, first, nil)
+      if finish != nil
+        {type: :done}
+      else
+        content = maps::get(<<"content">>, delta, nil)
+        if content != nil
+          {type: :content_delta, text: binary_to_list(content)}
+        else
+          {type: :other, data: delta}
+        end
+      end
+    end
+  end
+
+  # --- Helpers ---
+
+  def self.ensure_binary(v) if is_binary(v)
+    v
+  end
+
+  def self.ensure_binary(v) if is_list(v)
+    erlang::list_to_binary(v)
+  end
+end

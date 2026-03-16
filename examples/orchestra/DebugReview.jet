@@ -1,0 +1,40 @@
+# Debug: test GitHubPRReviewSource step by step
+
+module DebugReview
+  def self.run()
+    repo = "i2y/orchestra-test"
+    erlang::put(:orchestra_github_repo, repo)
+
+    puts("=== Step 1: fetch_pr_info ===")
+    pr_info = GitHubPRReviewSource::fetch_pr_info(repo, "1")
+    puts("Result: ~p\n", [pr_info])
+
+    puts("=== Step 2: fetch_pr_by_number ===")
+    pr_info2 = GitHubPRReviewSource::fetch_pr_by_number(repo, 2)
+    puts("Result: ~p\n", [pr_info2])
+
+    puts("=== Step 3: fetch_review_comments ===")
+    comments = GitHubPRReviewSource::fetch_review_comments(repo, 2)
+    puts("Comments count: ~p", [erlang::length(comments)])
+    print_comments(comments)
+
+    puts("\n=== Step 4: fetch_tasks with review_pending ===")
+    config = {
+      review_pending: maps::put("1", {2, 0}, {}),
+      max_review_rounds: 5
+    }
+    tasks = GitHubPRReviewSource::fetch_tasks(config)
+    puts("Tasks: ~p\n", [tasks])
+
+    puts("=== Done ===")
+  end
+
+  def self.print_comments([])
+    :ok
+  end
+
+  def self.print_comments([c, *rest])
+    puts("  id=~p author=~p body=~p", [maps::get(:id, c), maps::get(:author, c), maps::get(:body, c)])
+    print_comments(rest)
+  end
+end

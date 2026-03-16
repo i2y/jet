@@ -1,0 +1,19 @@
+# Mock tracker with a single issue for retry testing
+
+module MockSingleTracker
+  def self.fetch_issues(_config)
+    [
+      {id: "RETRY-1", identifier: "RETRY-1", title: "Retry test issue",
+       description: "This issue always fails to test retry backoff"}
+    ]
+  end
+
+  def self.update_issue(issue_id, status, _result)
+    puts("[MockSingleTracker] Issue ~s updated: ~p", [issue_id, status])
+    :ok
+  end
+
+  def self.fetch_issue_state(_issue_id, _config)
+    :active
+  end
+end

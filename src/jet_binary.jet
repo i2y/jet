@@ -1,7 +1,8 @@
 module jet_binary
   class Binary
     def initialize(binary)
-      {binary: binary}
+      @binary = binary
+      self
     end
 
     def to_list()

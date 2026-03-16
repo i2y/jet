@@ -1,0 +1,64 @@
+# Test: Config module
+#
+# Run: ./jet -r TestConfig::run examples/orchestra/TestConfig.jet
+
+module TestConfig
+  def self.run()
+    puts("=== TestConfig ===")
+    passed = 0
+    failed = 0
+
+    # Test default config
+    config = Config::Settings.new({})
+    {passed, failed} = assert_equal("default poll_interval_ms", config.poll_interval_ms(), 30000, passed, failed)
+    {passed, failed} = assert_equal("default max_turns", config.max_turns(), 10, passed, failed)
+    {passed, failed} = assert_equal("default max_concurrent", config.max_concurrent(), 5, passed, failed)
+    {passed, failed} = assert_equal("default max_retries", config.max_retries(), 3, passed, failed)
+    {passed, failed} = assert_equal("default stall_timeout_ms", config.stall_timeout_ms(), 300000, passed, failed)
+    {passed, failed} = assert_equal("default workspace_root", config.workspace_root(), "/tmp/orchestra", passed, failed)
+    {passed, failed} = assert_equal("default hook_timeout_ms", config.hook_timeout_ms(), 60000, passed, failed)
+
+    # Test custom config
+    custom = Config::Settings.new({
+      poll_interval_ms: 5000,
+      max_turns: 3,
+      max_concurrent: 10,
+      workspace_root: "/tmp/custom"
+    })
+    {passed, failed} = assert_equal("custom poll_interval_ms", custom.poll_interval_ms(), 5000, passed, failed)
+    {passed, failed} = assert_equal("custom max_turns", custom.max_turns(), 3, passed, failed)
+    {passed, failed} = assert_equal("custom max_concurrent", custom.max_concurrent(), 10, passed, failed)
+    {passed, failed} = assert_equal("custom workspace_root", custom.workspace_root(), "/tmp/custom", passed, failed)
+    # Non-overridden values use defaults
+    {passed, failed} = assert_equal("custom max_retries (default)", custom.max_retries(), 3, passed, failed)
+
+    # Test Config::new shortcut
+    via_new = Config::new({max_turns: 7})
+    {passed, failed} = assert_equal("Config::new max_turns", via_new.max_turns(), 7, passed, failed)
+
+    # Test Config::default
+    via_default = Config::default()
+    {passed, failed} = assert_equal("Config::default max_turns", via_default.max_turns(), 10, passed, failed)
+
+    # Test Config::merge
+    base = Config::new({max_turns: 5, max_concurrent: 2})
+    merged = Config::merge(base, {max_turns: 20})
+    {passed, failed} = assert_equal("merge overrides max_turns", merged.max_turns(), 20, passed, failed)
+    {passed, failed} = assert_equal("merge preserves max_concurrent", merged.max_concurrent(), 2, passed, failed)
+
+    puts("\n~p passed, ~p failed", [passed, failed])
+    if failed > 0
+      erlang::halt(1)
+    end
+  end
+
+  def self.assert_equal(label, actual, expected, passed, failed)
+    if actual == expected
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s (got ~p, expected ~p)", [label, actual, expected])
+      {passed, failed + 1}
+    end
+  end
+end

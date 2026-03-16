@@ -1,0 +1,76 @@
+# Orchestra GitHub + Claude + PR Review Loop Demo
+#
+# Full cycle: Issue → Agent fix → PR → Review → Agent addresses feedback → ...
+#
+# Prerequisites:
+#   - `gh` CLI installed and authenticated
+#   - `claude` CLI installed
+#   - Issues labeled "orchestra" in the target repo
+#
+# Environment:
+#   ORCHESTRA_GITHUB_REPO=owner/repo
+#
+# Run:
+#   ./jet -r GitHubReviewDemo::run examples/orchestra/GitHubReviewDemo.jet
+
+module GitHubReviewDemo
+  def self.run()
+    puts("=== Orchestra GitHub + PR Review Loop Demo ===\n")
+
+    repo = os::getenv("ORCHESTRA_GITHUB_REPO")
+    if repo == false
+      puts("Error: ORCHESTRA_GITHUB_REPO environment variable not set")
+      puts("Usage: ORCHESTRA_GITHUB_REPO=owner/repo ./jet -r GitHubReviewDemo::run examples/orchestra/GitHubReviewDemo.jet")
+      :error
+    else
+      config = Config::new({
+        mode: :hybrid,
+        poll_interval_ms: 30000,
+        max_concurrent: 3,
+        max_turns: 5,
+        max_retries: 2,
+        max_review_rounds: 5,
+        review_poll_interval_ms: 60000,
+        workspace_root: "/tmp/orchestra_review_demo"
+      })
+
+      hooks = {
+        # Initial setup: clone repo, create branch
+        after_create: "git clone https://github.com/" ++ repo ++ " . && git checkout -b orchestra-$ORCHESTRA_TASK_ID",
+        # Before agent run: ensure latest code
+        before_run: "git pull origin main --no-edit 2>/dev/null; true",
+        # After agent run: commit and push, create PR
+        after_run: "git add -A && git commit -m 'orchestra: fix #'$ORCHESTRA_TASK_ID && git push -u origin HEAD && gh pr create --fill --label orchestra 2>/dev/null; true",
+        # Before review feedback: pull latest
+        before_review_run: "git fetch origin && git pull --no-edit 2>/dev/null; true",
+        # After review feedback: commit and push (PR already exists)
+        after_review_run: "git add -A && git commit -m 'orchestra: address review feedback' && git push"
+      }
+
+      puts("Config:")
+      puts("  Repo:              ~s", [repo])
+      puts("  Max concurrent:    ~p", [config.max_concurrent()])
+      puts("  Max turns:         ~p", [config.max_turns()])
+      puts("  Max review rounds: ~p", [config.max_review_rounds()])
+      puts("  Poll interval:     ~pms", [config.poll_interval_ms()])
+
+      orch = Scheduler::Instance.spawn(config, :GitHubTaskSource, :ClaudeCodeRunner, {
+        store: :FileStore,
+        review_source: :GitHubPRReviewSource,
+        hooks: hooks
+      })
+
+      puts("\nScheduler is running with PR review loop. Press Ctrl+C to stop.\n")
+
+      wait_loop(orch)
+    end
+  end
+
+  def self.wait_loop(orch)
+    timer::sleep(15000)
+    status = orch.status()
+    puts("[Status] running=~p claimed=~p completed=~p",
+         [maps::get(:running, status), maps::get(:claimed, status), maps::get(:completed, status)])
+    wait_loop(orch)
+  end
+end

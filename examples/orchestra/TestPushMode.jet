@@ -1,0 +1,128 @@
+# Test: Push mode — tasks submitted directly, no polling
+#
+# Run: ./jet -r TestPushMode::run examples/orchestra/TestPushMode.jet
+
+module TestPushMode
+  def self.run()
+    puts("=== TestPushMode ===")
+    passed = 0
+    failed = 0
+
+    # --- Push mode: no TaskSource, tasks submitted via submit() ---
+    config = Config::Settings.new({
+      mode: :push,
+      max_concurrent: 2,
+      max_turns: 1,
+      max_retries: 0,
+      workspace_root: "/tmp/orchestra_test_push"
+    })
+
+    orch = Scheduler::Instance.spawn(config, nil, nil, {})
+    {passed, failed} = assert_true("push scheduler spawned", erlang::is_process_alive(orch), passed, failed)
+
+    # Check mode is reported in status
+    status0 = orch.status()
+    {passed, failed} = assert_equal("mode is :push", maps::get(:mode, status0), :push, passed, failed)
+
+    # Submit single task
+    result1 = orch.submit({id: "p-1", title: "Push task 1", description: "First push task"})
+    {passed, failed} = assert_equal("submit returns {:ok, id}", result1, {:ok, "p-1"}, passed, failed)
+
+    # Submit duplicate
+    result_dup = orch.submit({id: "p-1", title: "Duplicate", description: "..."})
+    {passed, failed} = assert_equal("duplicate rejected", result_dup, {:already_known, "p-1"}, passed, failed)
+
+    # Submit without id
+    result_noid = orch.submit({title: "No ID"})
+    {passed, failed} = assert_equal("missing id rejected", result_noid, {:error, :missing_id}, passed, failed)
+
+    # Submit batch
+    results = orch.submit_tasks([
+      {id: "p-2", title: "Push task 2", description: "Second"},
+      {id: "p-3", title: "Push task 3", description: "Third"}
+    ])
+    {passed, failed} = assert_equal("batch submit count", erlang::length(results), 2, passed, failed)
+
+    # Wait for workers to complete
+    timer::sleep(1500)
+
+    completed = orch.completed()
+    {passed, failed} = assert_true("push completed > 0", erlang::length(completed) > 0, passed, failed)
+
+    # Verify completed entries
+    completed_ids = extract_ids(completed, [])
+    {passed, failed} = assert_true("p-1 completed", lists::member("p-1", completed_ids), passed, failed)
+
+    # --- Hybrid mode: polling + push ---
+    config2 = Config::Settings.new({
+      mode: :hybrid,
+      poll_interval_ms: 200,
+      max_concurrent: 2,
+      max_turns: 1,
+      max_retries: 0,
+      workspace_root: "/tmp/orchestra_test_hybrid"
+    })
+
+    orch2 = Scheduler::Instance.spawn(config2, :MockTaskSource, nil, {})
+
+    # Submit an extra task via push while polling is active
+    orch2.submit({id: "h-extra", title: "Hybrid push task", description: "Submitted directly"})
+
+    timer::sleep(1500)
+    orch2.pause()
+    timer::sleep(200)
+
+    status2 = orch2.status()
+    {passed, failed} = assert_equal("hybrid mode", maps::get(:mode, status2), :hybrid, passed, failed)
+    {passed, failed} = assert_true("hybrid completed > 0", maps::get(:completed, status2) > 0, passed, failed)
+
+    # Check that the pushed task was processed
+    completed2 = orch2.completed()
+    completed_ids2 = extract_ids(completed2, [])
+    {passed, failed} = assert_true("hybrid push task completed", lists::member("h-extra", completed_ids2), passed, failed)
+
+    # Cleanup
+    if erlang::is_process_alive(orch)
+      gen_server::stop(orch)
+    end
+    if erlang::is_process_alive(orch2)
+      gen_server::stop(orch2)
+    end
+    timer::sleep(100)
+    Workspace::delete_dir_recursive("/tmp/orchestra_test_push")
+    Workspace::delete_dir_recursive("/tmp/orchestra_test_hybrid")
+
+    puts("\n~p passed, ~p failed", [passed, failed])
+    if failed > 0
+      erlang::halt(1)
+    end
+  end
+
+  def self.extract_ids([], acc)
+    acc
+  end
+
+  def self.extract_ids([{id, _status, _output}, *rest], acc)
+    extract_ids(rest, [id, *acc])
+  end
+
+  def self.assert_equal(label, actual, expected, passed, failed)
+    if actual == expected
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s (got ~p, expected ~p)", [label, actual, expected])
+      {passed, failed + 1}
+    end
+  end
+
+  def self.assert_true(label, condition, passed, failed)
+    if condition
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s", [label])
+      {passed, failed + 1}
+    end
+  end
+end

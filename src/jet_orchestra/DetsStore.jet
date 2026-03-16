@@ -1,0 +1,350 @@
+# Orchestra DetsStore — DETS-based persistence for task state
+#
+# Implements the Store protocol using Erlang DETS (Disk Erlang Term Storage).
+# Each workspace root gets its own DETS table at <root>/.orchestra/state.dets
+#
+# Advantages over FileStore:
+#   - No JSON serialization overhead (native Erlang terms)
+#   - Per-task updates: only the changed task is written, not the entire state
+#   - Concurrent-access safe within the same BEAM node
+#
+# Record layout:
+#   {:task, TaskId}          -> {status, count, task_map, output}
+#   {:review, ParentTaskId}  -> {pr_number, round}
+#   :meta                    -> {version, claimed_order}
+#
+# Usage:
+#   DetsStore::save_task(root, "task-1", {status: :claimed, count: 0, task: task_map})
+#   {:ok, data} = DetsStore::load_task(root, "task-1")
+#   DetsStore::delete_task(root, "task-1")
+#   ids = DetsStore::list_task_ids(root)
+
+module DetsStore
+  # --- Bulk API (Store protocol) ---
+
+  # Save full state map to DETS (converts to per-task records)
+  def self.save(root, state)
+    ensure_open(root)
+    name = table_name(root)
+
+    # Clear existing records
+    dets::delete_all_objects(name)
+
+    # Save each task from retry_attempts
+    retry_attempts = maps::get(:retry_attempts, state, {})
+    done = maps::get(:done, state, {})
+    completed = maps::get(:completed, state, [])
+
+    # Build completed lookup: task_id -> {status, output}
+    completed_lookup = build_completed_lookup(completed, {})
+
+    # Save tasks from retry_attempts
+    maps::fold(do |task_id, {count, task_map}, _acc|
+      status = lookup_status(task_id, done, completed_lookup)
+      task_output = lookup_output(task_id, completed_lookup)
+      dets::insert(name, {{:task, task_id}, {status, count, task_map, task_output}})
+    end, :ok, retry_attempts)
+
+    # Save tasks that are done but not in retry_attempts
+    maps::fold(do |task_id, _v, _acc|
+      if (not maps::is_key(task_id, retry_attempts))
+        done_status = lookup_status(task_id, done, completed_lookup)
+        done_output = lookup_output(task_id, completed_lookup)
+        dets::insert(name, {{:task, task_id}, {done_status, 0, nil, done_output}})
+      end
+    end, :ok, done)
+
+    # Save review_pending
+    review_pending = maps::get(:review_pending, state, {})
+    maps::fold(do |parent_id, {pr_number, round}, _acc|
+      dets::insert(name, {{:review, parent_id}, {pr_number, round}})
+    end, :ok, review_pending)
+
+    # Save meta (claimed order)
+    claimed = maps::get(:claimed, state, [])
+    dets::insert(name, {:meta, {1, claimed}})
+
+    dets::sync(name)
+    :ok
+  end
+
+  # Load full state map from DETS (reconstructs bulk format)
+  def self.load(root)
+    match ensure_open(root)
+      case {:error, reason}
+        {:error, reason}
+      case _
+        name = table_name(root)
+        # Check if table has any data
+        match dets::lookup(name, :meta)
+          case [{:meta, {_version, claimed}}]
+            state = reconstruct_state(name, claimed)
+            {:ok, state}
+          case []
+            {:error, :not_found}
+        end
+    end
+  end
+
+  # Delete all DETS data for this root
+  def self.delete(root)
+    name = table_name(root)
+    # Try to close if open
+    dets::close(name)
+    path = dets_path(root)
+    match file::delete(path)
+      case :ok
+        :ok
+      case {:error, :enoent}
+        :ok
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  # --- Per-task API ---
+
+  def self.save_task(root, task_id, task_data)
+    ensure_open(root)
+    name = table_name(root)
+    status = maps::get(:status, task_data, :claimed)
+    count = maps::get(:count, task_data, 0)
+    task_map = maps::get(:task, task_data, nil)
+    output = maps::get(:output, task_data, nil)
+    dets::insert(name, {{:task, task_id}, {status, count, task_map, output}})
+    dets::sync(name)
+    :ok
+  end
+
+  def self.load_task(root, task_id)
+    ensure_open(root)
+    name = table_name(root)
+    match dets::lookup(name, {:task, task_id})
+      case [{{:task, _id}, data}]
+        {status, count, task_map, output} = data
+        {:ok, {status: status, count: count, task: task_map, output: output}}
+      case []
+        {:error, :not_found}
+    end
+  end
+
+  def self.delete_task(root, task_id)
+    ensure_open(root)
+    name = table_name(root)
+    dets::delete(name, {:task, task_id})
+    dets::sync(name)
+    :ok
+  end
+
+  def self.list_task_ids(root)
+    ensure_open(root)
+    name = table_name(root)
+    collect_task_ids(dets::first(name), name, [])
+  end
+
+  # --- Meta API ---
+
+  def self.save_meta(root, meta_data)
+    ensure_open(root)
+    name = table_name(root)
+    claimed = maps::get(:claimed, meta_data, [])
+    version = maps::get(:version, meta_data, 1)
+    dets::insert(name, {:meta, {version, claimed}})
+    dets::sync(name)
+    :ok
+  end
+
+  def self.load_meta(root)
+    ensure_open(root)
+    name = table_name(root)
+    match dets::lookup(name, :meta)
+      case [{:meta, {version, claimed}}]
+        {:ok, {version: version, claimed: claimed}}
+      case []
+        {:error, :not_found}
+    end
+  end
+
+  # --- Review API ---
+
+  def self.save_review(root, parent_id, data)
+    ensure_open(root)
+    name = table_name(root)
+    pr_number = maps::get(:pr_number, data, 0)
+    round = maps::get(:round, data, 0)
+    dets::insert(name, {{:review, parent_id}, {pr_number, round}})
+    dets::sync(name)
+    :ok
+  end
+
+  def self.delete_review(root, parent_id)
+    ensure_open(root)
+    name = table_name(root)
+    dets::delete(name, {:review, parent_id})
+    dets::sync(name)
+    :ok
+  end
+
+  def self.supports_per_task?()
+    true
+  end
+
+  # --- Internal helpers ---
+
+  def self.ensure_open(root)
+    name = table_name(root)
+    match dets::info(name)
+      case :undefined
+        path = dets_path(root)
+        ensure_dir(root)
+        match dets::open_file(name, [{:file, path}, {:type, :set}])
+          case {:ok, _name}
+            :ok
+          case {:error, reason}
+            Log::error("DETS open failed", {path: path, reason: reason})
+            {:error, reason}
+        end
+      case _info
+        :ok
+    end
+  end
+
+  def self.table_name(root)
+    sanitized = sanitize_root(ensure_list(root))
+    list_to_atom("orchestra_store_" ++ sanitized)
+  end
+
+  def self.dets_path(root)
+    ensure_list(root) ++ "/.orchestra/state.dets"
+  end
+
+  def self.ensure_dir(root)
+    dir = ensure_list(root) ++ "/.orchestra"
+    filelib::ensure_dir(dir ++ "/dummy")
+  end
+
+  def self.sanitize_root(path)
+    lists::map(do |c|
+      if (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or (c >= 48 and c <= 57) or c == 95
+        c
+      else
+        95  # underscore
+      end
+    end, path)
+  end
+
+  def self.ensure_list(v) if is_list(v)
+    v
+  end
+
+  def self.ensure_list(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.ensure_list(v) if is_atom(v)
+    atom_to_list(v)
+  end
+
+  def self.ensure_list(v)
+    lists::flatten(io_lib::format("~p", [v]))
+  end
+
+  # Traverse DETS keys to collect task IDs
+  def self.collect_task_ids(key, name, acc)
+    end_marker = list_to_atom("$end_of_table")
+    if key == end_marker
+      lists::reverse(acc)
+    else
+      new_acc = if is_tuple(key) and erlang::element(1, key) == :task
+        [erlang::element(2, key), *acc]
+      else
+        acc
+      end
+      collect_task_ids(dets::next(name, key), name, new_acc)
+    end
+  end
+
+  # Reconstruct bulk state from DETS records
+  def self.reconstruct_state(name, claimed)
+    # Walk all records in one pass
+    {retry_attempts, done, completed, review_pending} = collect_all_records(dets::first(name), name, {}, {}, [], {})
+
+    {
+      claimed: claimed,
+      retry_attempts: retry_attempts,
+      done: done,
+      completed: lists::reverse(completed),
+      review_pending: review_pending
+    }
+  end
+
+  def self.collect_all_records(key, name, ra, done, completed, reviews)
+    end_marker = list_to_atom("$end_of_table")
+    if key == end_marker
+      {ra, done, completed, reviews}
+    elsif is_tuple(key) and erlang::element(1, key) == :task
+      task_id = erlang::element(2, key)
+      {new_ra, new_done, new_completed} = match dets::lookup(name, key)
+        case [{_k, {status, count, task_map, output}}]
+          ra2 = if task_map != nil
+            maps::put(task_id, {count, task_map}, ra)
+          else
+            ra
+          end
+          if status == :done_ok
+            {ra2, maps::put(task_id, true, done), [{task_id, :ok, output}, *completed]}
+          elsif status == :done_error
+            {ra2, maps::put(task_id, true, done), [{task_id, :error, output}, *completed]}
+          else
+            {ra2, done, completed}
+          end
+        case []
+          {ra, done, completed}
+      end
+      collect_all_records(dets::next(name, key), name, new_ra, new_done, new_completed, reviews)
+    elsif is_tuple(key) and erlang::element(1, key) == :review
+      parent_id = erlang::element(2, key)
+      new_reviews = match dets::lookup(name, key)
+        case [{_k, {pr_number, round}}]
+          maps::put(parent_id, {pr_number, round}, reviews)
+        case []
+          reviews
+      end
+      collect_all_records(dets::next(name, key), name, ra, done, completed, new_reviews)
+    else
+      # Skip :meta and any other keys
+      collect_all_records(dets::next(name, key), name, ra, done, completed, reviews)
+    end
+  end
+
+  # Helpers for bulk save
+  def self.lookup_status(task_id, done, completed_lookup)
+    if maps::is_key(task_id, done)
+      match maps::find(task_id, completed_lookup)
+        case {:ok, {:error, _}}
+          :done_error
+        case _
+          :done_ok
+      end
+    else
+      :claimed
+    end
+  end
+
+  def self.lookup_output(task_id, completed_lookup)
+    match maps::find(task_id, completed_lookup)
+      case {:ok, {_status, out}}
+        out
+      case :error
+        nil
+    end
+  end
+
+  def self.build_completed_lookup([], acc)
+    acc
+  end
+
+  def self.build_completed_lookup([{task_id, status, output}, *rest], acc)
+    build_completed_lookup(rest, maps::put(task_id, {status, output}, acc))
+  end
+end

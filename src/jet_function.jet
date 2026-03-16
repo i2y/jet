@@ -1,7 +1,8 @@
 module jet_function
   class Function
     def initialize(function)
-      {function: function}
+      @function = function
+      self
     end
 
     def to_task()

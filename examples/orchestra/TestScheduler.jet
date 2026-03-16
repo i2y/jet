@@ -1,0 +1,89 @@
+# Test: Scheduler + Worker integration test
+#
+# Run:
+#   ./jet examples/orchestra/MockTaskSource.jet
+#   ./jet -r TestScheduler::run examples/orchestra/TestScheduler.jet
+
+module TestScheduler
+  def self.run()
+    puts("=== TestScheduler ===")
+    passed = 0
+    failed = 0
+
+    # Test basic lifecycle: start → poll → dispatch → complete → stop
+    config = Config::Settings.new({
+      poll_interval_ms: 200,
+      max_turns: 1,
+      max_concurrent: 2,
+      max_retries: 0,
+      workspace_root: "/tmp/orchestra_test_sched"
+    })
+
+    orch = Scheduler::Instance.spawn(config, :MockTaskSource, nil, {})
+    {passed, failed} = assert_true("scheduler spawned", erlang::is_process_alive(orch), passed, failed)
+
+    # Wait for tasks to be picked up and completed
+    timer::sleep(1500)
+
+    alive = erlang::is_process_alive(orch)
+    {passed, failed} = assert_true("scheduler alive after work", alive, passed, failed)
+
+    if alive
+      # Stop scheduler first to prevent races during assertions
+      orch.pause()
+      timer::sleep(200)
+
+      status = orch.status()
+      {passed, failed} = assert_equal("stopped after pause()", maps::get(:stopped, status), true, passed, failed)
+
+      completed_count = maps::get(:completed, status)
+      {passed, failed} = assert_true("completed > 0", completed_count > 0, passed, failed)
+
+      claimed_count = maps::get(:claimed, status)
+      {passed, failed} = assert_true("claimed > 0", claimed_count > 0, passed, failed)
+
+      # Test completed list
+      completed = orch.completed()
+      {passed, failed} = assert_true("completed list non-empty", erlang::length(completed) > 0, passed, failed)
+
+      # Check first completed entry structure
+      {_task_id, task_status, _output} = lists::nth(1, completed)
+      {passed, failed} = assert_equal("completed task status", task_status, :ok, passed, failed)
+
+      # Clean shutdown
+      if erlang::is_process_alive(orch)
+        gen_server::stop(orch)
+      end
+    end
+
+    timer::sleep(100)
+
+    # Cleanup
+    Workspace::delete_dir_recursive("/tmp/orchestra_test_sched")
+
+    puts("\n~p passed, ~p failed", [passed, failed])
+    if failed > 0
+      erlang::halt(1)
+    end
+  end
+
+  def self.assert_equal(label, actual, expected, passed, failed)
+    if actual == expected
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s (got ~p, expected ~p)", [label, actual, expected])
+      {passed, failed + 1}
+    end
+  end
+
+  def self.assert_true(label, condition, passed, failed)
+    if condition
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s", [label])
+      {passed, failed + 1}
+    end
+  end
+end

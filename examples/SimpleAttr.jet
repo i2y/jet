@@ -1,0 +1,10 @@
+class SimpleAttr
+  def initialize()
+    @count = 0
+    self
+  end
+
+  def get_count()
+    @count
+  end
+end

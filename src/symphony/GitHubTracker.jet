@@ -1,0 +1,123 @@
+# Symphony GitHubTracker — GitHub Issues tracker via gh CLI
+#
+# Implements the Tracker interface for GitHub Issues.
+# Requires `gh` CLI to be installed and authenticated.
+#
+# Config (passed via llm_opts):
+#   github_repo: "owner/repo"
+#   github_labels: "symphony"
+
+module GitHubTracker
+  def self.fetch_issues(config)
+    repo = maps::get(:github_repo, config, nil)
+    labels = maps::get(:github_labels, config, "symphony")
+    if repo == nil
+      {:error, "github_repo not configured in llm_opts"}
+    else
+      # Store repo for use by update_issue (called from same process)
+      erlang::put(:symphony_github_repo, repo)
+      cmd = lists::flatten(
+        "gh issue list --repo " ++ ensure_list(repo) ++
+        " --label " ++ ensure_list(labels) ++
+        " --state open --json number,title,body,labels,state,createdAt,url --limit 50 2>/dev/null"
+      )
+      output = os::cmd(cmd)
+      parse_issues_output(output, repo)
+    end
+  end
+
+  def self.parse_issues_output(output, repo)
+    match jet_json_ffi::decode(list_to_binary(output))
+      case {:ok, issues} if is_list(issues)
+        lists::map(do |issue|
+          number = maps::get(<<"number">>, issue, 0)
+          number_str = integer_to_list(number)
+          {id: number_str,
+           identifier: short_repo(repo) ++ "-" ++ number_str,
+           number: number,
+           title: binary_to_list(maps::get(<<"title">>, issue, <<"">>)),
+           description: binary_to_list(maps::get(<<"body">>, issue, <<"">>)),
+           url: binary_to_list(maps::get(<<"url">>, issue, <<"">>)),
+           state: "open",
+           created_at: binary_to_list(maps::get(<<"createdAt">>, issue, <<"">>))}
+        end, issues)
+      case _
+        []
+    end
+  end
+
+  def self.update_issue(issue_id, status, result)
+    repo = erlang::get(:symphony_github_repo)
+    if repo != :undefined and repo != nil
+      output = maps::get(:output, result, "")
+      body = format_comment(status, output)
+      cmd = lists::flatten(
+        "gh issue comment " ++ ensure_list(issue_id) ++
+        " --repo " ++ ensure_list(repo) ++
+        " --body " ++ shell_escape(body) ++ " 2>/dev/null"
+      )
+      os::cmd(cmd)
+    end
+    :ok
+  end
+
+  def self.fetch_issue_state(issue_id, config)
+    repo = maps::get(:github_repo, config, nil)
+    if repo == nil
+      :active
+    else
+      cmd = lists::flatten(
+        "gh issue view " ++ ensure_list(issue_id) ++
+        " --repo " ++ ensure_list(repo) ++
+        " --json state --jq .state 2>/dev/null"
+      )
+      output = string::trim(os::cmd(cmd))
+      if output == "CLOSED" or output == "closed"
+        :terminal
+      else
+        :active
+      end
+    end
+  end
+
+  def self.format_comment(status, output)
+    prefix = match status
+      case :ok
+        "## Symphony completed successfully\n\n"
+      case :error
+        "## Symphony encountered an error\n\n"
+    end
+    prefix ++ truncate(output, 4000)
+  end
+
+  def self.truncate(str, max)
+    s = ensure_list(str)
+    if erlang::length(s) > max
+      lists::sublist(s, max) ++ "\n... (truncated)"
+    else
+      s
+    end
+  end
+
+  def self.short_repo(repo)
+    parts = string::split(ensure_list(repo), "/", :all)
+    lists::last(parts)
+  end
+
+  def self.shell_escape(str)
+    escaped = re::replace(ensure_list(str), "'", "'\\''", [:global, {:return, :list}])
+    "'" ++ escaped ++ "'"
+  end
+
+  def self.ensure_list(v) if is_list(v)
+    v
+  end
+
+  def self.ensure_list(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.ensure_list(v) if is_atom(v)
+    atom_to_list(v)
+  end
+end

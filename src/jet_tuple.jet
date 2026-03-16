@@ -3,12 +3,13 @@ module jet_tuple
     include Enumerable
 
     def initialize(tuple)
-      {tuple: tuple}
+      @tuple = tuple
+      self
     end
 
     def reduce(acc, func)
       list = tuple_to_list(@tuple)
-      lists::foldl(func, acc, list)
+      lists::foldl({|item, a| func.(a, item)}, acc, list)
     end
 
     def nth(n)

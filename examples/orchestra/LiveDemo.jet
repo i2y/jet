@@ -1,0 +1,91 @@
+# Live Demo — real GitHub + Claude Code integration test
+#
+# Run:
+#   ./jet -r LiveDemo::run examples/orchestra/LiveDemo.jet
+
+module LiveDemo
+  def self.run()
+    puts("=== Orchestra Live Demo ===\n")
+
+    repo = "i2y/orchestra-test"
+    erlang::put(:orchestra_github_repo, repo)
+
+    # Check gh auth
+    match GitHubTaskSource::check_auth()
+      case {:error, msg}
+        puts("Error: ~s", [msg])
+        erlang::halt(1)
+      case :ok
+        puts("GitHub auth: OK")
+    end
+
+    config = Config::new({
+      mode: :poll,
+      poll_interval_ms: 5000,
+      max_concurrent: 1,
+      max_turns: 3,
+      max_retries: 1,
+      workspace_root: "/tmp/orchestra_live_demo"
+    })
+
+    hooks = {
+      after_create: "git clone https://github.com/" ++ repo ++ " . && git checkout -b orchestra-$ORCHESTRA_TASK_ID",
+      before_run: "git pull origin main --no-edit 2>/dev/null; true",
+      after_run: "git add -A && git commit -m 'orchestra: fix #'$ORCHESTRA_TASK_ID && git push -u origin HEAD 2>&1 && gh pr create --title 'Fix: #'$ORCHESTRA_TASK_ID --body 'Automated fix by jet_orchestra' --label orchestra --repo " ++ repo ++ " 2>&1; true"
+    }
+
+    puts("Config:")
+    puts("  Repo:           ~s", [repo])
+    puts("  Max concurrent: ~p", [config.max_concurrent()])
+    puts("  Max turns:      ~p", [config.max_turns()])
+    puts("  Poll interval:  ~pms\n", [config.poll_interval_ms()])
+
+    orch = Scheduler::Instance.spawn(config, :GitHubTaskSource, :ClaudeSimpleRunner, {
+      store: :FileStore,
+      hooks: hooks
+    })
+
+    puts("Scheduler running. Waiting for task completion...\n")
+
+    # Wait for completion with timeout
+    wait_for_completion(orch, 0, 300)
+  end
+
+  def self.wait_for_completion(orch, elapsed, max_seconds)
+    if elapsed >= max_seconds
+      puts("\nTimeout after ~p seconds", [max_seconds])
+      gen_server::stop(orch)
+    else
+      timer::sleep(5000)
+      status = orch.status()
+      completed_count = maps::get(:completed, status)
+      running = maps::get(:running, status)
+      puts("[~ps] running=~p completed=~p", [elapsed + 5, running, completed_count])
+
+      if completed_count > 0 and running == 0
+        puts("\n=== Task completed! ===\n")
+        completed = orch.completed()
+        print_results(completed)
+        gen_server::stop(orch)
+      else
+        wait_for_completion(orch, elapsed + 5, max_seconds)
+      end
+    end
+  end
+
+  def self.print_results([])
+    :ok
+  end
+
+  def self.print_results([{id, status, output}, *rest])
+    puts("Task ~s: ~p", [id, status])
+    # Print first 500 chars of output
+    short = if erlang::length(output) > 500
+      lists::sublist(output, 500) ++ "..."
+    else
+      output
+    end
+    puts("Output: ~s\n", [short])
+    print_results(rest)
+  end
+end

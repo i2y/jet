@@ -1,0 +1,14 @@
+actor Counter
+
+  expose increment(), get_count(), add(amount)
+
+  peers logger: Logger, store: Store
+
+  def get_count()
+    @count
+  end
+
+  def add(amount)
+    @count + amount
+  end
+end

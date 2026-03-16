@@ -1,0 +1,58 @@
+# Retry demo — verifies exponential backoff on failures
+#
+# MockFailingRunner always returns :error, so the orchestrator
+# retries with exponential backoff up to max_retries.
+#
+# Run:
+#   ./jet examples/symphony/MockSingleTracker.jet
+#   ./jet examples/symphony/MockFailingRunner.jet
+#   ./jet -r RetryDemo::run examples/symphony/RetryDemo.jet
+
+module RetryDemo
+  def self.run()
+    puts("=== Retry / Exponential Backoff Demo ===\n")
+
+    config = Config::new({
+      poll_interval_ms: 500,
+      max_turns: 2,
+      max_concurrent: 1,
+      max_retries: 3,
+      retry_delay_ms: 1000,
+      max_retry_backoff_ms: 30000,
+      workspace_root: "/tmp/symphony_retry_demo",
+      agent_runner: :MockFailingRunner,
+      tracker: :MockSingleTracker
+    })
+
+    puts("--- Starting Orchestrator (max_retries=3, runner=MockFailingRunner) ---")
+    puts("--- Expected backoff: 2s, 4s, 8s (capped at 30s) ---\n")
+    orch = Orchestrator::Instance.spawn(config)
+
+    # Wait for retries to exhaust (2+4+8 = 14s, plus margin)
+    timer::sleep(20000)
+
+    status = orch.status()
+    puts("\n--- Orchestrator Status ---")
+    puts("  Running:   ~p", [maps::get(:running, status)])
+    puts("  Claimed:   ~p", [maps::get(:claimed, status)])
+    puts("  Completed: ~p", [maps::get(:completed, status)])
+
+    completed = orch.completed()
+    puts("\n--- Completed Issues ---")
+    print_completed(completed)
+
+    puts("\n--- Stopping ---")
+    gen_server::stop(orch)
+    timer::sleep(100)
+    puts("\n=== Done ===")
+  end
+
+  def self.print_completed([])
+    :ok
+  end
+
+  def self.print_completed([{id, status, output}, *rest])
+    puts("  ~s: ~p — ~s", [id, status, output])
+    print_completed(rest)
+  end
+end

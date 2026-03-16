@@ -1,0 +1,63 @@
+# マルチエージェントLLMシステム — Jetの真骨頂
+# Usage: ./jet -r LlmAgents::LlmAgents.demo examples/llm_agents.jet
+#
+# 環境変数 ANTHROPIC_API_KEY を設定してから実行してください
+#
+# ResearcherとWriterの2つのActorが協調して動作：
+#   1. Writerがtopicを受け取る
+#   2. WriterがResearcherにリサーチを依頼（peers経由でgen_server::call）
+#   3. Researcherがリサーチ結果を返す
+#   4. Writerがリサーチ結果を元に記事を書く
+
+module LlmAgents
+  actor Researcher
+    expose research(topic)
+
+    def initialize(api_key)
+      @llm = Llm::Client.new(:claude, api_key)
+      @system = "You are a research assistant. When given a topic, provide 3-5 key facts about it. Be concise — use bullet points."
+      self
+    end
+
+    def research(topic)
+      @llm.chat(@system, "Research this topic: " ++ topic)
+    end
+  end
+
+  actor Writer
+    peers researcher: Researcher
+    expose write(topic)
+
+    def initialize(api_key)
+      @llm = Llm::Client.new(:claude, api_key)
+      @system = "You are a skilled writer. Given research notes, write a short, engaging paragraph (3-4 sentences). Do not use bullet points."
+      self
+    end
+
+    def write(topic)
+      io::format("[Writer] Asking Researcher to research: ~s~n", [topic])
+      facts = researcher().research(topic)
+      io::format("[Writer] Got research:~n~s~n~n", [facts])
+      io::format("[Writer] Writing article...~n", [])
+      @llm.chat(@system, "Write a short paragraph based on these research notes:~n" ++ facts)
+    end
+  end
+
+  def self.demo()
+    api_key = os::getenv("ANTHROPIC_API_KEY")
+
+    io::format("=== Multi-Agent LLM System ===~n~n", [])
+
+    # spawn_namedで名前付き登録 — peersが自動解決される
+    researcher = LlmAgents::Researcher.spawn_named(:researcher, api_key)
+    writer = LlmAgents::Writer.spawn_named(:writer, api_key)
+
+    # Writerに記事作成を依頼（内部でresearcher()がwhereis(:researcher)で自動解決）
+    article = writer.write("the Erlang programming language")
+    io::format("~n=== Final Article ===~n~s~n", [article])
+
+    # クリーンアップ
+    gen_server::stop(writer)
+    gen_server::stop(researcher)
+  end
+end

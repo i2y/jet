@@ -1,0 +1,6 @@
+# Mock implementation of Console effect (for testing)
+module MockConsole
+  def self.puts(_msg)
+    :mock_ok
+  end
+end

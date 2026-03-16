@@ -1,0 +1,7 @@
+# LlmProviderの本番実装 — Claude APIを使用
+module ClaudeLlmProvider
+  def self.chat(system_prompt, user_message)
+    api_key = os::getenv("ANTHROPIC_API_KEY")
+    Llm::chat(:claude, api_key, system_prompt, user_message)
+  end
+end

@@ -1,0 +1,459 @@
+# ============================================================
+# Jet Language Showcase
+# ============================================================
+# Jet is a Ruby-flavored language that runs on the BEAM (Erlang VM).
+# It combines clean OOP syntax with Erlang's legendary concurrency,
+# and adds effect management for testable, composable code.
+#
+#   $ ./jet -r showcase::run examples/showcase.jet
+# ============================================================
+
+module showcase
+
+  # ----------------------------------------------------------
+  # 1. Classes & Immutable State
+  # ----------------------------------------------------------
+  # @attr = expr sets instance state. Each mutation returns a
+  # new object — state stays predictable.
+
+  class Point
+    def initialize(x, y)
+      @x = x
+      @y = y
+      self
+    end
+
+    def move(dx, dy)
+      @x = @x + dx
+      @y = @y + dy
+      self
+    end
+
+    def distance_to(other)
+      dx = @x - other.x()
+      dy = @y - other.y()
+      math::sqrt(dx * dx + dy * dy)
+    end
+
+    def x()  @x  end
+    def y()  @y  end
+
+    def to_s()
+      io_lib::format("(~p, ~p)", [@x, @y])
+    end
+  end
+
+  # ----------------------------------------------------------
+  # 2. Variable Rebinding
+  # ----------------------------------------------------------
+  # x = x + 1 just works. The compiler generates fresh BEAM
+  # variables under the hood (x, x_v1, x_v2, ...).
+
+  def self.demo_rebinding()
+    total = 0
+    total = total + 10
+    total = total + 20
+    total = total * 2
+    io::format("total: ~p~n", [total])   # => 60
+  end
+
+  # ----------------------------------------------------------
+  # 3. Mixins — Composition over Inheritance
+  # ----------------------------------------------------------
+  # Define reusable behavior, then `include` it.
+  # Enumerable gives you map, select, min, etc. for free
+  # if you define reduce/2.
+
+  class Stack
+    include Enumerable
+
+    def initialize()
+      @items = []
+      self
+    end
+
+    def push(item)
+      @items = [item, *@items]
+      self
+    end
+
+    def pop()
+      [top, *rest] = @items
+      @items = rest
+      {top, self}
+    end
+
+    def peek()
+      @items.first()
+    end
+
+    def size()
+      @items.length()
+    end
+
+    def reduce(acc, func)
+      lists::foldl({|item, a| func.(a, item)}, acc, @items)
+    end
+
+    def to_list()
+      @items
+    end
+  end
+
+  # ----------------------------------------------------------
+  # 4. Actors with `expose` — Typed Message Interfaces
+  # ----------------------------------------------------------
+  # `actor` makes a class process-backed (gen_server).
+  # `expose` declares which methods are part of the public
+  # actor interface — making intent explicit and enabling
+  # future protocol generation (ConnectRPC, MCP, A2A).
+
+  actor ChatRoom
+    expose post(user, text), recent(n), count()
+
+    def initialize(name)
+      @name = name
+      @messages = []
+    end
+
+    def post(user, text)
+      msg = {user, text, erlang::timestamp()}
+      @messages = [msg, *@messages]
+      :ok
+    end
+
+    def recent(n)
+      lists::sublist(@messages, n)
+    end
+
+    def count()
+      erlang::length(@messages)
+    end
+  end
+
+  # ----------------------------------------------------------
+  # 5. `needs` — Effect Declarations
+  # ----------------------------------------------------------
+  # Declare what effects a function requires. This makes
+  # dependencies explicit and enables mock injection in tests.
+  #
+  # `needs Console` means "I need something that provides
+  # Console functionality." The actual implementation is
+  # resolved at runtime via `platform`.
+
+  needs Console
+
+  def self.greet(name)
+    msg = "Hello, " ++ erlang::atom_to_list(name) ++ "!"
+    Console::puts(msg)
+  end
+
+  # ----------------------------------------------------------
+  # 6. `peers` — Actor Dependencies
+  # ----------------------------------------------------------
+  # Declare named dependencies between actors.
+  # Makes the actor topology explicit and inspectable.
+
+  actor Worker
+    peers logger: Logger
+
+    def initialize()
+      @count = 0
+    end
+
+    def work()
+      @count = @count + 1
+    end
+  end
+
+  # ----------------------------------------------------------
+  # 7. Pattern Matching
+  # ----------------------------------------------------------
+
+  def self.describe(point)
+    match {point.x(), point.y()}
+      case {0, 0}
+        "origin"
+      case {0, _}
+        "on Y axis"
+      case {_, 0}
+        "on X axis"
+      case {x, y} if x == y
+        "on diagonal"
+      case _
+        "general point"
+    end
+  end
+
+  # ----------------------------------------------------------
+  # 8. Higher-Order Functions & Blocks
+  # ----------------------------------------------------------
+  # Blocks (do...end or {|args| body}) pass lambdas as the
+  # last argument, just like Ruby.
+
+  def self.demo_functional()
+    nums = [5, 3, 8, 1, 9, 2, 7]
+
+    doubled = nums.map {|n| n * 2}
+    evens = nums.select {|n| n % 2 == 0}
+    sum = nums.reduce(0) {|acc, n| acc + n}
+
+    io::format("nums:    ~p~n", [nums])
+    io::format("doubled: ~p~n", [doubled])
+    io::format("evens:   ~p~n", [evens])
+    io::format("sum:     ~p~n", [sum])
+
+    # Method calls work on all primitive types
+    3.times do |i|
+      io::format("  tick ~p~n", [i])
+    end
+  end
+
+  # ----------------------------------------------------------
+  # 9. Erlang Interop
+  # ----------------------------------------------------------
+  # Call any Erlang/OTP module with :: syntax.
+  # No wrappers needed — full access to the BEAM ecosystem.
+
+  def self.demo_interop()
+    node = erlang::node()
+    io::format("Running on BEAM node: ~p~n", [node])
+  end
+
+  # ----------------------------------------------------------
+  # 10. Actor Lifecycle Hooks
+  # ----------------------------------------------------------
+  # `on_terminate(reason)` — cleanup hook, runs on shutdown.
+  # `on_message(msg)` — handles raw Erlang messages (handle_info).
+  # Together they give actors full OTP gen_server power with
+  # clean Jet syntax.
+
+  actor DbConnection
+    def initialize(name)
+      @name = name
+      @queries = 0
+      puts("  [~s] Connected", [erlang::atom_to_list(@name)])
+    end
+
+    def query(sql)
+      @queries = @queries + 1
+      {:ok, @name, sql, @queries}
+    end
+
+    def stats()
+      {@name, @queries}
+    end
+
+    def on_terminate(reason)
+      puts("  [~s] Disconnecting (reason: ~p, queries served: ~p)",
+           [erlang::atom_to_list(@name), reason, @queries])
+    end
+  end
+
+  # ----------------------------------------------------------
+  # 11. handle_info & Timers
+  # ----------------------------------------------------------
+  # `on_message(msg)` receives raw messages sent with `!`.
+  # `send_after(ms, target, msg)` schedules a delayed message.
+  # `send_interval(ms, msg)` sends repeated messages to self.
+  # This is how actors implement heartbeats, timeouts, and
+  # periodic tasks — all backed by OTP's handle_info.
+
+  actor Heartbeat
+    def initialize(name)
+      @name = name
+      @beats = 0
+      @log = []
+      # Schedule the first heartbeat
+      send_after(20, self(), {:beat, @name})
+    end
+
+    def on_message({:beat, name})
+      @beats = @beats + 1
+      @log = [@beats, *@log]
+      # Schedule next beat (self-recurring timer)
+      if @beats < 3
+        send_after(20, self(), {:beat, name})
+      end
+    end
+
+    def on_message(msg)
+      @log = [msg, *@log]
+    end
+
+    def status()
+      {@beats, lists::reverse(@log)}
+    end
+  end
+
+  # ----------------------------------------------------------
+  # 12. Process Monitoring & Crash Detection
+  # ----------------------------------------------------------
+  # `monitor(pid)` — watches another process.
+  # When it exits, you receive {:DOWN, ref, :process, pid, reason}.
+  # Combined with on_message, actors can react to peer failures.
+
+  actor Watchdog
+    def initialize()
+      @events = []
+    end
+
+    def watch(target_pid)
+      monitor(target_pid)
+      :ok
+    end
+
+    def on_message({:DOWN, _ref, :process, pid, reason})
+      @events = [{:down, pid, reason}, *@events]
+    end
+
+    def events()
+      lists::reverse(@events)
+    end
+  end
+
+  # ----------------------------------------------------------
+  # 13. Async & Cast
+  # ----------------------------------------------------------
+  # `.cast()` — fire-and-forget (gen_server:cast).
+  # `.async()` — returns a Future you can `.await()`.
+
+  actor SlowCalc
+    def initialize()
+      @result = 0
+    end
+
+    def compute(n)
+      timer::sleep(30)
+      n * n
+    end
+
+    def add(n)
+      @result = @result + n
+    end
+
+    def result()
+      @result
+    end
+  end
+
+  # ----------------------------------------------------------
+  # Main
+  # ----------------------------------------------------------
+
+  def self.run()
+    io::format("~n=== Jet Language Showcase ===~n~n")
+
+    # 1. Classes & immutable state
+    io::format("--- 1. Classes & State ---~n")
+    p1 = showcase::Point.new(0, 0)
+    p2 = p1.move(3, 4)
+    io::format("p1 = ~s~n", [p1.to_s()])
+    io::format("p2 = ~s~n", [p2.to_s()])
+    io::format("distance = ~p~n", [p1.distance_to(p2)])
+    io::format("p2 is ~s~n~n", [describe(p2)])
+
+    # 2. Variable rebinding
+    io::format("--- 2. Variable Rebinding ---~n")
+    demo_rebinding()
+    io::format("~n")
+
+    # 3. Stack with Enumerable
+    io::format("--- 3. Mixins (Enumerable) ---~n")
+    s = showcase::Stack.new().push(10).push(20).push(30)
+    io::format("stack top:  ~p~n", [s.peek()])
+    io::format("stack size: ~p~n", [s.size()])
+    total = s.reduce(0) {|acc, n| acc + n}
+    io::format("stack sum:  ~p~n~n", [total])
+
+    # 4. Actor with expose
+    io::format("--- 4. Actors with expose ---~n")
+    room = showcase::ChatRoom.spawn("general")
+    room.post("alice", "Hello!")
+    room.post("bob", "Hey there!")
+    room.post("alice", "How's it going?")
+    io::format("messages: ~p~n", [room.count()])
+    recent = room.recent(2)
+    io::format("recent:   ~p~n~n", [recent])
+    gen_server::stop(room)
+
+    # 5. needs (show the declaration concept)
+    io::format("--- 5. needs & Effect Declarations ---~n")
+    io::format("greet/1 declares `needs Console`~n")
+    io::format("The Console dependency is resolved at runtime~n~n")
+
+    # 6. peers (show the declaration concept)
+    io::format("--- 6. peers & Actor Dependencies ---~n")
+    w = showcase::Worker.spawn()
+    io::format("work: ~p~n", [w.work()])
+    io::format("work: ~p~n", [w.work()])
+    io::format("work: ~p~n", [w.work()])
+    gen_server::stop(w)
+    io::format("~n")
+
+    # 7. Functional
+    io::format("--- 7. Higher-Order Functions ---~n")
+    demo_functional()
+
+    # 8. Interop
+    io::format("~n--- 8. Erlang Interop ---~n")
+    demo_interop()
+
+    # 9. Actor lifecycle hooks (on_terminate)
+    io::format("~n--- 9. Actor Lifecycle (on_terminate) ---~n")
+    db1 = showcase::DbConnection.spawn(:primary)
+    db2 = showcase::DbConnection.spawn(:replica)
+    db1.query("SELECT * FROM users")
+    db1.query("INSERT INTO logs ...")
+    db2.query("SELECT count(*) FROM logs")
+    io::format("  primary stats: ~p~n", [db1.stats()])
+    io::format("  replica stats: ~p~n", [db2.stats()])
+    gen_server::stop(db1)
+    gen_server::stop(db2)
+
+    # 10. handle_info & timers (on_message + send_after)
+    io::format("~n--- 10. Timers & handle_info ---~n")
+    hb = showcase::Heartbeat.spawn(:app)
+    # Also send a custom message
+    hb ! {:alert, "disk full"}
+    # Wait for heartbeats to fire
+    timer::sleep(150)
+    {beats, log} = hb.status()
+    io::format("  heartbeats fired: ~p~n", [beats])
+    io::format("  event log: ~p~n", [log])
+    gen_server::stop(hb)
+
+    # 11. Process monitoring & crash detection
+    io::format("~n--- 11. Process Monitoring ---~n")
+    dog = showcase::Watchdog.spawn()
+    # Spawn two targets, watch them, then stop them
+    t1 = showcase::DbConnection.spawn(:db_a)
+    t2 = showcase::DbConnection.spawn(:db_b)
+    dog.watch(t1)
+    dog.watch(t2)
+    gen_server::stop(t1)
+    # Simulate a crash (:kill is untrappable)
+    erlang::exit(t2, :kill)
+    timer::sleep(50)
+    io::format("  watchdog events: ~p~n", [dog.events()])
+    gen_server::stop(dog)
+
+    # 12. Async & cast
+    io::format("~n--- 12. Async & Cast ---~n")
+    calc = showcase::SlowCalc.spawn()
+    # cast: fire-and-forget (doesn't wait)
+    calc.cast().add(10)
+    calc.cast().add(20)
+    calc.cast().add(30)
+    timer::sleep(10)
+    io::format("  after casts, result = ~p~n", [calc.result()])
+    # async: returns a Future
+    f1 = calc.async().compute(7)
+    f2 = calc.async().compute(8)
+    io::format("  async 7*7 = ~p~n", [f1.await()])
+    io::format("  async 8*8 = ~p~n", [f2.await()])
+    gen_server::stop(calc)
+
+    io::format("~n=== Done ===~n")
+  end
+end

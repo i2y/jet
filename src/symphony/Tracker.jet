@@ -1,0 +1,23 @@
+# Symphony Tracker — issue tracker interface
+#
+# Tracker modules must implement:
+#   fetch_issues(config) → [issue]
+#   update_issue(issue_id, status, result) → :ok
+#
+# An issue is a map with at least:
+#   {id: string, title: string, description: string, ...}
+
+module Tracker
+  # Default mock tracker for testing
+  def self.fetch_issues(_config)
+    []
+  end
+
+  def self.update_issue(_issue_id, _status, _result)
+    :ok
+  end
+
+  def self.fetch_issue_state(_issue_id, _config)
+    :active
+  end
+end

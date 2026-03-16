@@ -1,7 +1,8 @@
 module jet_atom
   class Atom
     def initialize(atom)
-      {atom: atom}
+      @atom = atom
+      self
     end
 
     def to_list()

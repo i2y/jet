@@ -1,0 +1,79 @@
+# Orchestra Store — persistence protocol for task state
+#
+# Store modules must implement:
+#
+# Bulk API:
+#   save(root, state_map) -> :ok | {:error, reason}
+#   load(root) -> {:ok, state_map} | {:error, :not_found} | {:error, reason}
+#   delete(root) -> :ok | {:error, reason}
+#
+# Per-task API (optional — return supports_per_task?() == true to enable):
+#   save_task(root, task_id, task_data)  -> :ok | {:error, reason}
+#   load_task(root, task_id)             -> {:ok, data} | {:error, :not_found}
+#   delete_task(root, task_id)           -> :ok | {:error, reason}
+#   list_task_ids(root)                  -> [task_id, ...]
+#   save_meta(root, meta)               -> :ok | {:error, reason}
+#   load_meta(root)                     -> {:ok, meta} | {:error, :not_found}
+#   save_review(root, parent_id, data)  -> :ok | {:error, reason}
+#   delete_review(root, parent_id)      -> :ok | {:error, reason}
+#   supports_per_task?()                -> true | false
+#
+# root is the workspace_root path used to locate the storage.
+#
+# This module provides a default no-op implementation (in-memory only).
+# Use FileStore for JSON checkpoint persistence.
+# Use DetsStore for efficient per-task DETS persistence.
+
+module Store
+  # --- Bulk API (no-op defaults) ---
+
+  def self.save(_root, _state)
+    :ok
+  end
+
+  def self.load(_root)
+    {:error, :not_found}
+  end
+
+  def self.delete(_root)
+    :ok
+  end
+
+  # --- Per-task API (no-op defaults) ---
+
+  def self.save_task(_root, _task_id, _task_data)
+    :ok
+  end
+
+  def self.load_task(_root, _task_id)
+    {:error, :not_found}
+  end
+
+  def self.delete_task(_root, _task_id)
+    :ok
+  end
+
+  def self.list_task_ids(_root)
+    []
+  end
+
+  def self.save_meta(_root, _meta)
+    :ok
+  end
+
+  def self.load_meta(_root)
+    {:error, :not_found}
+  end
+
+  def self.save_review(_root, _parent_id, _data)
+    :ok
+  end
+
+  def self.delete_review(_root, _parent_id)
+    :ok
+  end
+
+  def self.supports_per_task?()
+    false
+  end
+end

@@ -1,0 +1,89 @@
+# Test: Runner and TaskSource protocol defaults
+#
+# Run: ./jet -r TestRunner::run examples/orchestra/TestRunner.jet
+
+module TestRunner
+  def self.run()
+    puts("=== TestRunner ===")
+    passed = 0
+    failed = 0
+
+    # Test mock Runner::run sends :agent_done to callback
+    Runner::run("/tmp", "test prompt", self(), {})
+    result = receive_msg(1000)
+    {p1, f1} = check_agent_done(result)
+    passed = passed + p1
+    failed = failed + f1
+
+    # Test Runner::stop
+    result2 = Runner::stop("/tmp")
+    {passed, failed} = assert_equal("mock runner stop", result2, :ok, passed, failed)
+
+    # Test mock TaskSource::fetch_tasks
+    tasks = TaskSource::fetch_tasks({})
+    {passed, failed} = assert_equal("mock source returns empty list", tasks, [], passed, failed)
+
+    # Test mock TaskSource::update_task
+    result3 = TaskSource::update_task("1", :ok, {})
+    {passed, failed} = assert_equal("mock source update_task", result3, :ok, passed, failed)
+
+    # Test mock TaskSource::fetch_task_state
+    state = TaskSource::fetch_task_state("1", {})
+    {passed, failed} = assert_equal("mock source fetch_task_state", state, :active, passed, failed)
+
+    puts("\n~p passed, ~p failed", [passed, failed])
+    if failed > 0
+      erlang::halt(1)
+    end
+  end
+
+  def self.check_agent_done(result)
+    done_map = erlang::element(2, result)
+    p = 0
+    f = 0
+    status = maps::get(:status, done_map)
+    if status == :ok
+      puts("  PASS: mock runner status")
+      p = p + 1
+    else
+      puts("  FAIL: mock runner status (got ~p)", [status])
+      f = f + 1
+    end
+    completed = maps::get(:completed, done_map)
+    if completed == true
+      puts("  PASS: mock runner completed")
+      p = p + 1
+    else
+      puts("  FAIL: mock runner completed (got ~p)", [completed])
+      f = f + 1
+    end
+    output = maps::get(:output, done_map)
+    if output == "[mock] done"
+      puts("  PASS: mock runner output")
+      p = p + 1
+    else
+      puts("  FAIL: mock runner output (got ~p)", [output])
+      f = f + 1
+    end
+    {p, f}
+  end
+
+  def self.receive_msg(timeout_ms)
+    receive
+      case msg
+        msg
+    after timeout_ms
+      :timeout
+    end
+  end
+
+  def self.assert_equal(label, actual, expected, passed, failed)
+    if actual == expected
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s (got ~p, expected ~p)", [label, actual, expected])
+      {passed, failed + 1}
+    end
+  end
+end

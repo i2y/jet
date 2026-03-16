@@ -1,0 +1,673 @@
+# Orchestra Scheduler — generic task scheduler for jet_orchestra
+#
+# Supports three modes:
+#   :poll    — periodically polls TaskSource for new tasks (default)
+#   :push    — tasks are submitted externally via submit()/submit_tasks()
+#   :hybrid  — both polling and push submission
+#
+# Supports optional persistence via Store protocol:
+#   store: nil         — no persistence (default)
+#   store: :FileStore  — JSON checkpoint files
+#
+# State machine per task:
+#   Unclaimed → Claimed → Running → Done | RetryQueued
+#   RetryQueued → Running (after backoff delay)
+#
+# Usage (poll mode):
+#   config = Config::new({mode: :poll, poll_interval_ms: 5000})
+#   orch = Scheduler::Instance.spawn(config, :MyTaskSource, :MyRunner, {})
+#
+# Usage (push mode with persistence):
+#   config = Config::new({mode: :push, max_concurrent: 3})
+#   orch = Scheduler::Instance.spawn(config, nil, :MyRunner, {store: :FileStore})
+#   orch.submit({id: "1", title: "Fix bug", description: "..."})
+
+module Scheduler
+  actor Instance
+    expose resume(), pause(), status(), running_count(), completed(),
+           submit(task), submit_tasks(tasks)
+
+    def initialize(config, task_source, runner, opts)
+      @config = config
+      @task_source = task_source
+      @runner = runner
+      @opts = opts
+      # Hooks: config provides base, opts can override
+      config_hooks = config.hooks()
+      opts_hooks = maps::get(:hooks, opts, {})
+      @hooks = maps::merge(config_hooks, opts_hooks)
+      @store = maps::get(:store, opts, nil)
+      @store_per_task = if @store != nil
+        erlang::apply(@store, :supports_per_task?, [])
+      else
+        false
+      end
+      @review_source = maps::get(:review_source, opts, nil)
+      @running = {}           # task_id => {pid, task}
+      @claimed = []           # [task_id, ...]
+      @retry_attempts = {}    # task_id => {count, task}
+      @done = {}              # task_id => true
+      @completed = []         # [{task_id, status, output}, ...]
+      @review_pending = {}    # parent_task_id => {pr_number, round}
+      @last_event_at = {}     # task_id => timestamp (stall detection)
+      @workflow_cache = {}    # path => {config, template, mtime}
+      @stopped = false
+      @mode = config.mode()
+      @totals = {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds: 0}
+
+      # Restore state from checkpoint if store is configured
+      restore_checkpoint()
+
+      Log::info("Scheduler starting", {
+        mode: @mode,
+        store: @store,
+        poll_interval_ms: config.poll_interval_ms(),
+        max_concurrent: config.max_concurrent(),
+        max_retries: config.max_retries()
+      })
+
+      # Start tick loop based on mode
+      if @mode == :poll or @mode == :hybrid
+        send_after(0, self(), :tick)
+      else
+        send_after(@config.stall_timeout_ms(), self(), :stall_check)
+      end
+      # Start review polling if review_source is configured (all modes)
+      if @review_source != nil
+        send_after(@config.review_poll_interval_ms(), self(), :review_tick)
+      end
+    end
+
+    # --- Push API ---
+
+    # Submit a single task for execution
+    def submit(task)
+      id = maps::get(:id, task, nil)
+      if id != nil
+        if (not lists::member(id, @claimed)) and (not maps::is_key(id, @running)) and (not maps::is_key(id, @done))
+          Log::info("Task submitted", {task_id: id, title: maps::get(:title, task, "?")})
+          @claimed = [id, *@claimed]
+          @retry_attempts = maps::put(id, {0, task}, @retry_attempts)
+          if @store_per_task
+            persist_task(id)
+            persist_meta()
+          else
+            persist()
+          end
+          dispatch()
+          {:ok, id}
+        else
+          {:already_known, id}
+        end
+      else
+        {:error, :missing_id}
+      end
+    end
+
+    # Submit multiple tasks at once
+    def submit_tasks(tasks)
+      submit_tasks_rec(tasks, [])
+    end
+
+    def submit_tasks_rec([], acc)
+      lists::reverse(acc)
+    end
+
+    def submit_tasks_rec([task, *rest], acc)
+      result = submit(task)
+      submit_tasks_rec(rest, [result, *acc])
+    end
+
+    # --- Tick handlers ---
+
+    def on_message(:tick)
+      if @stopped != true
+        if @mode == :poll or @mode == :hybrid
+          reconcile()
+        end
+        check_stalled()
+        dispatch()
+        send_after(@config.poll_interval_ms(), self(), :tick)
+      end
+    end
+
+    # Lightweight tick for push mode — stall detection only
+    def on_message(:stall_check)
+      if @stopped != true
+        check_stalled()
+        send_after(@config.stall_timeout_ms(), self(), :stall_check)
+      end
+    end
+
+    # Dedicated review polling tick (all modes)
+    def on_message(:review_tick)
+      if @stopped != true
+        reconcile_reviews()
+        dispatch()
+        send_after(@config.review_poll_interval_ms(), self(), :review_tick)
+      end
+    end
+
+    # --- Worker completion ---
+
+    def on_message({:worker_done, task_id, result})
+      Log::info("Worker done", {task_id: task_id, result_status: erlang::element(1, result)})
+
+      # Remove from running
+      @running = maps::remove(task_id, @running)
+      @last_event_at = maps::remove(task_id, @last_event_at)
+
+      match result
+        case {:ok, output}
+          @completed = [{task_id, :ok, output}, *@completed]
+          # Notify task source
+          if @task_source != nil
+            erlang::apply(@task_source, :update_task, [task_id, :ok, {output: output}])
+          end
+          @done = maps::put(task_id, true, @done)
+
+          # Track for PR review if review_source is configured
+          if @review_source != nil
+            # Determine parent_id (for review tasks, track against parent)
+            attempts = maps::get(task_id, @retry_attempts, {0, nil})
+            task_data = erlang::element(2, attempts)
+            parent_id = if task_data != nil
+              maps::get(:parent_id, task_data, task_id)
+            else
+              task_id
+            end
+            is_review = if task_data != nil
+              maps::get(:workspace_reuse, task_data, false)
+            else
+              false
+            end
+            if is_review
+              # Review task completed — increment review round
+              prev = maps::get(parent_id, @review_pending, {0, 0})
+              prev_round = erlang::element(2, prev)
+              pr_num = erlang::element(1, prev)
+              @review_pending = maps::put(parent_id, {pr_num, prev_round + 1}, @review_pending)
+            else
+              # Primary task completed — add to review_pending
+              pr_num = maps::get(:pr_number, task_data, 0)
+              @review_pending = maps::put(parent_id, {pr_num, 0}, @review_pending)
+            end
+            persist_review(parent_id)
+          else
+            # No review source — schedule continuation check (legacy behavior)
+            attempts = maps::get(task_id, @retry_attempts, {0, nil})
+            task_data = erlang::element(2, attempts)
+            if task_data != nil
+              @retry_attempts = maps::put(task_id, {0, task_data}, @retry_attempts)
+              send_after(1000, self(), {:retry, task_id})
+            end
+          end
+
+        case {:error, output}
+          attempts = maps::get(task_id, @retry_attempts, {0, nil})
+          count = erlang::element(1, attempts)
+          task = erlang::element(2, attempts)
+          if count < @config.max_retries()
+            new_count = count + 1
+            Log::info("Queuing retry", {task_id: task_id, attempt: new_count, max: @config.max_retries()})
+            @retry_attempts = maps::put(task_id, {new_count, task}, @retry_attempts)
+            backoff = Backoff::compute(new_count, @config)
+            Log::info("Retry backoff", {task_id: task_id, delay_ms: backoff})
+            send_after(backoff, self(), {:retry, task_id})
+          else
+            Log::warn("Max retries reached", {task_id: task_id})
+            @done = maps::put(task_id, true, @done)
+            @completed = [{task_id, :error, output}, *@completed]
+            @retry_attempts = maps::remove(task_id, @retry_attempts)
+            if @task_source != nil
+              erlang::apply(@task_source, :update_task, [task_id, :error, {output: output}])
+            end
+          end
+      end
+
+      if @store_per_task
+        persist_task(task_id)
+        persist_meta()
+      else
+        persist()
+      end
+    end
+
+    def on_message({:worker_event, task_id, _event})
+      # Update stall detection timestamp
+      @last_event_at = maps::put(task_id, erlang::system_time(:millisecond), @last_event_at)
+    end
+
+    def on_message({:retry, task_id})
+      match maps::find(task_id, @retry_attempts)
+        case {:ok, {count, task}}
+          if task != nil
+            # Re-check task state before dispatching
+            state = if @task_source != nil
+              erlang::apply(@task_source, :fetch_task_state, [task_id, {}])
+            else
+              :active
+            end
+            if state == :terminal
+              Log::info("Task is terminal, releasing claim", {task_id: task_id})
+              @done = maps::put(task_id, true, @done)
+              @retry_attempts = maps::remove(task_id, @retry_attempts)
+              Workspace::cleanup(@config.workspace_root(), task_id)
+              if @store_per_task
+                persist_task(task_id)
+              else
+                persist()
+              end
+            else
+              Log::info("Retrying task", {task_id: task_id, attempt: count})
+              @done = maps::remove(task_id, @done)
+              spawn_worker(task)
+            end
+          end
+        case :error
+          :ok
+      end
+    end
+
+    def on_message({:DOWN, _ref, :process, pid, reason})
+      # Worker crashed — find which task it was handling
+      crashed = find_crashed(maps::to_list(@running), pid, [])
+      handle_crashes(crashed, reason)
+    end
+
+    # --- Internal helpers ---
+
+    # Fetch new tasks from source and reconcile state
+    def reconcile()
+      if @task_source != nil
+        source_config = {
+          github_repo: @config.github_repo(),
+          github_labels: @config.github_labels()
+        }
+        match erlang::apply(@task_source, :fetch_tasks, [source_config])
+          case tasks if is_list(tasks)
+            new_tasks = find_new_tasks(tasks)
+            if new_tasks != []
+              claim_tasks(new_tasks)
+              if @store_per_task
+                persist_claimed_tasks(new_tasks)
+                persist_meta()
+              else
+                persist()
+              end
+            end
+          case {:error, reason}
+            Log::error("TaskSource error", {reason: reason})
+          case _
+            :ok
+        end
+      end
+      # Poll for PR review feedback
+      reconcile_reviews()
+    end
+
+    def reconcile_reviews()
+      if @review_source != nil
+        Log::info("Review poll", {pending: maps::size(@review_pending), source: @review_source})
+        review_config = {
+          review_pending: @review_pending,
+          max_review_rounds: @config.max_review_rounds(),
+          github_repo: @config.github_repo(),
+          github_labels: @config.github_labels()
+        }
+        match erlang::apply(@review_source, :fetch_tasks, [review_config])
+          case tasks if is_list(tasks)
+            Log::info("Review tasks found", {count: erlang::length(tasks)})
+            submit_review_tasks(tasks)
+          case {:error, reason}
+            Log::error("ReviewSource error", {reason: reason})
+          case _
+            :ok
+        end
+      end
+    end
+
+    def submit_review_tasks([])
+      :ok
+    end
+
+    def submit_review_tasks([task, *rest])
+      submit(task)
+      submit_review_tasks(rest)
+    end
+
+    # Detect stalled workers
+    def check_stalled()
+      timeout = @config.stall_timeout_ms()
+      now = erlang::system_time(:millisecond)
+      stalled = find_stalled(maps::to_list(@last_event_at), now, timeout, [])
+      handle_stalled(stalled)
+    end
+
+    def find_stalled([], _now, _timeout, acc)
+      acc
+    end
+
+    def find_stalled([{task_id, last_time}, *rest], now, timeout, acc)
+      if (now - last_time) > timeout
+        find_stalled(rest, now, timeout, [task_id, *acc])
+      else
+        find_stalled(rest, now, timeout, acc)
+      end
+    end
+
+    def handle_stalled([])
+      :ok
+    end
+
+    def handle_stalled([task_id, *rest])
+      Log::warn("Worker stalled, stopping", {task_id: task_id})
+      match maps::find(task_id, @running)
+        case {:ok, {pid, _task}}
+          if erlang::is_process_alive(pid)
+            gen_server::stop(pid)
+          end
+        case :error
+          :ok
+      end
+      handle_stalled(rest)
+    end
+
+    # Filter tasks not yet known
+    def find_new_tasks(tasks)
+      find_new_tasks_rec(tasks, [])
+    end
+
+    def find_new_tasks_rec([], acc)
+      lists::reverse(acc)
+    end
+
+    def find_new_tasks_rec([task, *rest], acc)
+      id = maps::get(:id, task)
+      if (not lists::member(id, @claimed)) and (not maps::is_key(id, @running)) and (not maps::is_key(id, @done))
+        find_new_tasks_rec(rest, [task, *acc])
+      else
+        find_new_tasks_rec(rest, acc)
+      end
+    end
+
+    # Claim new tasks
+    def claim_tasks([])
+      :ok
+    end
+
+    def claim_tasks([task, *rest])
+      id = maps::get(:id, task)
+      @claimed = [id, *@claimed]
+      @retry_attempts = maps::put(id, {0, task}, @retry_attempts)
+      claim_tasks(rest)
+    end
+
+    # Dispatch workers up to max_concurrent
+    def dispatch()
+      running_count = maps::size(@running)
+      available = @config.max_concurrent() - running_count
+      if available > 0
+        dispatchable = find_dispatchable(@claimed, available, [])
+        dispatch_list(dispatchable)
+      end
+    end
+
+    def find_dispatchable([], _limit, acc)
+      lists::reverse(acc)
+    end
+
+    def find_dispatchable(_, 0, acc)
+      lists::reverse(acc)
+    end
+
+    def find_dispatchable([id, *rest], limit, acc)
+      if (not maps::is_key(id, @running)) and (not maps::is_key(id, @done))
+        find_dispatchable(rest, limit - 1, [id, *acc])
+      else
+        find_dispatchable(rest, limit, acc)
+      end
+    end
+
+    def dispatch_list([])
+      :ok
+    end
+
+    def dispatch_list([task_id, *rest])
+      match maps::find(task_id, @retry_attempts)
+        case {:ok, {_count, task}} if task != nil
+          spawn_worker(task)
+        case _
+          :ok
+      end
+      dispatch_list(rest)
+    end
+
+    def spawn_worker(task)
+      task_id = maps::get(:id, task)
+      Log::info("Spawning worker", {task_id: task_id, title: maps::get(:title, task, "?")})
+
+      # Resolve per-task workflow via WorkflowRouter
+      {route_result, new_cache} = WorkflowRouter::resolve(task, @config, @workflow_cache)
+      @workflow_cache = new_cache
+      {task_config, task_hooks} = match route_result
+        case {:ok, resolved_config}
+          resolved_hooks = maps::merge(resolved_config.hooks(), maps::get(:hooks, @opts, {}))
+          {resolved_config, resolved_hooks}
+        case :default
+          {@config, @hooks}
+      end
+
+      worker_pid = Worker::Instance.spawn(task, task_config, @runner, self(), task_hooks)
+      monitor(worker_pid)
+      @running = maps::put(task_id, {worker_pid, task}, @running)
+      @last_event_at = maps::put(task_id, erlang::system_time(:millisecond), @last_event_at)
+    end
+
+    def find_crashed([], _pid, acc)
+      acc
+    end
+
+    def find_crashed([{id, {wpid, _task}}, *rest], pid, acc)
+      if wpid == pid
+        find_crashed(rest, pid, [id, *acc])
+      else
+        find_crashed(rest, pid, acc)
+      end
+    end
+
+    def handle_crashes([], _reason)
+      :ok
+    end
+
+    def handle_crashes([id, *rest], reason)
+      Log::error("Worker crashed", {task_id: id, reason: reason})
+      @running = maps::remove(id, @running)
+      self() ! {:worker_done, id, {:error, "worker crashed"}}
+      handle_crashes(rest, reason)
+    end
+
+    # --- Persistence ---
+
+    def persist()
+      if @store != nil and (not @store_per_task)
+        state = {
+          claimed: @claimed,
+          retry_attempts: @retry_attempts,
+          done: @done,
+          completed: @completed,
+          review_pending: @review_pending
+        }
+        erlang::apply(@store, :save, [@config.workspace_root(), state])
+      end
+    end
+
+    # Per-task persistence: save a single task's current state
+    def persist_task(task_id)
+      if @store != nil and @store_per_task
+        root = @config.workspace_root()
+        status = task_persist_status(task_id)
+        {count, task_map} = maps::get(task_id, @retry_attempts, {0, nil})
+        output = task_persist_output(task_id)
+        erlang::apply(@store, :save_task, [root, task_id, {status: status, count: count, task: task_map, output: output}])
+      end
+    end
+
+    def task_persist_status(task_id)
+      if maps::is_key(task_id, @done)
+        completed_status(find_completed_entry(task_id, @completed))
+      else
+        :claimed
+      end
+    end
+
+    def completed_status(nil)
+      :done_ok
+    end
+
+    def completed_status({_tid, :error, _output})
+      :done_error
+    end
+
+    def completed_status(_entry)
+      :done_ok
+    end
+
+    def task_persist_output(task_id)
+      completed_output(find_completed_entry(task_id, @completed))
+    end
+
+    def completed_output(nil)
+      nil
+    end
+
+    def completed_output({_tid, _status, output})
+      output
+    end
+
+    # Persist claimed order list
+    def persist_meta()
+      if @store != nil and @store_per_task
+        erlang::apply(@store, :save_meta, [@config.workspace_root(), {version: 1, claimed: @claimed}])
+      end
+    end
+
+    # Persist review state for a parent task
+    def persist_review(parent_id)
+      if @store != nil and @store_per_task
+        match maps::find(parent_id, @review_pending)
+          case {:ok, {pr_number, round}}
+            erlang::apply(@store, :save_review, [@config.workspace_root(), parent_id, {pr_number: pr_number, round: round}])
+          case :error
+            :ok
+        end
+      end
+    end
+
+    # Persist multiple newly claimed tasks
+    def persist_claimed_tasks([])
+      :ok
+    end
+
+    def persist_claimed_tasks([task, *rest])
+      id = maps::get(:id, task)
+      persist_task(id)
+      persist_claimed_tasks(rest)
+    end
+
+    # Find a completed entry by task_id
+    def find_completed_entry(_task_id, [])
+      nil
+    end
+
+    def find_completed_entry(task_id, [{tid, status, output}, *rest])
+      if tid == task_id
+        {tid, status, output}
+      else
+        find_completed_entry(task_id, rest)
+      end
+    end
+
+    def restore_checkpoint()
+      if @store != nil
+        match erlang::apply(@store, :load, [@config.workspace_root()])
+          case {:ok, saved}
+            Log::info("Restoring from checkpoint", {
+              claimed: erlang::length(maps::get(:claimed, saved, [])),
+              done: maps::size(maps::get(:done, saved, {})),
+              completed: erlang::length(maps::get(:completed, saved, []))
+            })
+            @claimed = maps::get(:claimed, saved, [])
+            @retry_attempts = maps::get(:retry_attempts, saved, {})
+            @done = maps::get(:done, saved, {})
+            @completed = maps::get(:completed, saved, [])
+            @review_pending = maps::get(:review_pending, saved, {})
+            Log::info("Review pending restored", {count: maps::size(@review_pending)})
+          case {:error, :not_found}
+            :ok
+          case {:error, reason}
+            Log::warn("Checkpoint load failed, starting fresh", {reason: reason})
+        end
+      end
+    end
+
+    # --- Exposed control methods ---
+
+    def resume()
+      @stopped = false
+      if @mode == :poll or @mode == :hybrid
+        send_after(0, self(), :tick)
+      else
+        send_after(@config.stall_timeout_ms(), self(), :stall_check)
+      end
+      if @review_source != nil
+        send_after(@config.review_poll_interval_ms(), self(), :review_tick)
+      end
+      :ok
+    end
+
+    def pause()
+      @stopped = true
+      stop_workers(maps::to_list(@running))
+      if (not @store_per_task)
+        persist()
+      end
+      :ok
+    end
+
+    def stop_workers([])
+      :ok
+    end
+
+    def stop_workers([{_id, {pid, _task}}, *rest])
+      if erlang::is_process_alive(pid)
+        gen_server::stop(pid)
+      end
+      stop_workers(rest)
+    end
+
+    def status()
+      {running: maps::size(@running),
+       claimed: erlang::length(@claimed),
+       completed: erlang::length(@completed),
+       stopped: @stopped,
+       mode: @mode}
+    end
+
+    def running_count()
+      maps::size(@running)
+    end
+
+    def completed()
+      lists::reverse(@completed)
+    end
+
+    def on_terminate(reason)
+      Log::info("Scheduler shutting down", {reason: reason})
+      if (not @store_per_task)
+        persist()
+      end
+      stop_workers(maps::to_list(@running))
+    end
+  end
+end

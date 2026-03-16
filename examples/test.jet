@@ -1,8 +1,6 @@
 module test
   #export_all #@compile(:export_all)
 
-  from lists import sum/1, sort/1
-
   record item
     id = "id",
     name = "name",
@@ -122,7 +120,7 @@ module test
   def self.test6()
     {a:3, b:4}::a + {a: 3, :b
     => 10}::b
-    [3, 2, 1, 4] |> sort()
+    lists::sort([3, 2, 1, 4])
   end
 
   def self.test7()
@@ -195,7 +193,7 @@ module test
   end
 
   def self.test_new()
-    car = new Car()
+    car = Car::Car.new()
     car.inspect
   end
 
@@ -210,7 +208,7 @@ module test
   def self.test_reduce()
     lis = [1, 2, 3]
     "Elixir.IO"::inspect(
-      lis.reduce([], {|item, acc|
+      lis.reduce([], {|acc, item|
         acc ++ [item]
       }))
   end

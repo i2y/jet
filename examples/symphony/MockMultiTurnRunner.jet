@@ -1,0 +1,26 @@
+# Mock runner that requires 3 turns to complete
+# Used by MultiTurnDemo to verify multi-turn continuation
+
+module MockMultiTurnRunner
+  def self.run(_workspace, _prompt, callback_pid)
+    # Track turn count in process dictionary
+    turn = erlang::get(:mock_turn_count)
+    turn = if turn == :undefined
+      1
+    else
+      turn + 1
+    end
+    erlang::put(:mock_turn_count, turn)
+
+    if turn >= 3
+      callback_pid ! {:agent_done, {status: :ok, output: "[mock] completed on turn " ++ integer_to_list(turn), completed: true}}
+    else
+      callback_pid ! {:agent_done, {status: :ok, output: "[mock] turn " ++ integer_to_list(turn) ++ " partial result", completed: false}}
+    end
+    :ok
+  end
+
+  def self.stop(_workspace)
+    :ok
+  end
+end

@@ -96,7 +96,7 @@ Module Car
       {name: "foo",
        speed: 100}
     end
-  
+
     def display()
       @name.display()
       @speed.display()
@@ -198,11 +198,11 @@ SampleList.jet
 module SampleList
   class SampleList
     include Enumerable
-  
+
     def initialize(items)
       {items: items}
     end
-  
+
     def reduce(acc, func)
       lists::foldl(func, acc, @items)
     end
@@ -227,54 +227,64 @@ sample_list.select {|item| item > 1}
 - Macro definition
 
 ## Requirements
-- Erlang/OTP >= 18.0
-- Elixir >= 1.1
+- Erlang/OTP >= 26.0
+- Gleam >= 1.0
 
 ## Installation
 ```sh
 $ git clone https://github.com/i2y/jet.git
 $ cd jet
-$ mix archive.build
-$ mix archive.install
-$ mix escript.build
-$ cp jet <any path>
+$ gleam build
+$ gleam export erlang-shipment && escript build_escript.erl
+$ ./jet --help
 ```
 
 ## Usage
-### Command
-Compiling:
+
+### Compiling a single file
 ```sh
-$ ls
-Foo.jet
-$ jet Foo.jet
-$ ls
-Foo.beam Foo.jet
+$ ./jet Foo.jet
 ```
 
-Compiling and Executing:
+### Compiling and executing
 ```sh
-$ cat Foo.jet
-module Foo
-  def self.bar()
-    123.display()
+$ ./jet -r Foo::bar Foo.jet
+```
+
+### Building a project
+```sh
+$ ./jet build src/
+```
+
+### Building an escript (standalone executable)
+
+Bundle all `.beam` files into a single executable. Requires Erlang on the target machine.
+
+```sh
+$ ./jet escript MyApp src/
+$ ./myapp
+```
+
+### Building an OTP release
+
+Generate a release directory with `bin/` launcher and `ebin/` beams.
+
+```sh
+$ ./jet release MyApp src/
+$ ./_release/bin/myapp
+```
+
+**Entry point convention:** `jet escript` and `jet release` call `Module::main()`. Your app module must define `def self.main()`.
+
+```jet
+module MyApp
+  def self.main()
+    puts("Hello from Jet!")
   end
 end
-$ jet -r Foo::bar Foo.jet
-123
 ```
 
-### Mix
-mix.exs file example:
-```elixir
-defmodule MyApp.Mixfile do
-  use Mix.Project
-
-  def project do
-    [app: :my_app,
-     version: "1.0.0",
-     compilers: [:jet|Mix.compilers],
-     deps: [{:jet, git: "https://github.com/i2y/jet.git"}]]
-  end
-end
+### Running tests
+```sh
+$ gleam test
 ```
-".jet" files in source directory(src) is automatically compiled by mix command.

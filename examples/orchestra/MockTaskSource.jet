@@ -1,0 +1,24 @@
+# Mock TaskSource for Orchestra demos
+#
+# Returns a fixed list of tasks for testing.
+#
+# Compile: ./jet examples/orchestra/MockTaskSource.jet
+
+module MockTaskSource
+  def self.fetch_tasks(_config)
+    [
+      {id: "task-1", title: "Fix login page", description: "Login button not working on mobile"},
+      {id: "task-2", title: "Add search feature", description: "Implement full-text search"},
+      {id: "task-3", title: "Update docs", description: "Add API documentation for v2"}
+    ]
+  end
+
+  def self.update_task(task_id, status, _result)
+    io::format("[MockTaskSource] Task ~s updated: ~p~n", [task_id, status])
+    :ok
+  end
+
+  def self.fetch_task_state(_task_id, _config)
+    :active
+  end
+end

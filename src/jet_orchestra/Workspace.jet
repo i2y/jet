@@ -1,0 +1,140 @@
+# Orchestra Workspace — isolated execution environment management
+#
+# Manages per-task working directories with lifecycle hooks.
+# Environment variables injected: $ORCHESTRA_TASK_ID, $ORCHESTRA_TASK_TITLE
+#
+# Usage:
+#   {path, :created} = Workspace::prepare("/tmp/orchestra", "task-123", hooks)
+#   Workspace::cleanup("/tmp/orchestra", "task-123", hooks)
+
+module Workspace
+  # Prepare a workspace directory for a task
+  # Returns {path, :created | :existed}
+  def self.prepare(root, task_identifier)
+    key = sanitize(task_identifier)
+    path = ensure_list(root) ++ "/" ++ key
+    # Check if the directory already exists before creating
+    if filelib::is_dir(path)
+      {path, :existed}
+    else
+      # ensure_dir creates parent directories (root/)
+      match filelib::ensure_dir(path ++ "/dummy")
+        case :ok
+          # ensure_dir already created path/, so just confirm
+          {path, :created}
+        case {:error, reason}
+          {:error, reason}
+      end
+    end
+  end
+
+  # Prepare with hooks
+  def self.prepare(root, task_identifier, hooks)
+    result = prepare(root, task_identifier)
+    match result
+      case {path, :created}
+        hook = maps::get(:after_create, hooks, nil)
+        if hook != nil
+          task = {id: task_identifier}
+          Hooks::run(hook, path, task, 60000, :lenient)
+        end
+        {path, :created}
+      case other
+        other
+    end
+  end
+
+  # Clean up a workspace directory
+  def self.cleanup(root, task_identifier)
+    key = sanitize(task_identifier)
+    path = ensure_list(root) ++ "/" ++ key
+    abs_path = filename::absname(path)
+    abs_root = filename::absname(ensure_list(root))
+    if lists::prefix(abs_root, abs_path)
+      delete_dir_recursive(path)
+    else
+      {:error, :path_traversal}
+    end
+  end
+
+  # Clean up with hooks
+  def self.cleanup(root, task_identifier, hooks)
+    key = sanitize(task_identifier)
+    path = ensure_list(root) ++ "/" ++ key
+    hook = maps::get(:before_remove, hooks, nil)
+    if hook != nil
+      task = {id: task_identifier}
+      Hooks::run(hook, path, task, 60000, :lenient)
+    end
+    cleanup(root, task_identifier)
+  end
+
+  # List all workspace directories
+  def self.list(root)
+    root_str = ensure_list(root)
+    match file::list_dir(root_str)
+      case {:ok, entries}
+        lists::map(do |e|
+          ensure_list(e)
+        end, entries)
+      case {:error, _}
+        []
+    end
+  end
+
+  # Check if a workspace exists
+  def self.exists?(root, task_identifier)
+    key = sanitize(task_identifier)
+    path = ensure_list(root) ++ "/" ++ key
+    filelib::is_dir(path)
+  end
+
+  # Sanitize an identifier for use as directory name
+  def self.sanitize(identifier)
+    re::replace(ensure_list(identifier), "[^A-Za-z0-9._-]", "_", [:global, {:return, :list}])
+  end
+
+  # Recursively delete a directory
+  def self.delete_dir_recursive(path)
+    path_str = ensure_list(path)
+    match file::list_dir(path_str)
+      case {:ok, entries}
+        delete_entries(entries, path_str)
+        file::del_dir(path_str)
+      case {:error, :enoent}
+        :ok
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  def self.delete_entries([], _base)
+    :ok
+  end
+
+  def self.delete_entries([entry, *rest], base)
+    full = base ++ "/" ++ ensure_list(entry)
+    if filelib::is_dir(full)
+      delete_dir_recursive(full)
+    else
+      file::delete(full)
+    end
+    delete_entries(rest, base)
+  end
+
+  def self.ensure_list(v) if is_list(v)
+    v
+  end
+
+  def self.ensure_list(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.ensure_list(v) if is_atom(v)
+    atom_to_list(v)
+  end
+
+  def self.ensure_list(v) if is_integer(v)
+    integer_to_list(v)
+  end
+end

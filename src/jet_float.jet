@@ -3,7 +3,8 @@ module jet_float
     include Numeric
 
     def initialize(value)
-      {value: value}
+      @value = value
+      self
     end
 
     def to_list()

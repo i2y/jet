@@ -1,0 +1,83 @@
+# Orchestra PythonBridge — BEAM ↔ Python interop via erlport
+#
+# Wraps erlport to manage Python process lifecycle and async calls.
+# Used by ClaudeAgentRunner to invoke Claude Agent SDK from Python.
+#
+# Usage:
+#   PythonBridge::start("path/to/python/modules")
+#   PythonBridge::call_async(:my_module, :my_func, ["arg1"], self())
+#   PythonBridge::stop()
+
+module PythonBridge
+  # Start a Python process (singleton, stored in process dictionary)
+  def self.start(python_path)
+    match python::start([{:python_path, ensure_list(python_path)}, {:python, "python3"}])
+      case {:ok, py}
+        erlang::put(:orchestra_python, py)
+        {:ok, py}
+      case {:error, reason}
+        Log::error("Python start failed", {reason: reason})
+        {:error, reason}
+    end
+  end
+
+  # Start with default path
+  def self.start()
+    start(".")
+  end
+
+  # Synchronous Python call
+  def self.call_sync(mod, func, args)
+    py = erlang::get(:orchestra_python)
+    if py != :undefined and py != nil
+      python::call(py, mod, func, args)
+    else
+      {:error, :python_not_started}
+    end
+  end
+
+  # Async Python call — result sent to callback_pid as {:python_result, result}
+  def self.call_async(mod, func, args, callback_pid)
+    py = erlang::get(:orchestra_python)
+    if py != :undefined and py != nil
+      erlang::spawn(do ||
+        result = python::call(py, mod, func, args)
+        callback_pid ! {:python_result, result}
+      end)
+      :ok
+    else
+      callback_pid ! {:python_result, {:error, :python_not_started}}
+      {:error, :python_not_started}
+    end
+  end
+
+  # Stop the Python process
+  def self.stop()
+    py = erlang::get(:orchestra_python)
+    if py != :undefined and py != nil
+      python::stop(py)
+      erlang::erase(:orchestra_python)
+      :ok
+    else
+      :ok
+    end
+  end
+
+  # Check if Python is running
+  def self.alive?()
+    py = erlang::get(:orchestra_python)
+    py != :undefined and py != nil
+  end
+
+  def self.ensure_list(v) if is_list(v)
+    v
+  end
+
+  def self.ensure_list(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.ensure_list(v) if is_atom(v)
+    atom_to_list(v)
+  end
+end

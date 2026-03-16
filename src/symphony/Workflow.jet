@@ -1,0 +1,188 @@
+# Symphony Workflow — WORKFLOW.md parser and template renderer
+#
+# WORKFLOW.md format:
+#   ---
+#   name: fix-bug
+#   max_turns: 5
+#   ...
+#   ---
+#   You are a software engineer. Fix this issue:
+#   Title: {{issue.title}}
+#   Description: {{issue.description}}
+#   Attempt: {{attempt}}
+
+module Workflow
+  # Load a workflow file
+  # Returns {config_map, prompt_template}
+  def self.load(path)
+    match file::read_file(path)
+      case {:ok, content}
+        parse_front_matter(binary_to_list(content))
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  # Parse YAML front matter + markdown body
+  def self.parse_front_matter(content)
+    match split_front_matter(content)
+      case {:ok, yaml_str, template}
+        match jet_yaml_ffi::parse(yaml_str)
+          case {:ok, config}
+            {:ok, config, template}
+          case {:error, reason}
+            {:error, {:yaml_parse, reason}}
+        end
+      case :no_front_matter
+        # No YAML header — entire content is the template
+        {:ok, {}, content}
+    end
+  end
+
+  # Split "---\nyaml\n---\ntemplate" into {yaml, template}
+  def self.split_front_matter(content)
+    content_str = ensure_list(content)
+    # Check if starts with ---
+    trimmed = string::trim(content_str, :leading)
+    if lists::prefix("---", trimmed)
+      # Find the closing ---
+      rest = lists::nthtail(3, trimmed)
+      rest_trimmed = string::trim(rest, :leading, "\n\r")
+      match find_closing_fence(rest_trimmed, [])
+        case {:ok, yaml_str, template}
+          {:ok, yaml_str, template}
+        case :error
+          :no_front_matter
+      end
+    else
+      :no_front_matter
+    end
+  end
+
+  def self.find_closing_fence([], _acc)
+    :error
+  end
+
+  def self.find_closing_fence([45, 45, 45, *rest], acc)
+    # Found "---" (45 = '-')
+    yaml = lists::reverse(acc)
+    template = string::trim(rest, :leading, "\n\r")
+    {:ok, yaml, template}
+  end
+
+  def self.find_closing_fence([c, *rest], acc)
+    find_closing_fence(rest, [c, *acc])
+  end
+
+  # Render a template with variable substitution
+  # Supports {{var}} syntax where var can be dotted (issue.title)
+  def self.render_prompt(template, vars)
+    render_template(ensure_list(template), vars, [])
+  end
+
+  def self.render_template([], _vars, acc)
+    lists::flatten(lists::reverse(acc))
+  end
+
+  def self.render_template([123, 123, *rest], vars, acc)
+    # Found {{ (123 = '{')
+    match extract_var_name(rest, [])
+      case {:ok, var_name, remaining}
+        value = resolve_var(var_name, vars)
+        render_template(remaining, vars, [ensure_list(value), *acc])
+      case :error
+        render_template(rest, vars, [[123, 123], *acc])
+    end
+  end
+
+  def self.render_template([c, *rest], vars, acc)
+    render_template(rest, vars, [[c], *acc])
+  end
+
+  # Extract variable name until }}
+  def self.extract_var_name([125, 125, *rest], name_acc)
+    # Found }} (125 = '}')
+    name = string::trim(lists::reverse(name_acc))
+    {:ok, name, rest}
+  end
+
+  def self.extract_var_name([], _acc)
+    :error
+  end
+
+  def self.extract_var_name([c, *rest], acc)
+    extract_var_name(rest, [c, *acc])
+  end
+
+  # Resolve a dotted variable name against a vars map
+  # e.g., "issue.title" → maps:get("title", maps:get("issue", vars))
+  def self.resolve_var(name, vars)
+    parts = string::split(name, ".", :all)
+    resolve_path(parts, vars)
+  end
+
+  def self.resolve_path([key], vars) if is_map(vars)
+    key_bin = erlang::list_to_binary(string::trim(key))
+    if maps::is_key(key_bin, vars)
+      format_value(maps::get(key_bin, vars))
+    else
+      key_atom = list_to_atom(string::trim(key))
+      if maps::is_key(key_atom, vars)
+        format_value(maps::get(key_atom, vars))
+      else
+        "{{" ++ key ++ "}}"
+      end
+    end
+  end
+
+  def self.resolve_path([key, *rest], vars) if is_map(vars)
+    key_bin = erlang::list_to_binary(string::trim(key))
+    sub = if maps::is_key(key_bin, vars)
+      maps::get(key_bin, vars)
+    else
+      key_atom = list_to_atom(string::trim(key))
+      if maps::is_key(key_atom, vars)
+        maps::get(key_atom, vars)
+      else
+        nil
+      end
+    end
+    if sub != nil and is_map(sub)
+      resolve_path(rest, sub)
+    else
+      "{{" ++ string::join(rest, ".") ++ "}}"
+    end
+  end
+
+  def self.resolve_path(_, _)
+    ""
+  end
+
+  def self.format_value(v) if is_list(v)
+    v
+  end
+
+  def self.format_value(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.format_value(v) if is_integer(v)
+    integer_to_list(v)
+  end
+
+  def self.format_value(v) if is_atom(v)
+    atom_to_list(v)
+  end
+
+  def self.format_value(v)
+    lists::flatten(io_lib::format("~p", [v]))
+  end
+
+  def self.ensure_list(v) if is_list(v)
+    v
+  end
+
+  def self.ensure_list(v) if is_binary(v)
+    binary_to_list(v)
+  end
+end

@@ -1,0 +1,226 @@
+# Orchestra Worker — multi-turn task execution worker
+#
+# Each Worker is an actor that:
+#   1. Prepares workspace (or reuses existing for review tasks)
+#   2. Runs the agent (via Runner protocol)
+#   3. Handles multi-turn execution up to max_turns
+#   4. Executes lifecycle hooks (before_run, after_run, review variants)
+#   5. Reports completion back to the Scheduler
+#
+# Review-feedback tasks set workspace_reuse: true and parent_id to
+# reuse the parent task's workspace directory. Review comments are
+# injected into the agent prompt automatically.
+#
+# Usage:
+#   Worker::Instance.spawn(task, config, runner, scheduler_pid, hooks)
+
+module Worker
+  actor Instance
+    expose status(), turn(), task_id(), session_id()
+
+    def initialize(task, config, runner, scheduler_pid, hooks)
+      @task = task
+      @config = config
+      @runner = runner
+      @scheduler = scheduler_pid
+      @hooks = hooks
+      @turn = 0
+      @max_turns = config.max_turns()
+      @status = :preparing_workspace
+      @session_id = nil
+      @output = ""
+      @events = []
+      @is_review = maps::get(:workspace_reuse, task, false)
+
+      task_id = maps::get(:id, @task, "unknown")
+      # For review tasks, reuse parent's workspace
+      workspace_key = if @is_review
+        maps::get(:parent_id, @task, task_id)
+      else
+        task_id
+      end
+
+      if @is_review and Workspace::exists?(config.workspace_root(), workspace_key)
+        # Reuse existing workspace — skip after_create hook
+        @workspace = ensure_list(config.workspace_root()) ++ "/" ++ Workspace::sanitize(workspace_key)
+        @status = :running
+        run_turn()
+      else
+        # Fresh workspace
+        match Workspace::prepare(config.workspace_root(), workspace_key, hooks)
+          case {path, _}
+            @workspace = path
+            @status = :running
+            run_turn()
+          case {:error, reason}
+            @status = :failed
+            Log::error("Workspace preparation failed", {task_id: task_id, reason: reason})
+            @scheduler ! {:worker_done, task_id, {:error, "workspace failed"}}
+        end
+      end
+    end
+
+    def run_turn()
+      @turn = @turn + 1
+      @status = :running
+      task_id = maps::get(:id, @task, "?")
+      Log::info("Turn started", {turn: @turn, max_turns: @max_turns, task_id: task_id})
+
+      # Run appropriate before hook
+      hook_event = if @is_review
+        :before_review_run
+      else
+        :before_run
+      end
+      # Try review-specific hook first, fall back to generic
+      if @is_review and maps::get(:before_review_run, @hooks, nil) != nil
+        Hooks::run_lifecycle(:before_review_run, @hooks, @workspace, @task, @config.hook_timeout_ms())
+      else
+        Hooks::run_lifecycle(:before_run, @hooks, @workspace, @task, @config.hook_timeout_ms())
+      end
+
+      # Build prompt
+      prompt = build_prompt()
+
+      # Run agent via runner protocol
+      runner_mod = @runner
+      if runner_mod != nil
+        runner_opts = {allowed_tools: @config.allowed_tools()}
+        erlang::apply(runner_mod, :run, [@workspace, prompt, self(), runner_opts])
+      else
+        Runner::run(@workspace, prompt, self(), {})
+      end
+    end
+
+    def build_prompt()
+      title = maps::get(:title, @task, "")
+      description = maps::get(:description, @task, "")
+      review_comments = maps::get(:review_comments, @task, [])
+
+      # Use prompt template from Config if available
+      template = @config.prompt_template()
+      base = if template != nil
+        vars = {
+          <<"task">> => {
+            <<"title">> => unicode::characters_to_binary(ensure_list(title)),
+            <<"description">> => unicode::characters_to_binary(ensure_list(description)),
+            <<"id">> => unicode::characters_to_binary(ensure_list(maps::get(:id, @task, "")))
+          },
+          <<"attempt">> => unicode::characters_to_binary(integer_to_list(@turn))
+        }
+        Workflow::render_prompt(template, vars)
+      else
+        "Task: " ++ ensure_list(title) ++ "\n" ++
+        "Description: " ++ ensure_list(description) ++ "\n" ++
+        "Turn: " ++ integer_to_list(@turn) ++ "/" ++ integer_to_list(@max_turns)
+      end
+
+      if review_comments == []
+        base
+      else
+        base ++ "\n\n--- PR Review Feedback ---\n" ++
+        "Please address the following review comments:\n\n" ++
+        format_review_comments(review_comments, 1, [])
+      end
+    end
+
+    def format_review_comments([], _n, acc)
+      lists::flatten(lists::reverse(acc))
+    end
+
+    def format_review_comments([comment, *rest], n, acc)
+      author = ensure_list(maps::get(:author, comment, maps::get(<<"author">>, comment, "reviewer")))
+      body = ensure_list(maps::get(:body, comment, maps::get(<<"body">>, comment, "")))
+      path = ensure_list(maps::get(:path, comment, maps::get(<<"path">>, comment, "")))
+
+      entry = integer_to_list(n) ++ ". "
+      entry = if path != ""
+        entry ++ "[" ++ path ++ "] "
+      else
+        entry
+      end
+      entry = entry ++ "(" ++ author ++ "): " ++ body ++ "\n"
+
+      format_review_comments(rest, n + 1, [entry, *acc])
+    end
+
+    def on_message({:agent_event, event})
+      @events = [event, *@events]
+      task_id = maps::get(:id, @task, "?")
+      # Forward to scheduler for logging/tracking
+      @scheduler ! {:worker_event, task_id, event}
+    end
+
+    def on_message({:agent_done, result})
+      @output = maps::get(:output, result, "")
+      result_status = maps::get(:status, result, :ok)
+      completed = maps::get(:completed, result, false)
+      task_id = maps::get(:id, @task, "?")
+
+      if result_status == :error and @turn < @max_turns
+        Log::warn("Turn failed, retrying", {turn: @turn, task_id: task_id})
+        run_turn()
+      elsif result_status == :ok and (not completed) and @turn < @max_turns
+        Log::info("Turn done, continuing", {turn: @turn, task_id: task_id})
+        run_turn()
+      else
+        # Run appropriate after hook
+        if @is_review and maps::get(:after_review_run, @hooks, nil) != nil
+          Hooks::run_lifecycle(:after_review_run, @hooks, @workspace, @task, @config.hook_timeout_ms())
+        else
+          Hooks::run_lifecycle(:after_run, @hooks, @workspace, @task, @config.hook_timeout_ms())
+        end
+
+        if result_status == :ok
+          @status = :done
+        else
+          @status = :failed
+        end
+        Log::info("Worker finished", {task_id: task_id, status: @status, turns: @turn})
+        @scheduler ! {:worker_done, task_id, {result_status, @output}}
+      end
+    end
+
+    def status()
+      @status
+    end
+
+    def turn()
+      @turn
+    end
+
+    def task_id()
+      maps::get(:id, @task, "unknown")
+    end
+
+    def session_id()
+      @session_id
+    end
+
+    def on_terminate(reason)
+      task_id = maps::get(:id, @task, "?")
+      Log::info("Worker shutting down", {task_id: task_id, reason: reason})
+      # Don't cleanup workspace for review tasks (parent owns it)
+      if reason != :normal and reason != :shutdown and (not @is_review)
+        workspace_key = maps::get(:parent_id, @task, task_id)
+        Workspace::cleanup(@config.workspace_root(), workspace_key)
+      end
+    end
+
+    def ensure_list(v) if is_list(v)
+      v
+    end
+
+    def ensure_list(v) if is_binary(v)
+      binary_to_list(v)
+    end
+
+    def ensure_list(v) if is_atom(v)
+      atom_to_list(v)
+    end
+
+    def ensure_list(v)
+      lists::flatten(io_lib::format("~p", [v]))
+    end
+  end
+end

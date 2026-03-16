@@ -1,0 +1,64 @@
+# Test: Workspace module
+#
+# Run: ./jet -r TestWorkspace::run examples/orchestra/TestWorkspace.jet
+
+module TestWorkspace
+  def self.run()
+    puts("=== TestWorkspace ===")
+    passed = 0
+    failed = 0
+    root = "/tmp/orchestra_test_ws"
+
+    # Clean up any leftovers from previous runs
+    Workspace::delete_dir_recursive(root)
+
+    # Test prepare (create)
+    {path1, status1} = Workspace::prepare(root, "task-1")
+    {passed, failed} = assert_equal("prepare creates workspace", status1, :created, passed, failed)
+    {passed, failed} = assert_equal("prepare returns correct path", path1, root ++ "/task-1", passed, failed)
+
+    # Test prepare (already exists)
+    {_path2, status2} = Workspace::prepare(root, "task-1")
+    {passed, failed} = assert_equal("prepare existing returns :existed", status2, :existed, passed, failed)
+
+    # Test sanitize
+    key = Workspace::sanitize("task/with special chars!")
+    {passed, failed} = assert_equal("sanitize removes specials", key, "task_with_special_chars_", passed, failed)
+
+    # Test exists?
+    {passed, failed} = assert_equal("exists? returns true", Workspace::exists?(root, "task-1"), true, passed, failed)
+    {passed, failed} = assert_equal("exists? returns false", Workspace::exists?(root, "nonexistent"), false, passed, failed)
+
+    # Test list
+    Workspace::prepare(root, "task-2")
+    entries = Workspace::list(root)
+    {passed, failed} = assert_equal("list returns 2 entries", erlang::length(entries), 2, passed, failed)
+
+    # Test cleanup
+    Workspace::cleanup(root, "task-1")
+    {passed, failed} = assert_equal("cleanup removes workspace", Workspace::exists?(root, "task-1"), false, passed, failed)
+
+    # Test sanitize prevents path traversal (../../etc becomes .._.._etc — dots and dashes preserved)
+    safe_key = Workspace::sanitize("../../etc")
+    {passed, failed} = assert_equal("sanitize neutralizes traversal", safe_key, ".._.._etc", passed, failed)
+
+    # Final cleanup
+    Workspace::cleanup(root, "task-2")
+    file::del_dir(root)
+
+    puts("\n~p passed, ~p failed", [passed, failed])
+    if failed > 0
+      erlang::halt(1)
+    end
+  end
+
+  def self.assert_equal(label, actual, expected, passed, failed)
+    if actual == expected
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s (got ~p, expected ~p)", [label, actual, expected])
+      {passed, failed + 1}
+    end
+  end
+end

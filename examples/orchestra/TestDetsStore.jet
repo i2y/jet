@@ -1,0 +1,225 @@
+# Test: DetsStore per-task persistence + bulk compatibility
+#
+# Run: ./jet -r TestDetsStore::run examples/orchestra/TestDetsStore.jet
+
+module TestDetsStore
+  def self.run()
+    puts("=== TestDetsStore ===")
+    passed = 0
+    failed = 0
+    root = "/tmp/orchestra_test_dets"
+
+    # Cleanup from previous runs
+    Workspace::delete_dir_recursive(root)
+
+    # --- Test per-task round-trip ---
+    task_data = {status: :claimed, count: 0, task: {id: "t-1", title: "Fix bug", description: "desc"}, output: nil}
+    save_result = DetsStore::save_task(root, "t-1", task_data)
+    {passed, failed} = assert_equal("save_task t-1", save_result, :ok, passed, failed)
+
+    {passed, failed} = test_load_task(root, passed, failed)
+
+    # Save a second task
+    task_data2 = {status: :done_ok, count: 1, task: {id: "t-2", title: "Add feat"}, output: "done!"}
+    DetsStore::save_task(root, "t-2", task_data2)
+
+    # --- Test list_task_ids ---
+    ids = DetsStore::list_task_ids(root)
+    {passed, failed} = assert_true("list_task_ids has t-1", lists::member("t-1", ids), passed, failed)
+    {passed, failed} = assert_true("list_task_ids has t-2", lists::member("t-2", ids), passed, failed)
+    {passed, failed} = assert_equal("list_task_ids count", erlang::length(ids), 2, passed, failed)
+
+    # --- Test delete_task ---
+    DetsStore::delete_task(root, "t-1")
+    {passed, failed} = test_delete_task(root, passed, failed)
+
+    ids2 = DetsStore::list_task_ids(root)
+    {passed, failed} = assert_equal("list after delete", erlang::length(ids2), 1, passed, failed)
+
+    # --- Test meta round-trip ---
+    DetsStore::save_meta(root, {version: 1, claimed: ["t-2", "t-3"]})
+    {passed, failed} = test_load_meta(root, passed, failed)
+
+    # --- Test review round-trip ---
+    DetsStore::save_review(root, "parent-1", {pr_number: 42, round: 2})
+    DetsStore::save_meta(root, {version: 1, claimed: ["t-2"]})
+    {passed, failed} = test_review_roundtrip(root, passed, failed)
+
+    DetsStore::delete_review(root, "parent-1")
+
+    # --- Test bulk save/load compatibility ---
+    DetsStore::delete(root)
+    {passed, failed} = test_bulk_roundtrip(root, passed, failed)
+
+    # --- Test supports_per_task? ---
+    {passed, failed} = assert_true("DetsStore supports_per_task", DetsStore::supports_per_task?(), passed, failed)
+    {passed, failed} = assert_true("FileStore not supports_per_task", (not FileStore::supports_per_task?()), passed, failed)
+    {passed, failed} = assert_true("Store not supports_per_task", (not Store::supports_per_task?()), passed, failed)
+
+    # --- Test Scheduler integration with DetsStore ---
+    DetsStore::delete(root)
+    {passed, failed} = test_scheduler_integration(root, passed, failed)
+
+    puts("\n~p passed, ~p failed", [passed, failed])
+    if failed > 0
+      erlang::halt(1)
+    end
+  end
+
+  def self.test_load_task(root, passed, failed)
+    match DetsStore::load_task(root, "t-1")
+      case {:ok, loaded}
+        {p, f} = assert_equal("load_task status", maps::get(:status, loaded), :claimed, passed, failed)
+        {p2, f2} = assert_equal("load_task count", maps::get(:count, loaded), 0, p, f)
+        loaded_task = maps::get(:task, loaded)
+        assert_equal("load_task title", maps::get(:title, loaded_task), "Fix bug", p2, f2)
+      case {:error, err}
+        puts("  FAIL: load_task returned error: ~p", [err])
+        {passed, failed + 1}
+    end
+  end
+
+  def self.test_delete_task(root, passed, failed)
+    match DetsStore::load_task(root, "t-1")
+      case {:error, :not_found}
+        assert_true("delete_task t-1 gone", true, passed, failed)
+      case _
+        puts("  FAIL: t-1 still exists after delete")
+        {passed, failed + 1}
+    end
+  end
+
+  def self.test_load_meta(root, passed, failed)
+    match DetsStore::load_meta(root)
+      case {:ok, loaded_m}
+        {p, f} = assert_equal("meta version", maps::get(:version, loaded_m), 1, passed, failed)
+        assert_equal("meta claimed count", erlang::length(maps::get(:claimed, loaded_m)), 2, p, f)
+      case {:error, err}
+        puts("  FAIL: load_meta error: ~p", [err])
+        {passed, failed + 1}
+    end
+  end
+
+  def self.test_review_roundtrip(root, passed, failed)
+    match DetsStore::load(root)
+      case {:ok, st}
+        rp = maps::get(:review_pending, st)
+        {p, f} = assert_true("review exists", maps::is_key("parent-1", rp), passed, failed)
+        {pr, rd} = maps::get("parent-1", rp)
+        {p2, f2} = assert_equal("review pr_number", pr, 42, p, f)
+        assert_equal("review round", rd, 2, p2, f2)
+      case {:error, err}
+        puts("  FAIL: load for review check: ~p", [err])
+        {passed, failed + 1}
+    end
+  end
+
+  def self.test_bulk_roundtrip(root, passed, failed)
+    bulk_state = {
+      claimed: ["b-1", "b-2", "b-3"],
+      retry_attempts: maps::put("b-1", {0, {id: "b-1", title: "Bulk 1"}},
+                       maps::put("b-2", {2, {id: "b-2", title: "Bulk 2"}}, {})),
+      done: maps::put("b-3", true, {}),
+      completed: [{"b-3", :ok, "bulk done"}],
+      review_pending: {}
+    }
+
+    save_res = DetsStore::save(root, bulk_state)
+    {p, f} = assert_equal("bulk save", save_res, :ok, passed, failed)
+
+    match DetsStore::load(root)
+      case {:ok, loaded}
+        {p2, f2} = assert_equal("bulk claimed count", erlang::length(maps::get(:claimed, loaded)), 3, p, f)
+        {p3, f3} = assert_true("b-1 in claimed", lists::member("b-1", maps::get(:claimed, loaded)), p2, f2)
+
+        ra = maps::get(:retry_attempts, loaded)
+        {cnt, tsk} = maps::get("b-2", ra)
+        {p4, f4} = assert_equal("bulk retry count", cnt, 2, p3, f3)
+        {p5, f5} = assert_equal("bulk task title", maps::get(:title, tsk), "Bulk 2", p4, f4)
+
+        dn = maps::get(:done, loaded)
+        {p6, f6} = assert_true("b-3 in done", maps::get("b-3", dn, false), p5, f5)
+
+        compl = maps::get(:completed, loaded)
+        assert_equal("bulk completed count", erlang::length(compl), 1, p6, f6)
+      case {:error, err}
+        puts("  FAIL: bulk load error: ~p", [err])
+        {p, f + 1}
+    end
+  end
+
+  def self.test_scheduler_integration(root, passed, failed)
+    config = Config::Settings.new({
+      mode: :push,
+      max_concurrent: 2,
+      max_turns: 1,
+      max_retries: 0,
+      workspace_root: root
+    })
+
+    # Start scheduler with DetsStore, submit tasks
+    orch1 = Scheduler::Instance.spawn(config, nil, nil, {store: :DetsStore})
+    orch1.submit({id: "d-1", title: "Dets task 1", description: "First"})
+    orch1.submit({id: "d-2", title: "Dets task 2", description: "Second"})
+    timer::sleep(1000)
+
+    # Verify tasks completed
+    completed1 = orch1.completed()
+    {p, f} = assert_true("orch1 completed tasks", erlang::length(completed1) > 0, passed, failed)
+
+    # Simulate crash: kill scheduler
+    erlang::exit(orch1, :kill)
+    timer::sleep(200)
+
+    # Start a NEW scheduler with same config + DetsStore — should restore state
+    orch2 = Scheduler::Instance.spawn(config, nil, nil, {store: :DetsStore})
+    timer::sleep(500)
+
+    status2 = orch2.status()
+    claimed2 = maps::get(:claimed, status2)
+    {p2, f2} = assert_true("dets restored claimed > 0", claimed2 > 0, p, f)
+
+    completed2 = orch2.completed()
+    {p3, f3} = assert_true("dets restored completed > 0", erlang::length(completed2) > 0, p2, f2)
+
+    cids = extract_ids(completed2, [])
+    {p4, f4} = assert_true("d-1 in completed", lists::member("d-1", cids), p3, f3)
+
+    # Clean shutdown
+    if erlang::is_process_alive(orch2)
+      gen_server::stop(orch2)
+    end
+    timer::sleep(100)
+    Workspace::delete_dir_recursive(root)
+
+    {p4, f4}
+  end
+
+  def self.extract_ids([], acc)
+    acc
+  end
+
+  def self.extract_ids([{id, _status, _output}, *rest], acc)
+    extract_ids(rest, [id, *acc])
+  end
+
+  def self.assert_equal(label, actual, expected, passed, failed)
+    if actual == expected
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s (got ~p, expected ~p)", [label, actual, expected])
+      {passed, failed + 1}
+    end
+  end
+
+  def self.assert_true(label, condition, passed, failed)
+    if condition
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s", [label])
+      {passed, failed + 1}
+    end
+  end
+end

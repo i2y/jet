@@ -15,11 +15,12 @@ module jet_list
     include Enumerable
 
     def initialize(list)
-      {list: list}
+      @list = list
+      self
     end
 
     def reduce(acc, func)
-      lists::foldl(func, acc, @list)
+      lists::foldl({|item, a| func.(a, item)}, acc, @list)
     end
 
     def each(func)

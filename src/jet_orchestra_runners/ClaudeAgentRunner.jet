@@ -1,0 +1,59 @@
+# Orchestra ClaudeAgentRunner — runs Claude Agent SDK via PythonBridge
+#
+# Implements the Runner protocol using Claude Agent SDK through erlport.
+# Requires Python with anthropic[agent] installed.
+#
+# Usage (via Scheduler):
+#   PythonBridge::start("path/to/python")
+#   Scheduler::Instance.spawn(config, :MySource, :ClaudeAgentRunner, {})
+
+module ClaudeAgentRunner
+  def self.run(workspace, prompt, callback_pid, opts)
+    if PythonBridge::alive?()
+      model = maps::get(:model, opts, "claude-sonnet-4-20250514")
+      args = [
+        erlang::list_to_binary(workspace),
+        erlang::list_to_binary(prompt),
+        erlang::list_to_binary(model)
+      ]
+      PythonBridge::call_async(:claude_agent_bridge, :run_agent, args, erlang::spawn(do ||
+        ClaudeAgentRunner::relay_loop(callback_pid)
+      end))
+      :ok
+    else
+      Log::error("PythonBridge not started", {})
+      callback_pid ! {:agent_done, {status: :error, output: "PythonBridge not started"}}
+      {:error, :python_not_started}
+    end
+  end
+
+  def self.run(workspace, prompt, callback_pid)
+    run(workspace, prompt, callback_pid, {})
+  end
+
+  def self.stop(workspace)
+    # Send stop signal via PythonBridge
+    if PythonBridge::alive?()
+      PythonBridge::call_sync(:claude_agent_bridge, :stop_agent, [erlang::list_to_binary(workspace)])
+    end
+    :ok
+  end
+
+  # Relay loop — forwards Python results to the original callback_pid
+  def self.relay_loop(callback_pid)
+    receive
+      case {:python_result, result}
+        match result
+          case {:ok, output_bin}
+            output = binary_to_list(output_bin)
+            callback_pid ! {:agent_done, {status: :ok, output: output, completed: true}}
+          case {:error, reason}
+            callback_pid ! {:agent_done, {status: :error, output: lists::flatten(io_lib::format("~p", [reason]))}}
+          case other
+            callback_pid ! {:agent_done, {status: :ok, output: lists::flatten(io_lib::format("~p", [other])), completed: true}}
+        end
+    after 600000
+      callback_pid ! {:agent_done, {status: :error, output: "timeout waiting for Python agent"}}
+    end
+  end
+end

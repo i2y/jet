@@ -1,0 +1,6 @@
+# LlmProviderのモック実装 — テスト用（APIを叩かない）
+module MockLlmProvider
+  def self.chat(system_prompt, user_message)
+    "[Mock] system=" ++ system_prompt ++ " user=" ++ user_message
+  end
+end

@@ -1,0 +1,7 @@
+# Platform wires needs to real implementations.
+# activate_Main() stores {Console => StandardConsole} in process dictionary.
+module DemoPlatform
+  platform Main
+    provide Console with StandardConsole
+  end
+end

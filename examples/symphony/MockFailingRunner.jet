@@ -1,0 +1,13 @@
+# Mock runner that always fails
+# Used by RetryDemo to verify exponential backoff
+
+module MockFailingRunner
+  def self.run(_workspace, _prompt, callback_pid)
+    callback_pid ! {:agent_done, {status: :error, output: "[mock] simulated failure", completed: false}}
+    :ok
+  end
+
+  def self.stop(_workspace)
+    :ok
+  end
+end

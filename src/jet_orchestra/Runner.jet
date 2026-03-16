@@ -1,0 +1,29 @@
+# Orchestra Runner — agent runner protocol definition
+#
+# Runner modules must implement:
+#   run(workspace, prompt, callback_pid, opts) → :ok
+#   stop(workspace) → :ok
+#
+# The runner sends messages to callback_pid:
+#   {:agent_event, event_map}   — streaming events
+#   {:agent_done, result_map}   — completion
+#     result_map: {status: :ok|:error, output: string, completed: bool}
+#
+# This module provides a default mock implementation for testing.
+
+module Runner
+  # Mock runner — immediately completes with success
+  def self.run(_workspace, _prompt, callback_pid, _opts)
+    callback_pid ! {:agent_done, {status: :ok, output: "[mock] done", completed: true}}
+    :ok
+  end
+
+  def self.run(_workspace, _prompt, callback_pid)
+    callback_pid ! {:agent_done, {status: :ok, output: "[mock] done", completed: true}}
+    :ok
+  end
+
+  def self.stop(_workspace)
+    :ok
+  end
+end

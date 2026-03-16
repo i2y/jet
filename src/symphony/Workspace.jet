@@ -1,0 +1,175 @@
+# Symphony Workspace — manages per-issue working directories
+
+module Workspace
+  # Prepare a workspace directory for an issue
+  # Returns {path, :created | :existed}
+  def self.prepare(root, issue_identifier)
+    key = PathSafety::sanitize(issue_identifier)
+    path = ensure_list(root) ++ "/" ++ key
+    match filelib::ensure_dir(path ++ "/dummy")
+      case :ok
+        match file::make_dir(path)
+          case :ok
+            {path, :created}
+          case {:error, :eexist}
+            {path, :existed}
+          case {:error, reason}
+            {:error, reason}
+        end
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  # Prepare with hooks (3-arg version)
+  def self.prepare(root, issue_identifier, config)
+    result = prepare(root, issue_identifier)
+    match result
+      case {path, :created}
+        hook = config.after_create_hook()
+        if hook != nil
+          run_hook(hook, path)
+        end
+        {path, :created}
+      case other
+        other
+    end
+  end
+
+  # Clean up with hooks (3-arg version)
+  def self.cleanup(root, issue_identifier, config)
+    key = PathSafety::sanitize(issue_identifier)
+    path = ensure_list(root) ++ "/" ++ key
+    hook = config.before_remove_hook()
+    if hook != nil
+      run_hook(hook, path)
+    end
+    cleanup(root, issue_identifier)
+  end
+
+  # Run before_run hook with issue context
+  def self.run_before_run(path, issue, config)
+    hook = config.before_run_hook()
+    if hook != nil
+      run_hook_with_env(hook, path, issue)
+    else
+      :ok
+    end
+  end
+
+  # Run after_run hook with issue context
+  def self.run_after_run(path, issue, config)
+    hook = config.after_run_hook()
+    if hook != nil
+      run_hook_with_env(hook, path, issue)
+    else
+      :ok
+    end
+  end
+
+  # Run a shell hook command in a workspace directory
+  def self.run_hook(hook_cmd, path)
+    cmd = "cd " ++ ensure_list(path) ++ " && " ++ ensure_list(hook_cmd)
+    os::cmd(cmd)
+  end
+
+  # Run a hook with issue context as environment variables
+  def self.run_hook_with_env(hook_cmd, path, issue)
+    id = ensure_list(maps::get(:id, issue, ""))
+    identifier = ensure_list(maps::get(:identifier, issue, ""))
+    title = ensure_list(maps::get(:title, issue, ""))
+    number = ensure_list(to_string(maps::get(:number, issue, maps::get(:id, issue, ""))))
+    env_prefix = "export SYMPHONY_ISSUE_ID=" ++ shell_escape(id) ++ "; " ++
+                 "export SYMPHONY_ISSUE_IDENTIFIER=" ++ shell_escape(identifier) ++ "; " ++
+                 "export SYMPHONY_ISSUE_TITLE=" ++ shell_escape(title) ++ "; " ++
+                 "export SYMPHONY_ISSUE_NUMBER=" ++ shell_escape(number) ++ "; "
+    cmd = env_prefix ++ "cd " ++ ensure_list(path) ++ " && " ++ ensure_list(hook_cmd)
+    os::cmd(cmd)
+  end
+
+  def self.shell_escape(str)
+    escaped = re::replace(ensure_list(str), "'", "'\\''", [:global, {:return, :list}])
+    "'" ++ escaped ++ "'"
+  end
+
+  def self.to_string(v) if is_integer(v)
+    integer_to_list(v)
+  end
+
+  def self.to_string(v) if is_list(v)
+    v
+  end
+
+  def self.to_string(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.to_string(v)
+    lists::flatten(io_lib::format("~p", [v]))
+  end
+
+  # Clean up a workspace directory
+  def self.cleanup(root, issue_identifier)
+    key = PathSafety::sanitize(issue_identifier)
+    path = ensure_list(root) ++ "/" ++ key
+    # Validate path safety before deleting
+    if PathSafety::validate_path(path, root)
+      delete_dir_recursive(path)
+    else
+      {:error, :path_traversal}
+    end
+  end
+
+  # List all workspace directories
+  def self.list(root)
+    root_str = ensure_list(root)
+    match file::list_dir(root_str)
+      case {:ok, entries}
+        lists::map(do |e|
+          ensure_list(e)
+        end, entries)
+      case {:error, _}
+        []
+    end
+  end
+
+  # Check if a workspace exists
+  def self.exists?(root, issue_identifier)
+    key = PathSafety::sanitize(issue_identifier)
+    path = ensure_list(root) ++ "/" ++ key
+    filelib::is_dir(path)
+  end
+
+  # Recursively delete a directory
+  def self.delete_dir_recursive(path)
+    path_str = ensure_list(path)
+    match file::list_dir(path_str)
+      case {:ok, entries}
+        lists::foreach(do |entry|
+          full = path_str ++ "/" ++ ensure_list(entry)
+          if filelib::is_dir(full)
+            delete_dir_recursive(full)
+          else
+            file::delete(full)
+          end
+        end, entries)
+        file::del_dir(path_str)
+      case {:error, :enoent}
+        :ok
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  def self.ensure_list(v) if is_list(v)
+    v
+  end
+
+  def self.ensure_list(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.ensure_list(v) if is_atom(v)
+    atom_to_list(v)
+  end
+end

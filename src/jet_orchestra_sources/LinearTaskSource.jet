@@ -1,0 +1,143 @@
+# Orchestra LinearTaskSource — Linear as task source
+#
+# Implements the TaskSource protocol for Linear (linear.app).
+# Requires LINEAR_API_KEY environment variable.
+#
+# Config:
+#   linear_api_key: "lin_api_..." (or set LINEAR_API_KEY env)
+#   linear_team_id: "team-id" (optional)
+#   linear_label: "orchestra" (default)
+
+module LinearTaskSource
+  def self.fetch_tasks(config)
+    api_key = maps::get(:linear_api_key, config, os::getenv("LINEAR_API_KEY"))
+    team_id = maps::get(:linear_team_id, config, nil)
+    label = maps::get(:linear_label, config, "orchestra")
+    if api_key == false or api_key == nil
+      {:error, "LINEAR_API_KEY not set"}
+    else
+      query = build_issues_query(team_id, label)
+      graphql_request(api_key, query)
+    end
+  end
+
+  def self.update_task(task_id, status, result)
+    api_key = os::getenv("LINEAR_API_KEY")
+    if api_key == false or api_key == nil
+      {:error, "LINEAR_API_KEY not set"}
+    else
+      comment_body = format_result(status, result)
+      mutation = build_comment_mutation(task_id, comment_body)
+      graphql_request(api_key, mutation)
+    end
+  end
+
+  def self.fetch_task_state(task_id, config)
+    api_key = maps::get(:linear_api_key, config, os::getenv("LINEAR_API_KEY"))
+    if api_key == false or api_key == nil
+      :active
+    else
+      query = "{ issue(id: \"" ++ ensure_list(task_id) ++ "\") { state { type } } }"
+      match graphql_request(api_key, query)
+        case {:ok, parsed} if is_map(parsed)
+          data = maps::get(<<"data">>, parsed, {})
+          issue_data = maps::get(<<"issue">>, data, {})
+          state = maps::get(<<"state">>, issue_data, {})
+          state_type = maps::get(<<"type">>, state, <<"active">>)
+          if state_type == <<"done">> or state_type == <<"canceled">> or state_type == <<"completed">>
+            :terminal
+          else
+            :active
+          end
+        case _
+          :active
+      end
+    end
+  end
+
+  def self.graphql_request(api_key, query)
+    jet_http_ffi::ensure_started()
+    url = "https://api.linear.app/graphql"
+    headers = [
+      {<<"authorization">>, erlang::list_to_binary(ensure_list(api_key))},
+      {<<"content-type">>, <<"application/json">>}
+    ]
+    body = jet_json_ffi::encode({<<"query">> => erlang::list_to_binary(query)})
+    match jet_http_ffi::post(url, headers, body)
+      case {:ok, response}
+        resp_status = maps::get(:status, response)
+        if resp_status >= 200 and resp_status < 300
+          match jet_json_ffi::decode(maps::get(:body, response))
+            case {:ok, parsed}
+              extract_tasks(parsed)
+            case {:error, reason}
+              {:error, {:json_decode, reason}}
+          end
+        else
+          {:error, {:api_error, resp_status}}
+        end
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  def self.build_issues_query(team_id, label)
+    filter = if team_id != nil
+      "filter: { team: { id: { eq: \"" ++ ensure_list(team_id) ++ "\" } }, labels: { name: { eq: \"" ++ ensure_list(label) ++ "\" } }, state: { type: { eq: \"triage\" } } }"
+    else
+      "filter: { labels: { name: { eq: \"" ++ ensure_list(label) ++ "\" } }, state: { type: { eq: \"triage\" } } }"
+    end
+    "{ issues(" ++ filter ++ ", first: 50) { nodes { id identifier title description url labels { nodes { name } } } } }"
+  end
+
+  def self.build_comment_mutation(task_id, body)
+    "mutation { commentCreate(input: { issueId: \"" ++ ensure_list(task_id) ++ "\", body: \"" ++ escape_graphql(body) ++ "\" }) { success } }"
+  end
+
+  def self.extract_tasks(parsed)
+    data = maps::get(<<"data">>, parsed, {})
+    issues_data = maps::get(<<"issues">>, data, {})
+    nodes = maps::get(<<"nodes">>, issues_data, [])
+    lists::map(do |node|
+      labels_data = maps::get(<<"labels">>, node, {})
+      label_nodes = maps::get(<<"nodes">>, labels_data, [])
+      label_names = lists::map(do |l|
+        binary_to_list(maps::get(<<"name">>, l, <<"">>))
+      end, label_nodes)
+      {id: binary_to_list(maps::get(<<"id">>, node)),
+       identifier: binary_to_list(maps::get(<<"identifier">>, node, <<"">>)),
+       title: binary_to_list(maps::get(<<"title">>, node, <<"">>)),
+       description: binary_to_list(maps::get(<<"description">>, node, <<"">>)),
+       url: binary_to_list(maps::get(<<"url">>, node, <<"">>)),
+       labels: label_names}
+    end, nodes)
+  end
+
+  def self.format_result(status, result)
+    output = maps::get(:output, result, "")
+    match status
+      case :ok
+        "Orchestra completed successfully.\n\n" ++ ensure_list(output)
+      case :error
+        "Orchestra encountered an error.\n\n" ++ ensure_list(output)
+    end
+  end
+
+  def self.escape_graphql(str)
+    s1 = re::replace(ensure_list(str), "\\\\", "\\\\\\\\", [:global, {:return, :list}])
+    s2 = re::replace(s1, "\"", "\\\\\"", [:global, {:return, :list}])
+    re::replace(s2, "\n", "\\\\n", [:global, {:return, :list}])
+  end
+
+  def self.ensure_list(v) if is_list(v)
+    v
+  end
+
+  def self.ensure_list(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.ensure_list(v) if is_atom(v)
+    atom_to_list(v)
+  end
+end

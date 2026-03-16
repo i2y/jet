@@ -3,7 +3,10 @@ module test_basic
     include Enumerable
 
     def initialize(x, y, z)
-      {x: x, y: y, z: z}
+      @x = x
+      @y = y
+      @z = z
+      self
     end
 
     def fafa()
@@ -26,6 +29,8 @@ module test_basic
       # TODO
       func.(func.(func.(acc, @x), @y), @z)
     end
+
+    # Note: reduce callback is (acc, item) order — Ruby convention
   end
 
   test
@@ -99,7 +104,7 @@ module test_basic
 
   class N2
     def initialize()
-      {}
+      self
     end
 
     def test()
@@ -115,8 +120,7 @@ module test_basic
     end
   end
 
-  class N2Actor
-    meta Actor
+  actor N2Actor
     def initialize()
       erlang::put(:x, 3)
     end
@@ -127,8 +131,7 @@ module test_basic
     end
   end
 
-  class N3Actor
-    meta Actor
+  actor N3Actor
     def initialize()
       erlang::put(:x, 3)
     end
@@ -143,11 +146,12 @@ module test_basic
     include Enumerable
 
     def initialize(list)
-      {list: list}
+      @list = list
+      self
     end
 
     def reduce(acc, func)
-      lists::foldl(func, acc, @list)
+      lists::foldl({|item, a| func.(a, item)}, acc, @list)
     end
   end
 

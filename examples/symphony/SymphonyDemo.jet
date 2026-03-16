@@ -1,0 +1,124 @@
+# Symphony Demo — Orchestrator + Worker with mock agent
+#
+# Demonstrates the full Symphony pipeline without external dependencies:
+#   1. Orchestrator polls for issues (from mock tracker)
+#   2. Worker prepares workspace and runs agent
+#   3. Agent completes, results are tracked
+#
+# Run:
+#   ./jet examples/symphony/MockTracker.jet
+#   ./jet -r SymphonyDemo::run examples/symphony/SymphonyDemo.jet
+#   ./jet -r SymphonyDemo::workflow_demo examples/symphony/SymphonyDemo.jet
+#   ./jet -r SymphonyDemo::workspace_demo examples/symphony/SymphonyDemo.jet
+
+module SymphonyDemo
+  # --- Demo: Basic orchestration with mock tracker + mock agent runner ---
+  def self.run()
+    puts("=== Symphony Demo ===\n")
+
+    config = Config::new({
+      poll_interval_ms: 500,
+      max_turns: 2,
+      max_concurrent: 2,
+      max_retries: 1,
+      retry_delay_ms: 200,
+      workspace_root: "/tmp/symphony_demo",
+      agent_runner: nil,
+      tracker: :MockTracker
+    })
+
+    puts("--- Starting Orchestrator ---")
+    orch = Orchestrator::Instance.spawn(config)
+
+    # Wait for the orchestrator to poll, dispatch, and complete
+    timer::sleep(2000)
+
+    status = orch.status()
+    puts("\n--- Orchestrator Status ---")
+    puts("  Running:   ~p", [maps::get(:running, status)])
+    puts("  Claimed:   ~p", [maps::get(:claimed, status)])
+    puts("  Completed: ~p", [maps::get(:completed, status)])
+
+    completed = orch.completed()
+    puts("\n--- Completed Issues ---")
+    print_completed(completed)
+
+    puts("\n--- Stopping ---")
+    gen_server::stop(orch)
+    timer::sleep(100)
+    puts("\n=== Done ===")
+  end
+
+  # --- Demo: Workflow template parsing ---
+  def self.workflow_demo()
+    puts("=== Workflow Demo ===\n")
+
+    # Load the sample WORKFLOW.md
+    path = "examples/symphony/WORKFLOW.md"
+    puts("Loading workflow from: ~s", [path])
+
+    match Workflow::load(path)
+      case {:ok, config, template}
+        puts("\n--- Workflow Config ---")
+        puts("~p", [config])
+
+        puts("\n--- Raw Template ---")
+        puts(template)
+
+        # Render with sample variables
+        vars = {
+          <<"issue">> => {
+            <<"title">> => <<"Fix login button">>,
+            <<"description">> => <<"The login button does not respond on mobile devices">>
+          },
+          <<"attempt">> => <<"2">>
+        }
+
+        rendered = Workflow::render_prompt(template, vars)
+        puts("\n--- Rendered Prompt ---")
+        puts(rendered)
+
+      case {:error, reason}
+        puts("Error loading workflow: ~p", [reason])
+    end
+
+    puts("\n=== Done ===")
+  end
+
+  # --- Demo: Workspace management ---
+  def self.workspace_demo()
+    puts("=== Workspace Demo ===\n")
+    root = "/tmp/symphony_ws_demo"
+
+    # Prepare workspaces
+    {path1, status1} = Workspace::prepare(root, "PROJ-1")
+    puts("Workspace 1: ~s (~p)", [path1, status1])
+
+    {path2, status2} = Workspace::prepare(root, "PROJ-2/with special chars!")
+    puts("Workspace 2: ~s (~p)", [path2, status2])
+
+    # List
+    entries = Workspace::list(root)
+    puts("Workspaces: ~p", [entries])
+
+    # Check existence
+    puts("PROJ-1 exists? ~p", [Workspace::exists?(root, "PROJ-1")])
+
+    # Cleanup
+    Workspace::cleanup(root, "PROJ-1")
+    Workspace::cleanup(root, "PROJ-2/with special chars!")
+    file::del_dir(root)
+
+    puts("\n=== Done ===")
+  end
+
+  # Helper to print completed list
+  def self.print_completed([])
+    :ok
+  end
+
+  def self.print_completed([{id, status, output}, *rest])
+    puts("  ~s: ~p — ~s", [id, status, output])
+    print_completed(rest)
+  end
+end

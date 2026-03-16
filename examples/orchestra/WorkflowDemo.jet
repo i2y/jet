@@ -1,0 +1,55 @@
+# WorkflowDemo — load config + hooks + prompt template from WORKFLOW.md
+#
+# Run: ./jet -r WorkflowDemo::run examples/orchestra/WorkflowDemo.jet
+
+module WorkflowDemo
+  def self.run()
+    puts("=== Workflow Demo ===\n")
+
+    # Load everything from WORKFLOW.md
+    match Config::from_workflow("examples/orchestra/WORKFLOW.md")
+      case {:error, reason}
+        puts("Error loading workflow: ~p", [reason])
+      case config
+        puts("Config loaded from WORKFLOW.md:")
+        puts("  mode:           ~p", [config.mode()])
+        puts("  max_turns:      ~p", [config.max_turns()])
+        puts("  max_concurrent: ~p", [config.max_concurrent()])
+        puts("  workspace_root: ~s", [config.workspace_root()])
+        puts("  hook_timeout:   ~pms", [config.hook_timeout_ms()])
+        puts("  review_rounds:  ~p", [config.max_review_rounds()])
+
+        puts("\nHooks from config:")
+        hooks = config.hooks()
+        print_hooks(maps::to_list(hooks))
+
+        puts("\nPrompt template:")
+        template = config.prompt_template()
+        if template != nil
+          # Render with sample variables
+          vars = {
+            <<"task">> => {
+              <<"title">> => <<"Fix login page">>,
+              <<"description">> => <<"The login button does not work on mobile">>
+            },
+            <<"attempt">> => <<"1">>
+          }
+          rendered = Workflow::render_prompt(template, vars)
+          puts(rendered)
+        else
+          puts("  (none)")
+        end
+    end
+
+    puts("\n=== Done ===")
+  end
+
+  def self.print_hooks([])
+    :ok
+  end
+
+  def self.print_hooks([{key, val}, *rest])
+    puts("  ~p: ~s", [key, val])
+    print_hooks(rest)
+  end
+end

@@ -1,11 +1,147 @@
 module Kernel
+  def self.puts(msg)
+    io::format("~s~n", [msg])
+  end
+
+  def self.puts(format, args)
+    io::format(format ++ "~n", args)
+  end
+
+  def self.pid(name)
+    erlang::whereis(name)
+  end
+
+  def self.kill(name)
+    erlang::exit(erlang::whereis(name), :kill)
+  end
+
+  # Process monitoring
+  def self.monitor(target)
+    erlang::monitor(:process, target)
+  end
+
+  def self.demonitor(ref)
+    erlang::demonitor(ref)
+  end
+
+  def self.link(target)
+    erlang::link(target)
+  end
+
+  def self.unlink(target)
+    erlang::unlink(target)
+  end
+
+  def self.trap_exit()
+    erlang::process_flag(:trap_exit, true)
+  end
+
+  # Timer support for actors
+  def self.send_after(time, message)
+    erlang::send_after(time, erlang::self(), message)
+  end
+
+  def self.send_after(time, target, message)
+    erlang::send_after(time, target, message)
+  end
+
+  def self.send_interval(time, message)
+    {:ok, ref} = timer::send_interval(time, message)
+    ref
+  end
+
+  def self.send_interval(time, target, message)
+    {:ok, ref} = timer::send_interval(time, target, message)
+    ref
+  end
+
+  def self.cancel_timer(ref)
+    erlang::cancel_timer(ref)
+  end
+
+  # Process registry lookup (local then global)
+  def self.find(name)
+    local = erlang::whereis(name)
+    if local == :undefined
+      global::whereis_name(name)
+    else
+      local
+    end
+  end
+
+  def self.find_global(name)
+    global::whereis_name(name)
+  end
+
+  # --- Erlang BIF wrappers (for use in actor methods) ---
+
+  def self.element(n, tuple)
+    erlang::element(n, tuple)
+  end
+
+  def self.length(list)
+    erlang::length(list)
+  end
+
+  def self.hd(list)
+    erlang::hd(list)
+  end
+
+  def self.tl(list)
+    erlang::tl(list)
+  end
+
+  def self.integer_to_list(n)
+    erlang::integer_to_list(n)
+  end
+
+  def self.list_to_binary(list)
+    erlang::list_to_binary(list)
+  end
+
+  def self.binary_to_list(bin)
+    erlang::binary_to_list(bin)
+  end
+
+  def self.atom_to_list(atom)
+    erlang::atom_to_list(atom)
+  end
+
+  def self.list_to_atom(list)
+    erlang::list_to_atom(list)
+  end
+
+  def self.list_to_existing_atom(list)
+    erlang::list_to_existing_atom(list)
+  end
+
+  def self.float_to_list(f)
+    erlang::float_to_list(f)
+  end
+
+  def self.list_to_float(list)
+    erlang::list_to_float(list)
+  end
+
+  def self.list_to_integer(list)
+    erlang::list_to_integer(list)
+  end
+
+  def self.list_to_tuple(list)
+    erlang::list_to_tuple(list)
+  end
+
+  def self.tuple_to_list(tuple)
+    erlang::tuple_to_list(tuple)
+  end
+
   def display()
     {_, _, state} = self
     io::format("~p~n", [state])
   end
 
-  def send_to(actor)
-    actor ! self
+  def send_to(target)
+    target ! self
   end
 
   def spawn(f)
@@ -75,7 +211,8 @@ module Kernel
 
   class Future
     def initialize(result_of_async_call)
-      {key: result_of_async_call}
+      @key = result_of_async_call
+      self
     end
 
     def await()
@@ -89,7 +226,8 @@ module Kernel
 
   class Caster
     def initialize(instance_of_gen_server)
-      {pid: instance_of_gen_server}
+      @pid = instance_of_gen_server
+      self
     end
 
     def method_missing(method_name, args)
@@ -111,7 +249,8 @@ module Kernel
 
   class AsyncCaller
     def initialize(instance_of_gen_server)
-      {pid: instance_of_gen_server}
+      @pid = instance_of_gen_server
+      self
     end
 
     def method_missing(method_name, args)

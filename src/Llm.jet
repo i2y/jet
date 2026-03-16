@@ -1,0 +1,169 @@
+# LLM Library — Multi-provider chat, streaming, and tool use
+#
+# Usage:
+#   # Simple chat
+#   Llm::chat(:claude, [{:user, "Hello"}], {api_key: key, system: "You are helpful"})
+#
+#   # Streaming
+#   Llm::stream(:claude, [{:user, "Hello"}], {api_key: key}, {|chunk| puts(chunk) })
+#
+#   # Stream to actor
+#   Llm::stream_to(:claude, [{:user, "Hello"}], {api_key: key}, target_pid)
+#
+#   # Client (stateful)
+#   client = Llm::Client.new(:claude, {api_key: key, model: "claude-sonnet-4-20250514"})
+#   client.chat([{:user, "Hello"}])
+
+module Llm
+
+  # --- Synchronous chat ---
+  def self.chat(provider, messages, opts)
+    jet_http_ffi::ensure_started()
+    model = maps::get(:model, opts, LlmAdapter::default_model(provider))
+    max_tokens = maps::get(:max_tokens, opts, 4096)
+    url = LlmAdapter::api_url(provider)
+    headers = LlmAdapter::build_headers(provider, opts)
+    body = LlmAdapter::build_body(provider, model, max_tokens, messages, opts)
+    json = jet_json_ffi::encode(body)
+    match jet_http_ffi::post(url, headers, json)
+      case {:ok, response}
+        status = maps::get(:status, response)
+        resp_body = maps::get(:body, response)
+        if status >= 200 and status < 300
+          match jet_json_ffi::decode(resp_body)
+            case {:ok, parsed}
+              result = LlmAdapter::extract_response(provider, parsed)
+              tool_calls = maps::get(:tool_calls, result)
+              if tool_calls == []
+                maps::get(:text, result)
+              else
+                result
+              end
+            case {:error, reason}
+              {:error, {:json_decode, reason}}
+          end
+        else
+          {:error, {:api_error, status, resp_body}}
+        end
+      case {:error, reason}
+        {:error, {:http_error, reason}}
+    end
+  end
+
+  # --- Streaming ---
+  def self.stream(provider, messages, opts, callback)
+    jet_http_ffi::ensure_started()
+    model = maps::get(:model, opts, LlmAdapter::default_model(provider))
+    max_tokens = maps::get(:max_tokens, opts, 4096)
+    url = LlmAdapter::api_url(provider)
+    headers = LlmAdapter::build_headers(provider, opts)
+    stream_opts = maps::put(:stream, true, opts)
+    body = LlmAdapter::build_body(provider, model, max_tokens, messages, stream_opts)
+    json = jet_json_ffi::encode(body)
+
+    sse_buffer = erlang::put(:sse_buffer, <<"">>)
+    stream_callback = do |event|
+      match event
+        case {:data, data}
+          buffer = erlang::get(:sse_buffer)
+          new_buffer = <<buffer/binary, data/binary>>
+          events = jet_sse_ffi::parse_events(new_buffer)
+          # Keep unparsed remainder (incomplete events)
+          erlang::put(:sse_buffer, <<"">>)
+          lists::foreach(do |{_event_type, event_data}|
+            if event_data != <<"[DONE]">>
+              match jet_json_ffi::decode(event_data)
+                case {:ok, parsed}
+                  chunk = LlmAdapter::extract_stream_event(provider, parsed)
+                  callback.(chunk)
+                case {:error, _}
+                  :ok
+              end
+            else
+              callback.({type: :done})
+            end
+          end, events)
+        case {:done, data}
+          if data != <<"">>
+            events = jet_sse_ffi::parse_events(data)
+            lists::foreach(do |{_event_type, event_data}|
+              if event_data != <<"[DONE]">>
+                match jet_json_ffi::decode(event_data)
+                  case {:ok, parsed}
+                    chunk = LlmAdapter::extract_stream_event(provider, parsed)
+                    callback.(chunk)
+                  case {:error, _}
+                    :ok
+                end
+              end
+            end, events)
+          end
+          callback.({type: :done})
+        case {:error, reason}
+          callback.({type: :error, reason: reason})
+      end
+    end
+
+    jet_http_ffi::post_stream(url, headers, json, stream_callback)
+  end
+
+  # --- Stream to actor (sends {:llm_chunk, chunk} messages) ---
+  def self.stream_to(provider, messages, opts, target_pid)
+    callback = do |chunk|
+      target_pid ! {:llm_chunk, chunk}
+    end
+    Llm::stream(provider, messages, opts, callback)
+  end
+
+  # --- Backward-compatible simple API ---
+  def self.chat(provider, api_key, system_prompt, user_message)
+    Llm::chat(provider, [{:user, user_message}], {api_key: api_key, system: system_prompt})
+  end
+
+  # --- Client class (stateful) ---
+  class Client
+    def initialize(provider, opts)
+      @provider = provider
+      @opts = opts
+      self
+    end
+
+    def initialize(provider, api_key)
+      @provider = provider
+      @opts = {api_key: api_key}
+      self
+    end
+
+    def chat(messages)
+      Llm::chat(@provider, messages, @opts)
+    end
+
+    def chat(system_prompt, user_message)
+      opts = maps::put(:system, system_prompt, @opts)
+      Llm::chat(@provider, [{:user, user_message}], opts)
+    end
+
+    def stream(messages, callback)
+      Llm::stream(@provider, messages, @opts, callback)
+    end
+
+    def stream_to(messages, target_pid)
+      Llm::stream_to(@provider, messages, @opts, target_pid)
+    end
+
+    def with_model(model)
+      @opts = maps::put(:model, model, @opts)
+      self
+    end
+
+    def with_tools(tools)
+      @opts = maps::put(:tools, tools, @opts)
+      self
+    end
+
+    def with_system(system)
+      @opts = maps::put(:system, system, @opts)
+      self
+    end
+  end
+end

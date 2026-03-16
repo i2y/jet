@@ -1,0 +1,231 @@
+# Orchestra WorkflowRouter — multi-workflow routing with 3-tier fallback
+#
+# Resolves the appropriate workflow (config overrides) for a given task
+# based on its labels. Three strategies tried in priority order:
+#
+#   1. workflow_router (module) — user implements Module::select(task) -> path
+#   2. workflows (map)          — label -> path lookup table
+#   3. workflow_dir (directory)  — label-based filename matching
+#   4. (none)                   — use base config as-is (backwards compatible)
+#
+# Cache: path => {config, mtime} — only reloads when file modification time changes.
+#
+# Usage:
+#   {result, new_cache} = WorkflowRouter::resolve(task, base_config, cache)
+#   # result is {:ok, merged_config} | :default
+
+module WorkflowRouter
+  # Resolve workflow for a task.
+  # Returns {{:ok, merged_config}, new_cache} | {:default, new_cache}
+  def self.resolve(task, base_config, cache)
+    router = base_config.workflow_router()
+    workflows_map = base_config.workflows()
+    wf_dir = base_config.workflow_dir()
+
+    if router != nil
+      resolve_via_router(router, task, base_config, cache)
+    elsif workflows_map != nil and is_map(workflows_map)
+      resolve_via_map(workflows_map, task, base_config, cache)
+    elsif wf_dir != nil
+      resolve_via_dir(wf_dir, task, base_config, cache)
+    else
+      {:default, cache}
+    end
+  end
+
+  # Strategy 1: Module router — call Module::select(task) -> path | nil
+  def self.resolve_via_router(router_mod, task, base_config, cache)
+    match erlang::apply(router_mod, :select, [task])
+      case path if is_list(path) and path != []
+        load_and_merge(path, base_config, cache)
+      case path if is_binary(path)
+        load_and_merge(binary_to_list(path), base_config, cache)
+      case nil
+        {:default, cache}
+      case _
+        {:default, cache}
+    end
+  end
+
+  # Strategy 2: Map lookup — match first task label against workflows map
+  def self.resolve_via_map(workflows_map, task, base_config, cache)
+    label = find_matching_label(task, workflows_map)
+    if label != nil
+      path = ensure_list(maps::get(label, workflows_map))
+      load_and_merge(path, base_config, cache)
+    else
+      # Try :default key
+      default_path = maps::get(:default, workflows_map, maps::get("default", workflows_map, nil))
+      if default_path != nil
+        load_and_merge(ensure_list(default_path), base_config, cache)
+      else
+        {:default, cache}
+      end
+    end
+  end
+
+  # Strategy 3: Directory scan — look for <label>.md in workflow_dir
+  def self.resolve_via_dir(wf_dir, task, base_config, cache)
+    dir = ensure_list(wf_dir)
+    labels = extract_labels(task)
+    path = find_file_for_labels(labels, dir)
+    if path != nil
+      load_and_merge(path, base_config, cache)
+    else
+      # Try default.md
+      default_path = dir ++ "default.md"
+      match file::read_file_info(default_path)
+        case {:ok, _}
+          load_and_merge(default_path, base_config, cache)
+        case _
+          {:default, cache}
+      end
+    end
+  end
+
+  # Load workflow file with mtime cache, merge onto base config
+  def self.load_and_merge(path, base_config, cache)
+    current_mtime = get_mtime(path)
+    cached = maps::get(path, cache, nil)
+
+    {config_overrides, template, new_cache} = if cached != nil
+      {cached_config, cached_template, cached_mtime} = cached
+      if current_mtime == cached_mtime and current_mtime != nil
+        # Cache hit
+        {cached_config, cached_template, cache}
+      else
+        # File changed, reload
+        load_fresh(path, cache, current_mtime)
+      end
+    else
+      # Not cached
+      load_fresh(path, cache, current_mtime)
+    end
+
+    if config_overrides != nil
+      # Merge: workflow overrides onto base config
+      overrides = Config::map_workflow_keys(config_overrides)
+      overrides = maps::put(:workflow_path, path, overrides)
+      if template != nil and template != ""
+        overrides = maps::put(:prompt_template, template, overrides)
+      end
+      merged = Config::merge(base_config, overrides)
+      {{:ok, merged}, new_cache}
+    else
+      {:default, new_cache}
+    end
+  end
+
+  def self.load_fresh(path, cache, mtime)
+    match Workflow::load(path)
+      case {:ok, config_map, template}
+        new_cache = maps::put(path, {config_map, template, mtime}, cache)
+        {config_map, template, new_cache}
+      case {:error, _reason}
+        {nil, nil, cache}
+    end
+  end
+
+  def self.get_mtime(path)
+    match file::read_file_info(path)
+      case {:ok, info}
+        erlang::element(6, info)
+      case _
+        nil
+    end
+  end
+
+  # Extract label strings from a task
+  # Supports labels as list of strings or list of {name: "..."} maps
+  def self.extract_labels(task)
+    raw = maps::get(:labels, task, [])
+    if is_list(raw)
+      lists::map(do |l|
+        if is_map(l)
+          ensure_list(maps::get(:name, l, maps::get(<<"name">>, l, "")))
+        else
+          ensure_list(l)
+        end
+      end, raw)
+    else
+      []
+    end
+  end
+
+  # Find the first task label that exists as a key in the workflows map
+  def self.find_matching_label(task, workflows_map)
+    labels = extract_labels(task)
+    keys = maps::keys(workflows_map)
+    find_first_match(labels, keys)
+  end
+
+  def self.find_first_match([], _keys)
+    nil
+  end
+
+  def self.find_first_match([label, *rest], keys)
+    label_atom = try_to_atom(label)
+    label_bin = try_to_binary(label)
+    label_list = ensure_list(label)
+    if lists::member(label_atom, keys)
+      label_atom
+    elsif lists::member(label_bin, keys)
+      label_bin
+    elsif lists::member(label_list, keys)
+      label_list
+    else
+      find_first_match(rest, keys)
+    end
+  end
+
+  # Find a workflow file matching any label in the directory
+  def self.find_file_for_labels([], _dir)
+    nil
+  end
+
+  def self.find_file_for_labels([label, *rest], dir)
+    path = dir ++ ensure_list(label) ++ ".md"
+    match file::read_file_info(path)
+      case {:ok, _}
+        path
+      case _
+        find_file_for_labels(rest, dir)
+    end
+  end
+
+  def self.try_to_atom(v) if is_atom(v)
+    v
+  end
+
+  def self.try_to_atom(v) if is_list(v)
+    list_to_atom(v)
+  end
+
+  def self.try_to_atom(v) if is_binary(v)
+    binary_to_atom(v)
+  end
+
+  def self.try_to_binary(v) if is_binary(v)
+    v
+  end
+
+  def self.try_to_binary(v) if is_list(v)
+    list_to_binary(v)
+  end
+
+  def self.try_to_binary(v) if is_atom(v)
+    atom_to_binary(v)
+  end
+
+  def self.ensure_list(v) if is_list(v)
+    v
+  end
+
+  def self.ensure_list(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.ensure_list(v) if is_atom(v)
+    atom_to_list(v)
+  end
+end

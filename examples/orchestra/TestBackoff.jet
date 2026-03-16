@@ -1,0 +1,56 @@
+# Test: Backoff module
+#
+# Run: ./jet -r TestBackoff::run examples/orchestra/TestBackoff.jet
+
+module TestBackoff
+  def self.run()
+    puts("=== TestBackoff ===")
+    passed = 0
+    failed = 0
+
+    # Test exponential backoff base case
+    result = Backoff::exponential(1, 1000, 300000)
+    {passed, failed} = assert_equal("exponential(1, 1000, 300000) == 1000", result, 1000, passed, failed)
+
+    # Test exponential backoff increasing
+    result = Backoff::exponential(2, 1000, 300000)
+    {passed, failed} = assert_equal("exponential(2, 1000, 300000) == 2000", result, 2000, passed, failed)
+
+    result = Backoff::exponential(3, 1000, 300000)
+    {passed, failed} = assert_equal("exponential(3, 1000, 300000) == 4000", result, 4000, passed, failed)
+
+    result = Backoff::exponential(4, 1000, 300000)
+    {passed, failed} = assert_equal("exponential(4, 1000, 300000) == 8000", result, 8000, passed, failed)
+
+    # Test exponential backoff capped at max
+    result = Backoff::exponential(20, 1000, 300000)
+    {passed, failed} = assert_equal("exponential(20, 1000, 300000) == 300000", result, 300000, passed, failed)
+
+    # Test fixed backoff
+    result = Backoff::fixed(5000)
+    {passed, failed} = assert_equal("fixed(5000) == 5000", result, 5000, passed, failed)
+
+    # Test compute with config
+    config = Config::Settings.new({max_retry_backoff_ms: 60000})
+    result = Backoff::compute(1, config)
+    {passed, failed} = assert_equal("compute(1, config) == 1000", result, 1000, passed, failed)
+
+    result = Backoff::compute(3, config)
+    {passed, failed} = assert_equal("compute(3, config) == 4000", result, 4000, passed, failed)
+
+    puts("\n~p passed, ~p failed", [passed, failed])
+    if failed > 0
+      erlang::halt(1)
+    end
+  end
+
+  def self.assert_equal(label, actual, expected, passed, failed)
+    if actual == expected
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s (got ~p, expected ~p)", [label, actual, expected])
+      {passed, failed + 1}
+    end
+  end
+end

@@ -1,0 +1,138 @@
+# Test: WorkflowRouter — multi-workflow routing
+#
+# Run:
+#   ./jet -r TestWorkflowRouter::run examples/orchestra/TestWorkflowRouter.jet
+
+module TestWorkflowRouter
+  def self.run()
+    puts("=== TestWorkflowRouter ===")
+    passed = 0
+    failed = 0
+
+    # Setup: create temp workflow files
+    dir = "/tmp/orchestra_test_wfr/"
+    file::make_dir(dir)
+    write_workflow(dir ++ "bug.md", "max_turns: 3", "Fix bug: {{task.title}}")
+    write_workflow(dir ++ "feature.md", "max_turns: 8", "Build feature: {{task.title}}")
+    write_workflow(dir ++ "default.md", "max_turns: 5", "Default: {{task.title}}")
+
+    # --- Test 1: workflow_dir with matching label ---
+    config1 = Config::new({workflow_dir: dir})
+    task_bug = {id: "1", title: "crash on nil", labels: ["bug", "orchestra"]}
+    {result1, cache1} = WorkflowRouter::resolve(task_bug, config1, {})
+    {passed, failed} = check_ok_max_turns("dir: bug label -> max_turns 3", result1, 3, passed, failed)
+    {passed, failed} = check_ok_has_template("dir: bug template loaded", result1, passed, failed)
+
+    # --- Test 2: workflow_dir with feature label ---
+    task_feat = {id: "2", title: "add dark mode", labels: ["feature"]}
+    {result2, cache2} = WorkflowRouter::resolve(task_feat, config1, cache1)
+    {passed, failed} = check_ok_max_turns("dir: feature label -> max_turns 8", result2, 8, passed, failed)
+
+    # --- Test 3: workflow_dir fallback to default.md ---
+    task_unknown = {id: "3", title: "unknown", labels: ["refactor"]}
+    {result3, _cache3} = WorkflowRouter::resolve(task_unknown, config1, cache2)
+    {passed, failed} = check_ok_max_turns("dir: unknown label -> default max_turns 5", result3, 5, passed, failed)
+
+    # --- Test 4: workflows map ---
+    config2 = Config::new({workflows: {
+      bug: dir ++ "bug.md",
+      feature: dir ++ "feature.md",
+      default: dir ++ "default.md"
+    }})
+    task_bug2 = {id: "4", title: "segfault", labels: ["bug"]}
+    {result4, _cache4} = WorkflowRouter::resolve(task_bug2, config2, {})
+    {passed, failed} = check_ok_max_turns("map: bug -> max_turns 3", result4, 3, passed, failed)
+
+    # --- Test 5: workflows map default fallback ---
+    task_misc = {id: "5", title: "misc", labels: ["chore"]}
+    {result5, _cache5} = WorkflowRouter::resolve(task_misc, config2, {})
+    {passed, failed} = check_ok_max_turns("map: chore -> default max_turns 5", result5, 5, passed, failed)
+
+    # --- Test 6: no routing config -> :default ---
+    config3 = Config::new({})
+    task_any = {id: "6", title: "any", labels: ["bug"]}
+    {result6, _cache6} = WorkflowRouter::resolve(task_any, config3, {})
+    {passed, failed} = check_is_default("no config: returns :default", result6, passed, failed)
+
+    # --- Test 7: cache hit (second resolve with same cache) ---
+    config4 = Config::new({workflow_dir: dir})
+    task_bug3 = {id: "7", title: "crash", labels: ["bug"]}
+    {_r1, cache_a} = WorkflowRouter::resolve(task_bug3, config4, {})
+    {result7, _cache_b} = WorkflowRouter::resolve(task_bug3, config4, cache_a)
+    {passed, failed} = check_ok_max_turns("cache: second resolve also works", result7, 3, passed, failed)
+
+    # --- Test 8: task with no labels -> default.md ---
+    task_no_labels = {id: "8", title: "no labels"}
+    {result8, _cache8} = WorkflowRouter::resolve(task_no_labels, config1, {})
+    {passed, failed} = check_ok_max_turns("no labels -> default max_turns 5", result8, 5, passed, failed)
+
+    # Cleanup
+    file::delete(dir ++ "bug.md")
+    file::delete(dir ++ "feature.md")
+    file::delete(dir ++ "default.md")
+    file::del_dir(dir)
+
+    puts("\n~p passed, ~p failed", [passed, failed])
+    if failed > 0
+      erlang::halt(1)
+    end
+  end
+
+  # Check helpers that avoid unsafe variable issues
+  def self.check_ok_max_turns(label, result, expected, passed, failed)
+    if is_tuple(result) and erlang::element(1, result) == :ok
+      cfg = erlang::element(2, result)
+      mt = cfg.max_turns()
+      assert_equal(label, mt, expected, passed, failed)
+    else
+      puts("  FAIL: ~s (got :default, expected {:ok, ...})", [label])
+      {passed, failed + 1}
+    end
+  end
+
+  def self.check_ok_has_template(label, result, passed, failed)
+    if is_tuple(result) and erlang::element(1, result) == :ok
+      cfg = erlang::element(2, result)
+      tmpl = cfg.prompt_template()
+      assert_true(label, tmpl != nil, passed, failed)
+    else
+      puts("  FAIL: ~s (got :default, expected {:ok, ...})", [label])
+      {passed, failed + 1}
+    end
+  end
+
+  def self.check_is_default(label, result, passed, failed)
+    if result == :default
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s (expected :default, got ~p)", [label, result])
+      {passed, failed + 1}
+    end
+  end
+
+  def self.write_workflow(path, yaml, template)
+    content = "---\n" ++ yaml ++ "\n---\n" ++ template
+    file::write_file(path, content)
+  end
+
+  def self.assert_equal(label, actual, expected, passed, failed)
+    if actual == expected
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s (got ~p, expected ~p)", [label, actual, expected])
+      {passed, failed + 1}
+    end
+  end
+
+  def self.assert_true(label, condition, passed, failed)
+    if condition
+      puts("  PASS: ~s", [label])
+      {passed + 1, failed}
+    else
+      puts("  FAIL: ~s", [label])
+      {passed, failed + 1}
+    end
+  end
+end

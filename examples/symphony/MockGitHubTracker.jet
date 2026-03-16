@@ -1,0 +1,70 @@
+# Mock GitHub tracker for demo — simulates GitHub Issues
+#
+# Issues start as :active, then turn :terminal after update_issue is called.
+
+module MockGitHubTracker
+  def self.fetch_issues(_config)
+    # Check if any issues have been marked terminal
+    closed = erlang::get(:mock_gh_closed)
+    closed_set = if closed == :undefined
+      []
+    else
+      closed
+    end
+    all_issues = [
+      {id: "42", identifier: "jet-42", number: 42,
+       title: "Fix CI pipeline for ARM builds",
+       description: "The CI pipeline fails on ARM64 runners. Error: unsupported architecture.",
+       url: "https://github.com/example/jet/issues/42",
+       state: "open", created_at: "2026-03-14T10:00:00Z"},
+      {id: "43", identifier: "jet-43", number: 43,
+       title: "Add WebSocket support to HTTP client",
+       description: "Users need WebSocket connections for real-time features.",
+       url: "https://github.com/example/jet/issues/43",
+       state: "open", created_at: "2026-03-14T11:00:00Z"}
+    ]
+    filter_open(all_issues, closed_set, [])
+  end
+
+  def self.filter_open([], _closed, acc)
+    lists::reverse(acc)
+  end
+
+  def self.filter_open([issue, *rest], closed, acc)
+    id = maps::get(:id, issue)
+    if lists::member(id, closed)
+      filter_open(rest, closed, acc)
+    else
+      filter_open(rest, closed, [issue, *acc])
+    end
+  end
+
+  def self.update_issue(issue_id, status, result)
+    output = maps::get(:output, result, "")
+    puts("[MockGitHubTracker] Issue #~s updated: ~p", [issue_id, status])
+    # Mark as closed on success
+    if status == :ok
+      closed = erlang::get(:mock_gh_closed)
+      closed = if closed == :undefined
+        [issue_id]
+      else
+        [issue_id, *closed]
+      end
+      erlang::put(:mock_gh_closed, closed)
+    end
+    :ok
+  end
+
+  def self.fetch_issue_state(issue_id, _config)
+    closed = erlang::get(:mock_gh_closed)
+    if closed == :undefined
+      :active
+    else
+      if lists::member(issue_id, closed)
+        :terminal
+      else
+        :active
+      end
+    end
+  end
+end

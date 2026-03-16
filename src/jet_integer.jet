@@ -3,7 +3,8 @@ module jet_integer
     include Numeric
 
     def initialize(value)
-      {value: value}
+      @value = value
+      self
     end
 
     def times(func)

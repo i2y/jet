@@ -1,0 +1,21 @@
+# Symphony AgentRunner — interface for running AI agents
+#
+# AgentRunner modules must implement:
+#   run(workspace_path, prompt, callback_pid) → :ok
+#   stop(workspace_path) → :ok
+#
+# The runner sends messages to callback_pid:
+#   {:agent_event, event}   — streaming events
+#   {:agent_done, result}   — completion
+
+module AgentRunner
+  # No-op base — used for testing
+  def self.run(_workspace, _prompt, callback_pid)
+    callback_pid ! {:agent_done, {status: :ok, output: "[mock] done", completed: true}}
+    :ok
+  end
+
+  def self.stop(_workspace)
+    :ok
+  end
+end

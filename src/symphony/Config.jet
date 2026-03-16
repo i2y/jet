@@ -1,0 +1,208 @@
+# Symphony Config — typed configuration for the orchestrator
+
+module Config
+  class Settings
+    def initialize(opts)
+      @poll_interval_ms = maps::get(:poll_interval_ms, opts, 30000)
+      @max_turns = maps::get(:max_turns, opts, 5)
+      @max_concurrent = maps::get(:max_concurrent, opts, 3)
+      @max_retries = maps::get(:max_retries, opts, 2)
+      @retry_delay_ms = maps::get(:retry_delay_ms, opts, 5000)
+      @max_retry_backoff_ms = maps::get(:max_retry_backoff_ms, opts, 300000)
+      @workspace_root = maps::get(:workspace_root, opts, "/tmp/symphony")
+      @workflow_path = maps::get(:workflow_path, opts, nil)
+      @agent_runner = maps::get(:agent_runner, opts, nil)
+      @tracker = maps::get(:tracker, opts, nil)
+      @llm_provider = maps::get(:llm_provider, opts, :claude)
+      @llm_opts = maps::get(:llm_opts, opts, {})
+      @after_create_hook = maps::get(:after_create_hook, opts, nil)
+      @before_run_hook = maps::get(:before_run_hook, opts, nil)
+      @after_run_hook = maps::get(:after_run_hook, opts, nil)
+      @before_remove_hook = maps::get(:before_remove_hook, opts, nil)
+      @hook_timeout_ms = maps::get(:hook_timeout_ms, opts, 60000)
+      self
+    end
+
+    def poll_interval_ms()
+      @poll_interval_ms
+    end
+
+    def max_turns()
+      @max_turns
+    end
+
+    def max_concurrent()
+      @max_concurrent
+    end
+
+    def max_retries()
+      @max_retries
+    end
+
+    def retry_delay_ms()
+      @retry_delay_ms
+    end
+
+    def max_retry_backoff_ms()
+      @max_retry_backoff_ms
+    end
+
+    def workspace_root()
+      @workspace_root
+    end
+
+    def workflow_path()
+      @workflow_path
+    end
+
+    def agent_runner()
+      @agent_runner
+    end
+
+    def tracker()
+      @tracker
+    end
+
+    def llm_provider()
+      @llm_provider
+    end
+
+    def llm_opts()
+      @llm_opts
+    end
+
+    def after_create_hook()
+      @after_create_hook
+    end
+
+    def before_run_hook()
+      @before_run_hook
+    end
+
+    def after_run_hook()
+      @after_run_hook
+    end
+
+    def before_remove_hook()
+      @before_remove_hook
+    end
+
+    def hook_timeout_ms()
+      @hook_timeout_ms
+    end
+  end
+
+  # Create a config from a map of options
+  def self.new(opts)
+    Config::Settings.new(opts)
+  end
+
+  # Create a default config
+  def self.default()
+    Config::Settings.new({})
+  end
+
+  # Merge additional options into an existing config
+  def self.merge(config, overrides)
+    base = {
+      poll_interval_ms: config.poll_interval_ms(),
+      max_turns: config.max_turns(),
+      max_concurrent: config.max_concurrent(),
+      max_retries: config.max_retries(),
+      retry_delay_ms: config.retry_delay_ms(),
+      max_retry_backoff_ms: config.max_retry_backoff_ms(),
+      workspace_root: config.workspace_root(),
+      workflow_path: config.workflow_path(),
+      agent_runner: config.agent_runner(),
+      tracker: config.tracker(),
+      llm_provider: config.llm_provider(),
+      llm_opts: config.llm_opts(),
+      after_create_hook: config.after_create_hook(),
+      before_run_hook: config.before_run_hook(),
+      after_run_hook: config.after_run_hook(),
+      before_remove_hook: config.before_remove_hook(),
+      hook_timeout_ms: config.hook_timeout_ms()
+    }
+    Config::Settings.new(maps::merge(base, overrides))
+  end
+
+  # Create a config from a WORKFLOW.md file
+  def self.from_workflow(path)
+    match Workflow::load(path)
+      case {:ok, wf_config, _template}
+        opts = map_workflow_keys(wf_config)
+        opts_with_path = maps::put(:workflow_path, path, opts)
+        Config::Settings.new(opts_with_path)
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  # Map SPEC workflow keys to internal config keys
+  def self.map_workflow_keys(wf)
+    mappings = [
+      {<<"polling">>, <<"interval_ms">>, :poll_interval_ms},
+      {<<"agent">>, <<"max_turns">>, :max_turns},
+      {<<"agent">>, <<"max_concurrent">>, :max_concurrent},
+      {<<"agent">>, <<"max_retries">>, :max_retries},
+      {<<"agent">>, <<"retry_delay_ms">>, :retry_delay_ms},
+      {<<"agent">>, <<"max_retry_backoff_ms">>, :max_retry_backoff_ms},
+      {<<"workspace">>, <<"root">>, :workspace_root},
+      {<<"hooks">>, <<"after_create">>, :after_create_hook},
+      {<<"hooks">>, <<"before_run">>, :before_run_hook},
+      {<<"hooks">>, <<"after_run">>, :after_run_hook},
+      {<<"hooks">>, <<"before_remove">>, :before_remove_hook},
+      {<<"hooks">>, <<"timeout_ms">>, :hook_timeout_ms}
+    ]
+    # Also handle flat keys
+    flat_mappings = [
+      {<<"max_turns">>, :max_turns},
+      {<<"max_concurrent">>, :max_concurrent},
+      {<<"poll_interval_ms">>, :poll_interval_ms},
+      {<<"workspace_root">>, :workspace_root},
+      {<<"agent_runner">>, :agent_runner},
+      {<<"tracker">>, :tracker}
+    ]
+    opts = apply_nested_mappings(mappings, wf, {})
+    apply_flat_mappings(flat_mappings, wf, opts)
+  end
+
+  def self.apply_nested_mappings([], _wf, acc)
+    acc
+  end
+
+  def self.apply_nested_mappings([{section, key, config_key}, *rest], wf, acc)
+    section_map = maps::get(section, wf, nil)
+    if section_map != nil and is_map(section_map)
+      val = maps::get(key, section_map, nil)
+      if val != nil
+        apply_nested_mappings(rest, wf, maps::put(config_key, convert_workflow_value(val), acc))
+      else
+        apply_nested_mappings(rest, wf, acc)
+      end
+    else
+      apply_nested_mappings(rest, wf, acc)
+    end
+  end
+
+  def self.apply_flat_mappings([], _wf, acc)
+    acc
+  end
+
+  def self.apply_flat_mappings([{key, config_key}, *rest], wf, acc)
+    val = maps::get(key, wf, nil)
+    if val != nil
+      apply_flat_mappings(rest, wf, maps::put(config_key, convert_workflow_value(val), acc))
+    else
+      apply_flat_mappings(rest, wf, acc)
+    end
+  end
+
+  def self.convert_workflow_value(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.convert_workflow_value(v)
+    v
+  end
+end

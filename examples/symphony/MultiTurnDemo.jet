@@ -1,0 +1,56 @@
+# Multi-turn demo — verifies that Worker continues until completed: true
+#
+# MockMultiTurnRunner sends completed: false for the first 2 turns,
+# then completed: true on the 3rd turn.
+#
+# Run:
+#   ./jet examples/symphony/MockTracker.jet
+#   ./jet examples/symphony/MockMultiTurnRunner.jet
+#   ./jet -r MultiTurnDemo::run examples/symphony/MultiTurnDemo.jet
+
+module MultiTurnDemo
+  def self.run()
+    puts("=== Multi-Turn Demo ===\n")
+
+    config = Config::new({
+      poll_interval_ms: 500,
+      max_turns: 5,
+      max_concurrent: 2,
+      max_retries: 1,
+      retry_delay_ms: 200,
+      workspace_root: "/tmp/symphony_multiturn_demo",
+      agent_runner: :MockMultiTurnRunner,
+      tracker: :MockTracker
+    })
+
+    puts("--- Starting Orchestrator (max_turns=5, runner=MockMultiTurnRunner) ---")
+    orch = Orchestrator::Instance.spawn(config)
+
+    # Wait for multi-turn execution to complete
+    timer::sleep(4000)
+
+    status = orch.status()
+    puts("\n--- Orchestrator Status ---")
+    puts("  Running:   ~p", [maps::get(:running, status)])
+    puts("  Claimed:   ~p", [maps::get(:claimed, status)])
+    puts("  Completed: ~p", [maps::get(:completed, status)])
+
+    completed = orch.completed()
+    puts("\n--- Completed Issues ---")
+    print_completed(completed)
+
+    puts("\n--- Stopping ---")
+    gen_server::stop(orch)
+    timer::sleep(100)
+    puts("\n=== Done ===")
+  end
+
+  def self.print_completed([])
+    :ok
+  end
+
+  def self.print_completed([{id, status, output}, *rest])
+    puts("  ~s: ~p — ~s", [id, status, output])
+    print_completed(rest)
+  end
+end

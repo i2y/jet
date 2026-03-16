@@ -1,0 +1,76 @@
+# Orchestra Log — structured logging for jet_orchestra
+#
+# Provides leveled logging with structured fields.
+#
+# Usage:
+#   Log::info("Task started", {task_id: "123", runner: "claude"})
+#   Log::warn("Hook failed", {hook: "npm install", reason: "timeout"})
+#   Log::error("Worker crashed", {task_id: "456", reason: :noproc})
+
+module Log
+  def self.info(msg, fields)
+    output("info", msg, fields)
+  end
+
+  def self.info(msg)
+    output("info", msg, {})
+  end
+
+  def self.warn(msg, fields)
+    output("warn", msg, fields)
+  end
+
+  def self.warn(msg)
+    output("warn", msg, {})
+  end
+
+  def self.error(msg, fields)
+    output("error", msg, fields)
+  end
+
+  def self.error(msg)
+    output("error", msg, {})
+  end
+
+  def self.output(level, msg, fields)
+    field_str = format_fields(maps::to_list(fields), [])
+    io::format("[Orchestra] level=~s ~s~s~n", [level, field_str, ensure_list(msg)])
+  end
+
+  def self.format_fields([], acc)
+    lists::flatten(lists::reverse(acc))
+  end
+
+  def self.format_fields([{k, v}, *rest], acc)
+    entry = lists::flatten(io_lib::format("~s=~p ", [ensure_list_key(k), v]))
+    format_fields(rest, [entry, *acc])
+  end
+
+  def self.ensure_list_key(v) if is_atom(v)
+    atom_to_list(v)
+  end
+
+  def self.ensure_list_key(v) if is_list(v)
+    v
+  end
+
+  def self.ensure_list_key(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.ensure_list(v) if is_list(v)
+    v
+  end
+
+  def self.ensure_list(v) if is_binary(v)
+    binary_to_list(v)
+  end
+
+  def self.ensure_list(v) if is_atom(v)
+    atom_to_list(v)
+  end
+
+  def self.ensure_list(v)
+    lists::flatten(io_lib::format("~p", [v]))
+  end
+end

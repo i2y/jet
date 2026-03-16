@@ -1,0 +1,30 @@
+# Orchestra Backoff — retry strategies for jet_orchestra
+#
+# Usage:
+#   delay = Backoff::exponential(1, 1000, 300000)  # => 1000
+#   delay = Backoff::exponential(3, 1000, 300000)  # => 4000
+#   delay = Backoff::fixed(5000)                    # => 5000
+
+module Backoff
+  # Exponential backoff: min(base_ms * 2^(attempt-1), max_ms)
+  def self.exponential(attempt, base_ms, max_ms)
+    delay = erlang::trunc(math::pow(2.0, attempt - 1)) * base_ms
+    if delay < max_ms
+      delay
+    else
+      max_ms
+    end
+  end
+
+  # Fixed delay (for continuation retries)
+  def self.fixed(delay_ms)
+    delay_ms
+  end
+
+  # Compute backoff for a given attempt using config defaults
+  def self.compute(attempt, config)
+    base = 1000
+    max_backoff = config.max_retry_backoff_ms()
+    exponential(attempt, base, max_backoff)
+  end
+end

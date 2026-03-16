@@ -1,0 +1,14 @@
+# ワンショットLLM呼び出し
+# Usage: ./jet -r LlmOneshot::LlmOneshot.demo examples/llm_oneshot.jet
+#
+# 環境変数 ANTHROPIC_API_KEY を設定してから実行してください
+
+class LlmOneshot
+  def self.demo()
+    api_key = os::getenv("ANTHROPIC_API_KEY")
+
+    io::format("=== One-shot chat ===~n", [])
+    response = Llm::chat(:claude, api_key, "You are a helpful assistant.", "What is Erlang/OTP in one sentence?")
+    io::format("Response: ~s~n", [response])
+  end
+end

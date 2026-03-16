@@ -1,0 +1,36 @@
+# Debug: run fetch_tasks from within an actor (like Scheduler does)
+
+module DebugReview3
+  actor Tester
+    expose test_it()
+
+    def initialize()
+      :ok
+    end
+
+    def test_it()
+      repo_env = os::getenv("ORCHESTRA_GITHUB_REPO")
+      puts("repo from env: ~p", [repo_env])
+      config = {
+        review_pending: maps::put("1", {2, 0}, {}),
+        max_review_rounds: 5,
+        github_repo: "i2y/orchestra-test"
+      }
+      result = GitHubPRReviewSource::fetch_tasks(config)
+      puts("fetch_tasks result: ~p tasks", [erlang::length(result)])
+      if result != []
+        task = lists::nth(1, result)
+        puts("task id: ~p", [maps::get(:id, task)])
+      end
+      result
+    end
+  end
+
+  def self.run()
+    os::putenv("ORCHESTRA_GITHUB_REPO", "i2y/orchestra-test")
+    t = DebugReview3::Tester.spawn()
+    result = t.test_it()
+    puts("Final: ~p", [result])
+    gen_server::stop(t)
+  end
+end

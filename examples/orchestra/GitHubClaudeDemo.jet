@@ -1,0 +1,74 @@
+# Orchestra GitHub + Claude Demo
+#
+# Demonstrates real orchestration: GitHub Issues + Claude Code Runner
+#
+# Prerequisites:
+#   - `gh` CLI installed and authenticated
+#   - `claude` CLI installed
+#   - Issues labeled "orchestra" in the target repo
+#
+# Compile and run:
+#   ./jet -r GitHubClaudeDemo::run examples/orchestra/GitHubClaudeDemo.jet
+#
+# Environment:
+#   ORCHESTRA_GITHUB_REPO=owner/repo  (required)
+#   ORCHESTRA_LABEL=orchestra          (optional, default: "orchestra")
+
+module GitHubClaudeDemo
+  def self.run()
+    puts("=== Orchestra GitHub + Claude Demo ===\n")
+
+    repo = os::getenv("ORCHESTRA_GITHUB_REPO")
+    if repo == false
+      puts("Error: ORCHESTRA_GITHUB_REPO environment variable not set")
+      puts("Usage: ORCHESTRA_GITHUB_REPO=owner/repo ./jet -r GitHubClaudeDemo::run examples/orchestra/GitHubClaudeDemo.jet")
+      :error
+    else
+      label = match os::getenv("ORCHESTRA_LABEL")
+        case false
+          "orchestra"
+        case l
+          l
+      end
+
+      # Store config for GitHubTaskSource
+      erlang::put(:orchestra_github_repo, repo)
+
+      config = Config::Settings.new({
+        poll_interval_ms: 30000,
+        max_turns: 5,
+        max_concurrent: 3,
+        max_retries: 2,
+        workspace_root: "/tmp/orchestra_github"
+      })
+
+      puts("Config:")
+      puts("  Repo:           ~s", [repo])
+      puts("  Label:          ~s", [label])
+      puts("  Max concurrent: ~p", [config.max_concurrent()])
+      puts("  Max turns:      ~p", [config.max_turns()])
+      puts("  Poll interval:  ~pms", [config.poll_interval_ms()])
+
+      hooks = {
+        after_create: "git clone https://github.com/" ++ repo ++ " .",
+        after_run: "git add -A && git commit -m 'orchestra: auto-fix' && git push origin HEAD"
+      }
+
+      puts("\n--- Starting Scheduler ---")
+      orch = Scheduler::Instance.spawn(config, :GitHubTaskSource, :ClaudeCodeRunner, {hooks: hooks})
+
+      puts("Scheduler is running. Press Ctrl+C to stop.\n")
+
+      # Keep running until interrupted
+      wait_loop(orch)
+    end
+  end
+
+  def self.wait_loop(orch)
+    timer::sleep(10000)
+    status = orch.status()
+    puts("[Status] running=~p claimed=~p completed=~p",
+         [maps::get(:running, status), maps::get(:claimed, status), maps::get(:completed, status)])
+    wait_loop(orch)
+  end
+end

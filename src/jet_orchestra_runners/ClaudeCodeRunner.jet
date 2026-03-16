@@ -1,0 +1,67 @@
+# Orchestra ClaudeCodeRunner — runs Claude Code via CLI
+#
+# Implements the Runner protocol.
+# Launches `claude --print` as an external process.
+#
+# Usage (via Scheduler):
+#   config = Config::new({...})
+#   Scheduler::Instance.spawn(config, :MySource, :ClaudeCodeRunner, {})
+
+module ClaudeCodeRunner
+  def self.run(workspace, prompt, callback_pid, _opts)
+    escaped_prompt = escape_shell(prompt)
+    cmd = "cd " ++ workspace ++ " && claude --print " ++ escaped_prompt
+    match jet_port_ffi::open(cmd, [:binary, {:line, 65536}, :exit_status, :use_stdio])
+      case {:ok, port}
+        reader = erlang::spawn(do ||
+          ClaudeCodeRunner::read_loop(port, callback_pid, [])
+        end)
+        erlang::put({:orchestra_claude_port, workspace}, {port, reader})
+        :ok
+      case {:error, reason}
+        callback_pid ! {:agent_done, {status: :error, output: reason}}
+        {:error, reason}
+    end
+  end
+
+  def self.run(workspace, prompt, callback_pid)
+    run(workspace, prompt, callback_pid, {})
+  end
+
+  def self.stop(workspace)
+    match erlang::get({:orchestra_claude_port, workspace})
+      case :undefined
+        :ok
+      case {port, _reader}
+        jet_port_ffi::close(port)
+        erlang::erase({:orchestra_claude_port, workspace})
+        :ok
+    end
+  end
+
+  def self.read_loop(port, callback_pid, acc)
+    receive
+      case {port, {:data, {:eol, line}}}
+        text = binary_to_list(line)
+        callback_pid ! {:agent_event, {type: :output, text: text}}
+        ClaudeCodeRunner::read_loop(port, callback_pid, [text, *acc])
+      case {port, {:data, {:noeol, line}}}
+        text = binary_to_list(line)
+        callback_pid ! {:agent_event, {type: :output, text: text}}
+        ClaudeCodeRunner::read_loop(port, callback_pid, [text, *acc])
+      case {port, {:exit_status, 0}}
+        output = lists::flatten(lists::reverse(acc))
+        callback_pid ! {:agent_done, {status: :ok, output: output, completed: true}}
+      case {port, {:exit_status, code}}
+        output = lists::flatten(lists::reverse(acc))
+        callback_pid ! {:agent_done, {status: :error, output: output ++ "\nexit code: " ++ integer_to_list(code)}}
+    after 600000
+      callback_pid ! {:agent_done, {status: :error, output: "timeout"}}
+    end
+  end
+
+  def self.escape_shell(str)
+    escaped = re::replace(str, "'", "'\\''", [:global, {:return, :list}])
+    "'" ++ escaped ++ "'"
+  end
+end
