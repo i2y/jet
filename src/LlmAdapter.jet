@@ -108,7 +108,18 @@ module LlmAdapter
         case :tool
           <<"tool">>
       end
-      {<<"role">> => role_bin, <<"content">> => ensure_binary(content)}
+      # If content is a list of maps (content blocks), pass through as-is
+      formatted_content = if is_list(content) and content != []
+        match content
+          case [first, *_] if is_map(first)
+            content
+          case _
+            ensure_binary(content)
+        end
+      else
+        ensure_binary(content)
+      end
+      {<<"role">> => role_bin, <<"content">> => formatted_content}
     end, messages)
   end
 

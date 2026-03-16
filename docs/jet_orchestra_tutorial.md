@@ -69,6 +69,7 @@ src/jet_orchestra/
 └── PythonBridge.jet    # BEAM <-> Python interop
 
 src/jet_orchestra_runners/
+├── ClaudeApiRunner.jet     # Claude API direct (tool use + AgentSkills)
 ├── ClaudeSimpleRunner.jet  # claude --print via os::cmd
 ├── ClaudeCodeRunner.jet    # claude --print via port
 ├── ClaudeAgentRunner.jet   # Claude Agent SDK via Python
@@ -377,7 +378,7 @@ Environment variables: `$ORCHESTRA_TASK_ID`, `$ORCHESTRA_TASK_TITLE`
 
 | Protocol | Functions | Built-in |
 |---|---|---|
-| **Runner** | `run/4`, `stop/1` | `Runner`, `ClaudeSimpleRunner`, `ClaudeCodeRunner`, `ClaudeAgentRunner`, `CodexRunner` |
+| **Runner** | `run/4`, `stop/1` | `Runner`, `ClaudeApiRunner`, `ClaudeSimpleRunner`, `ClaudeCodeRunner`, `ClaudeAgentRunner`, `CodexRunner` |
 | **TaskSource** | `fetch_tasks/1`, `update_task/3`, `fetch_task_state/2` | `TaskSource`, `GitHubTaskSource`, `LinearTaskSource` |
 | **Store** | `save/2`, `load/1`, `delete/1`, `save_task/3`*, `load_task/2`*, `delete_task/2`*, `list_task_ids/1`* | `Store`, `FileStore`, `DetsStore` |
 | **ReviewSource** | `fetch_tasks/1` | `GitHubPRReviewSource` |
@@ -453,7 +454,7 @@ Per-task API (* = optional, only for stores with `supports_per_task?() == true`)
 gleam build && gleam export erlang-shipment && escript build_escript.erl
 for f in src/jet_orchestra/*.jet; do ./jet "$f"; done
 for f in src/jet_orchestra_runners/*.jet src/jet_orchestra_sources/*.jet; do ./jet "$f"; done
-gleam test  # 51 tests
+gleam test  # 52 tests
 
 # Jet runtime tests
 ./jet -r TestBackoff::run examples/orchestra/TestBackoff.jet

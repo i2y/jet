@@ -1,0 +1,387 @@
+# Orchestra ClaudeApiRunner — runs Claude via Anthropic API with tool use
+#
+# Implements the Runner protocol using direct API calls (no CLI dependency).
+# Supports AgentSkills: configurable tools (Read, Edit, Write, Bash, Glob, Grep)
+# that the agent can invoke to interact with the workspace.
+#
+# opts:
+#   api_key:      Anthropic API key (or ANTHROPIC_API_KEY env var)
+#   model:        model name (default: claude-sonnet-4-20250514)
+#   max_tokens:   per-turn token limit (default: 8192)
+#   skills:       list of skill atoms, e.g. [:read, :write, :edit, :bash, :glob, :grep]
+#                 (default: [:read, :write, :edit, :bash])
+#   system:       system prompt override
+#
+# Usage:
+#   config = Config::new({...})
+#   Scheduler::Instance.spawn(config, source, :ClaudeApiRunner, {
+#     api_key: "sk-ant-...",
+#     skills: [:read, :write, :edit, :bash, :glob, :grep]
+#   })
+
+module ClaudeApiRunner
+  def self.run(workspace, prompt, callback_pid, opts)
+    api_key = resolve_api_key(opts)
+    if api_key == nil
+      callback_pid ! {:agent_done, {status: :error, output: "No API key: set api_key in opts or ANTHROPIC_API_KEY env var"}}
+      {:error, :no_api_key}
+    else
+      # Spawn a process for the agent loop so it doesn't block the caller
+      erlang::spawn(do ||
+        ClaudeApiRunner::agent_loop(workspace, prompt, callback_pid, opts, api_key)
+      end)
+      :ok
+    end
+  end
+
+  def self.run(workspace, prompt, callback_pid)
+    run(workspace, prompt, callback_pid, {})
+  end
+
+  def self.stop(_workspace)
+    :ok
+  end
+
+  # --- Agent loop: chat → tool_use → tool_result → repeat ---
+
+  def self.agent_loop(workspace, prompt, callback_pid, opts, api_key)
+    jet_http_ffi::ensure_started()
+    model = maps::get(:model, opts, "claude-sonnet-4-20250514")
+    max_tokens = maps::get(:max_tokens, opts, 8192)
+    skills = maps::get(:skills, opts, [:read, :write, :edit, :bash])
+    system = maps::get(:system, opts, "You are a software engineer. Work in the directory: " ++ workspace ++ ". Use the provided tools to complete the task.")
+
+    tools = build_tools(skills)
+    messages = [{:user, prompt}]
+    llm_opts = {api_key: api_key, model: model, max_tokens: max_tokens, system: system, tools: tools}
+
+    run_loop(workspace, messages, llm_opts, callback_pid, 0, 50)
+  end
+
+  # max_iterations prevents infinite tool loops
+  def self.run_loop(_workspace, _messages, _opts, callback_pid, iteration, max_iter) if iteration >= max_iter
+    callback_pid ! {:agent_done, {status: :error, output: "Max tool iterations reached", completed: false}}
+  end
+
+  def self.run_loop(workspace, messages, opts, callback_pid, iteration, max_iter)
+    match Llm::chat(:claude, messages, opts)
+      case {:error, reason}
+        callback_pid ! {:agent_done, {status: :error, output: lists::flatten(io_lib::format("API error: ~p", [reason])), completed: false}}
+      case response
+        text = maps::get(:text, response, "")
+        tool_calls = maps::get(:tool_calls, response, [])
+
+        # Send text content as event
+        if text != "" and text != []
+          callback_pid ! {:agent_event, {type: :output, text: text}}
+        end
+
+        if tool_calls == [] or tool_calls == nil
+          # No tool calls — agent is done
+          output = if is_list(text) text else binary_to_list(text) end
+          callback_pid ! {:agent_done, {status: :ok, output: output, completed: true}}
+        else
+          # Execute tool calls and continue
+          {tool_results, updated_messages} = execute_tools(workspace, tool_calls, messages, response, callback_pid)
+          run_loop(workspace, updated_messages, opts, callback_pid, iteration + 1, max_iter)
+        end
+    end
+  end
+
+  # --- Tool execution ---
+
+  def self.execute_tools(workspace, tool_calls, messages, response, callback_pid)
+    # Build assistant message with content blocks
+    assistant_content = build_assistant_content(response)
+    new_messages = lists::append(messages, [{:assistant, assistant_content}])
+
+    # Execute each tool call and collect results
+    results = lists::map(do |tc|
+      tool_name = maps::get(:name, tc)
+      tool_id = maps::get(:id, tc)
+      args = maps::get(:arguments, tc)
+
+      callback_pid ! {:agent_event, {type: :tool_call, tool: tool_name, args: args}}
+
+      result = execute_tool(workspace, tool_name, args)
+
+      callback_pid ! {:agent_event, {type: :tool_result, tool: tool_name, result: truncate(result, 10000)}}
+
+      {tool_id, result}
+    end, tool_calls)
+
+    # Build tool_result messages
+    tool_result_content = lists::map(do |{tool_id, result}|
+      {<<"type">> => <<"tool_result">>,
+       <<"tool_use_id">> => ensure_binary(tool_id),
+       <<"content">> => ensure_binary(result)}
+    end, results)
+
+    final_messages = lists::append(new_messages, [{:user, tool_result_content}])
+    {results, final_messages}
+  end
+
+  def self.build_assistant_content(response)
+    text = maps::get(:text, response, "")
+    tool_calls = maps::get(:tool_calls, response, [])
+
+    text_blocks = if text != "" and text != []
+      [{<<"type">> => <<"text">>, <<"text">> => ensure_binary(text)}]
+    else
+      []
+    end
+
+    tool_blocks = lists::map(do |tc|
+      {<<"type">> => <<"tool_use">>,
+       <<"id">> => ensure_binary(maps::get(:id, tc)),
+       <<"name">> => ensure_binary(maps::get(:name, tc)),
+       <<"input">> => maps::get(:arguments, tc)}
+    end, tool_calls)
+
+    lists::append(text_blocks, tool_blocks)
+  end
+
+  # --- Individual tool implementations ---
+
+  def self.execute_tool(workspace, "read", args)
+    path = resolve_path(workspace, get_arg(args, "path"))
+    match file::read_file(path)
+      case {:ok, content}
+        binary_to_list(content)
+      case {:error, reason}
+        "Error reading file: " ++ atom_to_list(reason)
+    end
+  end
+
+  def self.execute_tool(workspace, "write", args)
+    path = resolve_path(workspace, get_arg(args, "path"))
+    content = get_arg(args, "content")
+    dir = filename::dirname(path)
+    filelib::ensure_dir(dir ++ "/dummy")
+    match file::write_file(path, content)
+      case :ok
+        "File written: " ++ path
+      case {:error, reason}
+        "Error writing file: " ++ atom_to_list(reason)
+    end
+  end
+
+  def self.execute_tool(workspace, "edit", args)
+    path = resolve_path(workspace, get_arg(args, "path"))
+    old_string = get_arg(args, "old_string")
+    new_string = get_arg(args, "new_string")
+    match file::read_file(path)
+      case {:ok, content}
+        content_str = binary_to_list(content)
+        old_str = if is_binary(old_string) binary_to_list(old_string) else old_string end
+        new_str = if is_binary(new_string) binary_to_list(new_string) else new_string end
+        match string::find(content_str, old_str)
+          case :nomatch
+            "Error: old_string not found in file"
+          case _
+            replaced = string::replace(content_str, old_str, new_str, :leading)
+            match file::write_file(path, replaced)
+              case :ok
+                "File edited: " ++ path
+              case {:error, reason}
+                "Error writing file: " ++ atom_to_list(reason)
+            end
+        end
+      case {:error, reason}
+        "Error reading file: " ++ atom_to_list(reason)
+    end
+  end
+
+  def self.execute_tool(workspace, "bash", args)
+    command = get_arg(args, "command")
+    cmd_str = "cd " ++ workspace ++ " && " ++ command
+    # Use os:cmd with a timeout wrapper
+    result = os::cmd(cmd_str)
+    if is_list(result)
+      result
+    else
+      binary_to_list(result)
+    end
+  end
+
+  def self.execute_tool(workspace, "glob", args)
+    pattern = get_arg(args, "pattern")
+    full_pattern = workspace ++ "/" ++ pattern
+    matches = filelib::wildcard(full_pattern)
+    # Strip workspace prefix for cleaner output
+    prefix_len = erlang::length(workspace) + 1
+    relative = lists::map(do |m|
+      lists::nthtail(prefix_len, m)
+    end, matches)
+    string::join(relative, "\n")
+  end
+
+  def self.execute_tool(workspace, "grep", args)
+    pattern = get_arg(args, "pattern")
+    path = maps::get(<<"path">>, args, maps::get(:path, args, "."))
+    path_str = if is_binary(path) binary_to_list(path) else path end
+    search_path = resolve_path(workspace, path_str)
+    cmd = "grep -rn " ++ escape_shell(pattern) ++ " " ++ escape_shell(search_path) ++ " 2>/dev/null | head -50"
+    result = os::cmd(cmd)
+    if is_list(result) result else binary_to_list(result) end
+  end
+
+  def self.execute_tool(_workspace, name, _args)
+    "Unknown tool: " ++ name
+  end
+
+  # --- Tool definitions (AgentSkills) ---
+
+  def self.build_tools(skills)
+    all = {
+      read: {
+        name: "read",
+        description: "Read the contents of a file at the given path",
+        parameters: {
+          <<"type">> => <<"object">>,
+          <<"properties">> => {
+            <<"path">> => {<<"type">> => <<"string">>, <<"description">> => <<"File path to read (relative to workspace)">>}
+          },
+          <<"required">> => [<<"path">>]
+        }
+      },
+      write: {
+        name: "write",
+        description: "Write content to a file, creating it if it doesn't exist",
+        parameters: {
+          <<"type">> => <<"object">>,
+          <<"properties">> => {
+            <<"path">> => {<<"type">> => <<"string">>, <<"description">> => <<"File path to write (relative to workspace)">>},
+            <<"content">> => {<<"type">> => <<"string">>, <<"description">> => <<"Content to write to the file">>}
+          },
+          <<"required">> => [<<"path">>, <<"content">>]
+        }
+      },
+      edit: {
+        name: "edit",
+        description: "Replace a specific string in a file with a new string",
+        parameters: {
+          <<"type">> => <<"object">>,
+          <<"properties">> => {
+            <<"path">> => {<<"type">> => <<"string">>, <<"description">> => <<"File path to edit (relative to workspace)">>},
+            <<"old_string">> => {<<"type">> => <<"string">>, <<"description">> => <<"Exact string to find and replace">>},
+            <<"new_string">> => {<<"type">> => <<"string">>, <<"description">> => <<"Replacement string">>}
+          },
+          <<"required">> => [<<"path">>, <<"old_string">>, <<"new_string">>]
+        }
+      },
+      bash: {
+        name: "bash",
+        description: "Execute a shell command in the workspace directory",
+        parameters: {
+          <<"type">> => <<"object">>,
+          <<"properties">> => {
+            <<"command">> => {<<"type">> => <<"string">>, <<"description">> => <<"Shell command to execute">>}
+          },
+          <<"required">> => [<<"command">>]
+        }
+      },
+      glob: {
+        name: "glob",
+        description: "Find files matching a glob pattern in the workspace",
+        parameters: {
+          <<"type">> => <<"object">>,
+          <<"properties">> => {
+            <<"pattern">> => {<<"type">> => <<"string">>, <<"description">> => <<"Glob pattern (e.g. **/*.py, src/*.jet)">>}
+          },
+          <<"required">> => [<<"pattern">>]
+        }
+      },
+      grep: {
+        name: "grep",
+        description: "Search for a pattern in files",
+        parameters: {
+          <<"type">> => <<"object">>,
+          <<"properties">> => {
+            <<"pattern">> => {<<"type">> => <<"string">>, <<"description">> => <<"Search pattern (regex supported)">>},
+            <<"path">> => {<<"type">> => <<"string">>, <<"description">> => <<"File or directory to search in (default: .)">>}
+          },
+          <<"required">> => [<<"pattern">>]
+        }
+      }
+    }
+
+    lists::filtermap(do |skill|
+      match maps::find(skill, all)
+        case {:ok, tool_def}
+          {true, tool_def}
+        case :error
+          false
+      end
+    end, skills)
+  end
+
+  # --- Helpers ---
+
+  def self.resolve_api_key(opts)
+    match maps::find(:api_key, opts)
+      case {:ok, key}
+        key
+      case :error
+        match os::getenv("ANTHROPIC_API_KEY")
+          case false
+            nil
+          case key
+            key
+        end
+    end
+  end
+
+  def self.resolve_path(workspace, path)
+    path_str = if is_binary(path) binary_to_list(path) else path end
+    if path_str == "" or path_str == "."
+      workspace
+    else
+      match path_str
+        case [47, *_]
+          # Absolute path (starts with /)
+          path_str
+        case _
+          workspace ++ "/" ++ path_str
+      end
+    end
+  end
+
+  def self.get_arg(args, key)
+    bin_key = if is_list(key) list_to_binary(key) else key end
+    atom_key = if is_list(key) list_to_atom(key) else binary_to_atom(key) end
+    val = maps::get(bin_key, args, maps::get(atom_key, args, ""))
+    if is_binary(val) binary_to_list(val) else val end
+  end
+
+  def self.truncate(str, max)
+    s = if is_binary(str) binary_to_list(str) else str end
+    if erlang::length(s) > max
+      lists::sublist(s, max) ++ "... (truncated)"
+    else
+      s
+    end
+  end
+
+  def self.escape_shell(str)
+    s = if is_binary(str) binary_to_list(str) else str end
+    escaped = re::replace(s, "'", "'\\''", [:global, {:return, :list}])
+    "'" ++ escaped ++ "'"
+  end
+
+  def self.ensure_binary(v) if is_binary(v)
+    v
+  end
+
+  def self.ensure_binary(v) if is_list(v)
+    unicode::characters_to_binary(v)
+  end
+
+  def self.ensure_binary(v) if is_atom(v)
+    atom_to_binary(v)
+  end
+
+  def self.ensure_binary(v)
+    unicode::characters_to_binary(lists::flatten(io_lib::format("~p", [v])))
+  end
+end

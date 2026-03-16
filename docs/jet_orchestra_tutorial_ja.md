@@ -69,6 +69,7 @@ src/jet_orchestra/
 └── PythonBridge.jet    # BEAM <-> Python 連携
 
 src/jet_orchestra_runners/
+├── ClaudeApiRunner.jet     # Claude API 直接呼び出し (tool use + AgentSkills)
 ├── ClaudeSimpleRunner.jet  # claude --print (os::cmd)
 ├── ClaudeCodeRunner.jet    # claude --print (port)
 ├── ClaudeAgentRunner.jet   # Claude Agent SDK (Python)
@@ -376,7 +377,7 @@ review:
 
 | プロトコル | 関数 | 組み込み |
 |---|---|---|
-| **Runner** | `run/4`, `stop/1` | `Runner`, `ClaudeSimpleRunner`, `ClaudeCodeRunner`, `ClaudeAgentRunner`, `CodexRunner` |
+| **Runner** | `run/4`, `stop/1` | `Runner`, `ClaudeApiRunner`, `ClaudeSimpleRunner`, `ClaudeCodeRunner`, `ClaudeAgentRunner`, `CodexRunner` |
 | **TaskSource** | `fetch_tasks/1`, `update_task/3`, `fetch_task_state/2` | `TaskSource`, `GitHubTaskSource`, `LinearTaskSource` |
 | **Store** | `save/2`, `load/1`, `delete/1`, `save_task/3`*, `load_task/2`*, `delete_task/2`*, `list_task_ids/1`* | `Store`, `FileStore`, `DetsStore` |
 | **ReviewSource** | `fetch_tasks/1` | `GitHubPRReviewSource` |
@@ -452,7 +453,7 @@ Scheduler は `supports_per_task?()` を自動検出し、対応する Store で
 gleam build && gleam export erlang-shipment && escript build_escript.erl
 for f in src/jet_orchestra/*.jet; do ./jet "$f"; done
 for f in src/jet_orchestra_runners/*.jet src/jet_orchestra_sources/*.jet; do ./jet "$f"; done
-gleam test  # 51 テスト
+gleam test  # 52 テスト
 
 # Jet ランタイムテスト
 ./jet -r TestBackoff::run examples/orchestra/TestBackoff.jet
