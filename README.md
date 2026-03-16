@@ -1,11 +1,7 @@
 <img src="https://github.com/i2y/jet/raw/master/jet_logo.png" width="300px"/>
 
-> "I thought of objects being like biological cells and/or individual
-> computers on a network, only able to communicate with messages"
-> _--Alan Kay, creator of Smalltalk, on the meaning of "object oriented programming"_
-
-Jet is a dynamically typed, OOP-functional language with Ruby-like syntax that runs on the [Erlang](http://www.erlang.org) virtual machine (BEAM).
-Inspired by [Reia](https://github.com/tarcieri/reia) and [Celluloid](https://github.com/celluloid/celluloid).
+Jet is a dynamically typed, OOP-functional language that runs on the [Erlang](http://www.erlang.org) virtual machine (BEAM).
+Its syntax and object model are influenced by [Ruby](https://www.ruby-lang.org) and [Reia](https://github.com/tarcieri/reia).
 
 ## Language Features
 
