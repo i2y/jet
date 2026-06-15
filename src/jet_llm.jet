@@ -1,0 +1,762 @@
+module jet_llm
+  # `Llm` runner: Jet runs the LLM turn itself. `model:` is REQUIRED (no vendor
+  # default) and chooses the backend:
+  #   model "ollama:<name>"  -> local Ollama, NATIVE structured output (the
+  #                             generation is constrained to a JSON Schema, so no
+  #                             prompt-shim / fence/prose fragility).
+  #   model "<provider id>"  -> a hosted provider via the Llm library; set
+  #                             `provider:` (:claude default, or :openai) + an API key.
+
+  def self.turn(config, method, args, schema)
+    opts = runner_opts(maps::get(:runner, config, nil))
+    model = maps::get(:model, opts, nil)
+    if model == nil
+      {:error, :no_model, "set model: on the Llm runner -- \"ollama:<name>\" for local, or a provider model id (with provider: :claude|:openai and an API key)"}
+    elsif ollama?(model)
+      run_ollama(config, ollama_model(model), method, args, schema)
+    else
+      provider = maps::get(:provider, opts, :claude)
+      match resolve_api_key(provider, opts)
+        case nil
+          {:error, :no_api_key, api_key_hint(provider)}
+        case api_key
+          run_llm(config, opts, provider, model, api_key, method, args, schema)
+      end
+    end
+  end
+
+  # --- Ollama backend: native (schema-constrained) structured output ---
+
+  def self.ollama?(model)
+    lists::prefix("ollama:", to_str(model))
+  end
+
+  def self.ollama_model(model)
+    lists::nthtail(7, to_str(model))    # drop "ollama:"
+  end
+
+  def self.to_str(x)
+    if erlang::is_binary(x)
+      erlang::binary_to_list(x)
+    else
+      x
+    end
+  end
+
+  # the agent's role (system prompt); a declared-but-nil role falls back to a
+  # default instead of becoming a null system message (which yields empty output).
+  def self.role_of(config)
+    r = maps::get(:role, config, nil)
+    if r == nil
+      "You are a helpful assistant."
+    else
+      r
+    end
+  end
+
+  def self.run_ollama(config, model, method, args, schema)
+    jet_http_ffi::ensure_started()
+    erlang::put(:__ollama_extra__, ollama_extra(config))   # think:/options: (runner opts) -> request body
+    erlang::put(:__ollama_acc__, <<>>)       # assistant text accumulates here (for memory + .stream)
+    erlang::put(:__approve_agent__, maps::get(:__agent__, config, nil))   # agent pid iff it defined `approve` -> gate tools
+    role = role_of(config)
+    mem = maps::get(:__mem__, config, nil)
+    question = jet_acp::build_prompt(config, method, args)
+    {sys, recent} = mem_context(mem, role, mem_budget(config),
+                                {|prev, ts| ollama_summarize(model, prev, ts)})
+    skills_dir = maps::get(:skills, config, nil)                   # agent skills (progressive disclosure)
+    cat = jet_skills::catalog(skills_dir)
+    sys2 = erlang::iolist_to_binary([sys, jet_skills::catalog_block(cat)])
+    tools = lists::append(lists::append(exec_tools(maps::get(:tools, config, [])),
+                                        mcp_conn_tools(maps::get(:__mcp_conns__, config, []))),  # persistent MCP servers (agent state)
+                          skill_tools(cat, skills_dir))
+    messages = lists::append([{role: "system", content: sys2}],
+                             lists::append(ollama_turn_msgs(recent),
+                                           [{role: "user", content: question}]))
+    result = if tools == []
+      ollama_stream(model, messages, schema)
+    else
+      ollama_loop(model, messages, tools, schema, tool_fuel(config))
+    end
+    jet_memory::append_turn(mem, jet_acp::args_to_text(args), erlang::get(:__ollama_acc__))   # store the RAW user msg (role is the system message), not the role-prefixed prompt
+    result
+  end
+
+  # streaming chat: emit each token delta as a {:text, chunk} event (for .stream
+  # and the ACP server), accumulate the full text, then parse vs the schema.
+  def self.ollama_stream(model, messages, schema)
+    erlang::put(:__ollama_buf__, <<>>)
+    erlang::put(:__ollama_acc__, <<>>)
+    body = jet_json_ffi::encode(stream_body(model, messages, schema))
+    jet_http_ffi::post_stream_plain(erlang::iolist_to_binary([jet_settings::ollama_url(), "/api/chat"]),
+                                    [{<<"content-type">>, <<"application/json">>}],
+                                    body,
+                                    {|ev| on_stream(ev)})
+    jet_acp::parse_result(erlang::get(:__ollama_acc__), schema)
+  end
+
+  def self.stream_body(model, messages, schema)
+    base = {model: model, stream: true, messages: messages}
+    body = if schema == :any
+      base
+    else
+      maps::put(:format, to_json_schema(schema), base)
+    end
+    with_extra(body)
+  end
+
+  # merge think:/options: (from the runner opts, stashed in run_ollama) into an ollama body.
+  def self.with_extra(base)
+    match erlang::get(:__ollama_extra__)
+      case extra if erlang::is_map(extra)
+        maps::merge(base, extra)
+      case _
+        base
+    end
+  end
+
+  def self.ollama_extra(config)
+    opts = runner_opts(maps::get(:runner, config, nil))
+    add_opt(add_opt(maps::new(), :think, maps::get(:think, opts, nil)), :options, maps::get(:options, opts, nil))
+  end
+
+  def self.add_opt(m, k, v)
+    if v == nil
+      m
+    else
+      maps::put(k, v, m)
+    end
+  end
+
+  def self.on_stream(ev)
+    match ev
+      case {:data, bin}
+        feed(bin)
+      case {:done, bin}
+        feed(bin)
+      case _
+        :ok
+    end
+  end
+
+  def self.feed(bin)
+    erlang::put(:__ollama_buf__,
+                drain(erlang::iolist_to_binary([erlang::get(:__ollama_buf__), bin])))
+  end
+
+  def self.drain(buf)
+    match binary::split(buf, <<"\n">>)
+      case [line, rest]
+        take_line(line)
+        drain(rest)
+      case _
+        buf
+    end
+  end
+
+  def self.take_line(line)
+    match jet_json_ffi::decode(line)
+      case {:ok, obj}
+        delta = maps::get(<<"content">>, maps::get(<<"message">>, obj, maps::new()), <<>>)
+        if delta != <<>>
+          jet_acp::emit_event({:text, delta})
+          erlang::put(:__ollama_acc__,
+                      erlang::iolist_to_binary([erlang::get(:__ollama_acc__), delta]))
+        end
+      case _
+        :ok
+    end
+  end
+
+  # executable tools = descriptor maps with a function impl (bare-atom tools and
+  # impl-less descriptors are skipped here).
+  def self.exec_tools(tools)
+    lists::filter({|t| erlang::is_map(t) and erlang::is_function(maps::get(:impl, t, nil))}, tools)
+  end
+
+  # tool-use loop: call with tools; run any tool_calls; repeat; then a final
+  # schema-constrained call once the model stops calling tools.
+  def self.ollama_loop(model, messages, tools, schema, fuel)
+    if fuel <= 0
+      ollama_final(model, messages, schema)
+    else
+      match ollama_post(ollama_tools_body(model, messages, tools))
+        case {:ok, msg}
+          tcs = maps::get(<<"tool_calls">>, msg, [])
+          if erlang::is_list(tcs) and tcs != []
+            results = lists::map({|tc| one_tool_result(tc, tools)}, tcs)
+            ollama_loop(model,
+                        lists::append(lists::append(messages, [msg]), results),
+                        tools, schema, fuel - 1)
+          elsif schema == :any
+            content = maps::get(<<"content">>, msg, <<>>)   # free text: the model's
+            erlang::put(:__ollama_acc__, content)           # record assistant text for memory
+            jet_acp::emit_event({:text, content})           # final message IS the answer --
+            jet_acp::parse_result(content, schema)          # no redundant re-query
+          else
+            ollama_final(model, lists::append(messages, [msg]), schema)
+          end
+        case {:error, reason}
+          {:error, :ollama_error, reason}
+      end
+    end
+  end
+
+  # after the tool exchange, some models (e.g. qwen via Ollama) return EMPTY content on a
+  # bare schema-constrained call -- they act as if they're done. A short user nudge to
+  # "now answer using the tool results" reliably gets the final structured answer out.
+  def self.ollama_final(model, messages, schema)
+    nudged = lists::append(messages, [{role: "user", content: "Now reply with the final answer, using the tool results above."}])
+    match ollama_post(ollama_final_body(model, nudged, schema))
+      case {:ok, msg}
+        content = maps::get(<<"content">>, msg, <<>>)
+        erlang::put(:__ollama_acc__, content)   # record the assistant text for memory (tools path isn't token-streamed)
+        jet_acp::emit_event({:text, content})   # stream the answer
+        jet_acp::parse_result(content, schema)
+      case {:error, reason}
+        {:error, :ollama_error, reason}
+    end
+  end
+
+  # POST /api/chat -> {:ok, message_map} | {:error, reason}
+  def self.ollama_post(body)
+    match jet_http_ffi::post_plain(erlang::iolist_to_binary([jet_settings::ollama_url(), "/api/chat"]),
+                                   [{<<"content-type">>, <<"application/json">>}],
+                                   jet_json_ffi::encode(body))
+      case {:ok, resp}
+        match jet_json_ffi::decode(maps::get(:body, resp))
+          case {:ok, decoded}
+            {:ok, maps::get(<<"message">>, decoded, maps::new())}
+          case _
+            {:error, :ollama_decode_failed}
+        end
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  def self.ollama_tools_body(model, messages, tools)
+    with_extra({model: model, stream: false, messages: messages, tools: ollama_tool_defs(tools)})
+  end
+
+  def self.ollama_final_body(model, messages, schema)
+    base = {model: model, stream: false, messages: messages}
+    body = if schema == :any
+      base
+    else
+      maps::put(:format, to_json_schema(schema), base)
+    end
+    with_extra(body)
+  end
+
+  def self.ollama_tool_defs(tools)
+    lists::map({|t| ollama_tool_def(t)}, tools)
+  end
+
+  def self.ollama_tool_def(t)
+    name = erlang::atom_to_binary(maps::get(:name, t), :utf8)
+    {type: "function",
+     function: {name: name,
+                description: desc_of(t),
+                parameters: tool_params_json(t)}}
+  end
+
+  def self.one_tool_result(tc, tools)
+    fn = maps::get(<<"function">>, tc, maps::new())
+    name = maps::get(<<"name">>, fn, <<>>)
+    args = norm_args(maps::get(<<"arguments">>, fn, maps::new()))
+    tcid = new_tool_call_id(name)
+    jet_acp::emit_event({:tool_call, {id: tcid, title: name, kind: "execute", status: "in_progress"}})
+    out = to_content(invoke_tool(name, args, tools))
+    jet_acp::emit_event({:tool_call, {id: tcid, status: "completed", output: out}})
+    {role: "tool", content: out}
+  end
+
+  def self.new_tool_call_id(name)
+    erlang::iolist_to_binary([name, "-", erlang::integer_to_binary(erlang::unique_integer([:positive]))])
+  end
+
+  def self.norm_args(args)
+    if erlang::is_map(args)
+      args
+    elsif erlang::is_binary(args)
+      match jet_json_ffi::decode(args)
+        case {:ok, m}
+          m
+        case _
+          maps::new()
+      end
+    else
+      maps::new()
+    end
+  end
+
+  # a throwing tool impl must NOT kill the turn -- catch it and feed the error back to
+  # the model as the tool result, so it can recover (retry, pick another tool, explain).
+  def self.invoke_tool(name, args, tools)
+    match find_tool(name, tools)
+      case {:ok, t}
+        if approved?(name, args)
+          run_tool(name, args, t)
+        else
+          erlang::iolist_to_binary(["tool '", name, "' was denied by the agent's approve policy"])
+        end
+      case :error
+        "unknown tool"
+    end
+  end
+
+  def self.run_tool(name, args, t)
+    try
+      match maps::get(:mcp, t, nil)
+        case nil
+          erlang::apply(maps::get(:impl, t), arg_values(param_names_of(t), args))
+        case ref
+          if erlang::is_pid(ref)
+            jet_mcp_client::call_conn(ref, name, args)   # persistent MCP conn process
+          else
+            jet_mcp_client::call(ref, name, args)        # one-shot port (standalone use)
+          end
+      end
+    catch e
+      erlang::iolist_to_binary(["tool error: ", io_lib::format("~p", [e.get(:reason)])])
+    end
+  end
+
+  # native tool permission: if the agent defined `approve` (its pid is stashed by run_ollama),
+  # ask its on_approval(req) before each tool call; only an explicit :deny blocks. Agents
+  # without approve stash no pid -> tools run ungated (as before).
+  def self.approved?(name, args)
+    approver = erlang::get(:__approve_agent__)
+    if erlang::is_pid(approver)
+      match jet_runtime::call_method(approver, :on_approval, [{title: name, name: name, kind: <<"execute">>, args: args}])
+        case :deny
+          false
+        case _
+          true
+      end
+    else
+      true
+    end
+  end
+
+  def self.find_tool(name, tools)
+    match lists::filter({|t| erlang::atom_to_binary(maps::get(:name, t, :__nope__), :utf8) == name}, tools)
+      case [t, *_]
+        {:ok, t}
+      case _
+        :error
+    end
+  end
+
+  # bind tool-call args positionally in DECLARATION order (param_names from the parser),
+  # NOT maps::keys order (which SORTS and would misbind a non-alphabetical multi-arg tool).
+  def self.arg_values(names, args)
+    lists::map({|k| maps::get(erlang::atom_to_binary(k, :utf8), args, nil)}, names)
+  end
+
+  def self.param_names_of(t)
+    match maps::get(:param_names, t, nil)
+      case nil
+        maps::keys(maps::get(:params, t, maps::new()))   # fallback: a tool predating param_names
+      case names
+        names
+    end
+  end
+
+  # a tool's description for the model (function-calling / MCP). Falls back to the tool
+  # name when no `, "desc"` was given (the old behavior; keeps the field non-empty).
+  def self.desc_of(t)
+    match maps::get(:desc, t, nil)
+      case nil
+        erlang::atom_to_binary(maps::get(:name, t), :utf8)
+      case d
+        to_bin_str(d)
+    end
+  end
+
+  def self.to_bin_str(d)
+    if erlang::is_binary(d)
+      d
+    else
+      erlang::iolist_to_binary(d)
+    end
+  end
+
+  # tool parameter JSON Schema for the model: a remote MCP tool carries the server's
+  # inputSchema verbatim (:json_schema); a local tool's :params (a Jet schema) is converted.
+  def self.tool_params_json(t)
+    match maps::get(:json_schema, t, nil)
+      case nil
+        to_json_schema(maps::get(:params, t, maps::new()))
+      case js
+        js
+    end
+  end
+
+  # --- external MCP tool servers: the agent holds a PERSISTENT connection process per
+  # declared server in its state (jet_agent::ensure_mcp_conns), reused across turns; here we
+  # just ask each live conn for its discovered tools (descriptors carry the conn pid in :mcp,
+  # so invoke_tool routes calls to it). Ollama path; the Anthropic path has no tool loop yet. ---
+
+  def self.mcp_conn_tools(conns)
+    lists::foldl({|c, acc| lists::append(acc, jet_mcp_client::tools_of_conn(c))}, [], conns)
+  end
+
+  # the `skill` tool: lets the model load a skill's full instructions ON DEMAND (level-2
+  # progressive disclosure). Present only when the agent has skills; its impl captures the
+  # skills dir and returns the named skill's SKILL.md body.
+  def self.skill_tools(cat, dir)
+    if cat == []
+      []
+    else
+      [{name: :skill, params: {name: :string}, param_names: [:name],
+        desc: "Load a skill's full instructions by name -- call this BEFORE using a skill listed under [Skills] in your system prompt.",
+        impl: {|n| jet_skills::body(dir, n)}}]
+    end
+  end
+
+  def self.to_content(result)
+    if erlang::is_binary(result)
+      result
+    elsif erlang::is_integer(result)
+      erlang::integer_to_binary(result)
+    elsif erlang::is_list(result)
+      erlang::iolist_to_binary(result)
+    else
+      erlang::iolist_to_binary(io_lib::format("~p", [result]))
+    end
+  end
+
+  # --- a real JSON Schema from the Jet schema literal (String/Int/[T]/{k:T}) ---
+
+  def self.to_json_schema(schema)
+    if erlang::is_atom(schema)
+      scalar_schema(schema)
+    elsif erlang::is_tuple(schema)
+      {_, elem} = schema
+      {type: "array", items: to_json_schema(elem)}
+    elsif erlang::is_map(schema)
+      {type: "object",
+       properties: maps::map({|_k, v| to_json_schema(v)}, schema),
+       required: maps::keys(schema)}
+    else
+      {type: "string"}
+    end
+  end
+
+  def self.scalar_schema(t)
+    match t
+      case :string
+        {type: "string"}
+      case :int
+        {type: "integer"}
+      case :float
+        {type: "number"}
+      case :bool
+        {type: "boolean"}
+      case _
+        {type: "string"}
+    end
+  end
+
+  # --- Anthropic backend ---
+
+  def self.runner_opts(runner)
+    if erlang::is_map(runner)
+      maps::get(:opts, runner, maps::new())
+    else
+      maps::new()
+    end
+  end
+
+  # api_key from runner opts, else the provider's standard env var.
+  def self.resolve_api_key(provider, opts)
+    match maps::find(:api_key, opts)
+      case {:ok, key}
+        key
+      case :error
+        match os::getenv(api_key_env(provider))
+          case false
+            nil
+          case key
+            key
+        end
+    end
+  end
+
+  def self.api_key_env(:openai)
+    "OPENAI_API_KEY"
+  end
+  def self.api_key_env(_provider)
+    "ANTHROPIC_API_KEY"
+  end
+
+  def self.api_key_hint(:openai)
+    "set api_key in runner opts or OPENAI_API_KEY"
+  end
+  def self.api_key_hint(_provider)
+    "set api_key in runner opts or ANTHROPIC_API_KEY"
+  end
+
+  def self.run_llm(config, opts, provider, model, api_key, method, args, schema)
+    jet_http_ffi::ensure_started()
+    role = role_of(config)
+    mem = maps::get(:__mem__, config, nil)
+    prompt = jet_acp::build_prompt_schema(config, method, args, schema)
+    {sys, recent} = mem_context(mem, role, mem_budget(config),
+                                {|prev, ts| llm_summarize(provider, model, api_key, prev, ts)})
+    skills_dir = maps::get(:skills, config, nil)
+    cat = jet_skills::catalog(skills_dir)
+    sys2 = erlang::iolist_to_binary([sys, jet_skills::catalog_block(cat)])
+    tools = lists::append(lists::append(exec_tools(maps::get(:tools, config, [])),
+                                        mcp_conn_tools(maps::get(:__mcp_conns__, config, []))),
+                          skill_tools(cat, skills_dir))
+    messages = lists::append(llm_turn_msgs(recent), [{:user, prompt}])
+    llm_opts = {api_key: api_key, model: model, max_tokens: 4096, system: sys2}
+    match llm_run(provider, messages, llm_opts, tools)
+      case {:error, reason}
+        {:error, :llm_error, reason}
+      case text
+        jet_memory::append_turn(mem, jet_acp::args_to_text(args), text)   # store the RAW user msg, not the role+schema-instruction prompt
+        jet_acp::parse_result(text, schema)
+    end
+  end
+
+  # The hosted-provider turn: a plain chat when there are no tools, else a tool-use loop.
+  #
+  # LIVE-UNTESTED: there is no API key in this environment, so the loop is verified only
+  # STRUCTURALLY (its builders are unit-tested + it compiles). The Claude tool-result shapes
+  # follow the documented Anthropic Messages API (assistant tool_use blocks + a user
+  # tool_result block, both expressible via the Llm library's pass-through content blocks).
+  # OpenAI tool use is a follow-up: it needs the Llm library to support an assistant message
+  # carrying `tool_calls` (format_messages currently emits {role, content} only), so for now
+  # OpenAI falls back to a plain chat. Without tools, both providers behave exactly as before.
+  def self.llm_run(provider, messages, opts, tools)
+    if tools == []
+      Llm::chat(provider, messages, opts)
+    else
+      match provider
+        case :openai
+          Llm::chat(provider, messages, opts)   # tool loop = follow-up (library needs assistant tool_calls)
+        case _
+          llm_loop(provider, messages, opts, llm_tool_defs(tools), tools, 6)
+      end
+    end
+  end
+
+  # Jet tool descriptors -> the Llm library's tool format (name/description as char lists,
+  # parameters as JSON Schema -- MCP tools pass their inputSchema through tool_params_json).
+  def self.llm_tool_defs(tools)
+    lists::map({|t| {name: erlang::atom_to_list(maps::get(:name, t)),
+                     description: erlang::binary_to_list(desc_of(t)),
+                     parameters: tool_params_json(t)}}, tools)
+  end
+
+  def self.llm_loop(provider, messages, opts, tool_defs, tools, fuel)
+    if fuel <= 0
+      Llm::chat(provider, messages, opts)        # out of fuel: one final answer, no tools
+    else
+      match Llm::chat(provider, messages, maps::put(:tools, tool_defs, opts))
+        case {:error, reason}
+          {:error, :llm_error, reason}
+        case result
+          if erlang::is_map(result)              # {text, tool_calls} -> ran tool(s)?
+            llm_after_tools(result, messages, opts, tool_defs, tools, fuel)
+          else
+            result                               # a plain text answer (no tool calls)
+          end
+      end
+    end
+  end
+
+  def self.llm_after_tools(result, messages, opts, tool_defs, tools, fuel)
+    tcs = maps::get(:tool_calls, result, [])
+    if tcs == []
+      to_bin_str(maps::get(:text, result, <<>>))
+    else
+      asst = {:assistant, claude_assistant_blocks(maps::get(:text, result, []), tcs)}
+      results = lists::map({|tc| tool_result_msg(tc, tools)}, tcs)
+      llm_loop(provider_of(opts), lists::append(messages, lists::append([asst], results)),
+               opts, tool_defs, tools, fuel - 1)
+    end
+  end
+
+  # we don't carry the provider into the recursion via opts; the loop is Claude-only, so
+  # recurse with the same provider it entered with. (llm_after_tools is reached only from
+  # the Claude branch of llm_run.)
+  def self.provider_of(_opts)
+    :claude
+  end
+
+  # the assistant message that issued the tool calls -- Claude: optional text block + a
+  # tool_use block per call (so the next request has the call in history).
+  def self.claude_assistant_blocks(text, tcs)
+    head = if to_bin_str(text) == <<>>
+      []
+    else
+      [{type: "text", text: to_bin_str(text)}]
+    end
+    lists::append(head, lists::map({|tc| {type: "tool_use",
+                                          id: to_bin_str(maps::get(:id, tc, [])),
+                                          name: to_bin_str(maps::get(:name, tc, [])),
+                                          input: maps::get(:arguments, tc, maps::new())}}, tcs))
+  end
+
+  # the tool RESULT fed back -- Claude: a user message with a tool_result content block.
+  def self.tool_result_msg(tc, tools)
+    {:user, [{type: "tool_result",
+              tool_use_id: to_bin_str(maps::get(:id, tc, [])),
+              content: to_content(run_tool_call(tc, tools))}]}
+  end
+
+  def self.run_tool_call(tc, tools)
+    invoke_tool(to_bin_str(maps::get(:name, tc, [])), maps::get(:arguments, tc, maps::new()), tools)
+  end
+
+  # --- native memory: thread prior turns + a rolling summary + facts into the prompt,
+  # compacting the overflow on the way. jet_memory holds the bytes; summarizing the
+  # overflow needs the model, so it happens here. mem == nil -> stateless (role only),
+  # the pre-memory native behavior. ---
+
+  # recent-window byte budget (~6k tokens) before older turns fold into the summary.
+  # `memory_budget N` sets it; unset leaves config[:memory_budget] = nil -> the default.
+  def self.mem_budget(config)
+    match maps::get(:memory_budget, config, nil)
+      case nil
+        24000
+      case n
+        n
+    end
+  end
+
+  # max tool-call rounds per turn (`tool_fuel N`; default 6). Raise it for agentic coding.
+  def self.tool_fuel(config)
+    match maps::get(:tool_fuel, config, nil)
+      case nil
+        6
+      case n
+        n
+    end
+  end
+
+  # Run a one-shot Ollama turn WITH tools as a tool-use loop, returning the free TEXT result.
+  # This lets a SHAPE node (e.g. a Flow terminal node) give a LOCAL model real tools (local +
+  # MCP), so it can actually act -- not just reason. `tools` = jet tool descriptors; the
+  # approval gate + MCP conns work via the same machinery as run_ollama (process dict + the
+  # conn pid in each descriptor). Approval: the caller must have stashed :__approve_agent__.
+  def self.run_tools(model, role, input, tools, fuel)
+    jet_http_ffi::ensure_started()
+    erlang::put(:__ollama_acc__, <<>>)
+    ollama_loop(model,
+                [{role: "system", content: role}, {role: "user", content: to_content(input)}],
+                tools, :any, fuel)
+  end
+
+  def self.mem_context(mem, role, budget, summarize_fun)
+    if mem == nil
+      {role, []}
+    else
+      {to_compact, recent} = jet_memory::window(mem, budget)
+      summary = if to_compact == []
+        jet_memory::summary(mem)
+      else
+        s = summarize_fun.(jet_memory::summary(mem), to_compact)
+        jet_memory::set_summary(mem, s)
+        jet_memory::compact(mem, recent)
+        s
+      end
+      {mem_system(role, summary, jet_memory::recall(mem, <<>>)), recent}
+    end
+  end
+
+  def self.mem_system(role, summary, facts)
+    if summary == <<>> and facts == []
+      role
+    else
+      erlang::iolist_to_binary([role, "\n\n[Memory]", summary_part(summary), facts_part(facts)])
+    end
+  end
+
+  def self.summary_part(summary)
+    if summary == <<>>
+      []
+    else
+      ["\nConversation summary so far:\n", summary]
+    end
+  end
+
+  def self.facts_part(facts)
+    if facts == []
+      []
+    else
+      ["\nRemembered notes:\n", lists::map({|kv| note_line(kv)}, facts)]
+    end
+  end
+
+  def self.note_line(kv)
+    {k, v} = kv
+    ["- ", k, ": ", v, "\n"]
+  end
+
+  # recent turns -> chat messages (provider-specific shapes).
+  def self.ollama_turn_msgs(turns)
+    lists::foldr({|t, acc| lists::append(ollama_pair(t), acc)}, [], turns)
+  end
+
+  def self.ollama_pair(t)
+    {u, a} = t
+    [{role: "user", content: u}, {role: "assistant", content: a}]
+  end
+
+  def self.llm_turn_msgs(turns)
+    lists::foldr({|t, acc| lists::append(llm_pair(t), acc)}, [], turns)
+  end
+
+  def self.llm_pair(t)
+    {u, a} = t
+    [{:user, u}, {:assistant, a}]
+  end
+
+  # --- compaction summarizer (per provider) ---
+
+  def self.summarize_role()
+    "You maintain a running summary of a conversation. Merge the PRIOR SUMMARY with the NEW TURNS into ONE compact summary that preserves every fact, decision, name, number, preference, and open thread needed to continue. Be terse. Reply with ONLY the updated summary, no preamble."
+  end
+
+  def self.render_for_summary(prev, turns)
+    erlang::iolist_to_binary(["PRIOR SUMMARY:\n", prev, "\n\nNEW TURNS:\n",
+                              lists::map({|t| summary_turn_line(t)}, turns)])
+  end
+
+  def self.summary_turn_line(t)
+    {u, a} = t
+    ["User: ", u, "\nAssistant: ", a, "\n\n"]
+  end
+
+  def self.ollama_summarize(model, prev, turns)
+    match ollama_post({model: model, stream: false,
+                       messages: [{role: "system", content: summarize_role()},
+                                  {role: "user", content: render_for_summary(prev, turns)}]})
+      case {:ok, msg}
+        content = maps::get(<<"content">>, msg, <<>>)
+        if content == <<>>
+          prev
+        else
+          content
+        end
+      case _
+        prev
+    end
+  end
+
+  def self.llm_summarize(provider, model, api_key, prev, turns)
+    match Llm::chat(provider, [{:user, render_for_summary(prev, turns)}],
+                    {api_key: api_key, model: model, max_tokens: 1024, system: summarize_role()})
+      case {:error, _}
+        prev
+      case text
+        text
+    end
+  end
+end

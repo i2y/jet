@@ -1,0 +1,28 @@
+module acp_goal_route_demo
+  # routing: a ROUTER reads the task + each model's PROFILE and picks the best-fit model ONCE
+  # per task (vs `:escalate`, which cycles cheap->strong on failure). The profile is whatever
+  # metadata you put on a pool entry -- `tier` (cost) plus any capability notes (lang,
+  # strengths, context, tools). Keys are NOT hardcoded: the router is shown every key (except
+  # name) and weighs them all. So routing is by FIT, not just difficulty -- a writing or
+  # summarization task goes to the cheap writing specialist; a coding task to the coding-strong model.
+  # `select: :route` is the same shared jet_backend capability used by Goal (doer) and Refine
+  # (worker). The router defaults to the cheapest pool model; `router:` overrides it.
+  #
+  #   ./jet acp-serve acp_goal_route_demo::G::handle examples/acp_goal_route_demo.jet
+  #
+  # Validated: "Summarize this article in plain language" -> routed to cheap (Swallow, the
+  # writing specialist); "implement binary search" -> routed to strong (35b, coding).
+  # Multi-dimensional (capability) routing benefits from a capable `router:`; for plain tier
+  # (easy/hard) routing the default cheapest suffices.
+  agent G
+    runner Goal(
+      models: [{name: "ollama:hf.co/mmnga/Llama-3.1-Swallow-8B-Instruct-v0.5-gguf:Q4_K_M", tier: :cheap, lang: :ja, good_at: "plain-language writing and summarization"},
+               {name: "ollama:qwen3.6:35b-a3b", tier: :strong, good_at: "coding, math, logical reasoning"}],
+      select:  :route,
+      router:  "ollama:qwen3.6:35b-a3b",   # capable router for multi-dimensional fit
+      checker: "ollama:qwen3.6:35b-a3b",
+      max_rounds: 1,
+      accept: "The answer addresses the question accurately and directly.")
+    ask handle(task)
+  end
+end

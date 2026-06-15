@@ -1,0 +1,46 @@
+# Deliberative PLANNER (plan-and-execute) as a COMPOSABLE shape. `Plan` decomposes a goal
+# into an ordered, revisable plan (a jet_plan artifact, streamed as an ACP plan), executes
+# the steps in sequence (each step sees the earlier results), RE-PLANS the remainder when a
+# step yields nothing, then synthesizes the final answer.
+#
+# It stays SEQUENTIAL by design -- so it does NOT duplicate the other shapes; you COMPOSE:
+#   - PARALLEL execution of a generated plan        -> use Flow (a one-shot parallel DAG)
+#   - VERIFY a plan against an acceptance condition -> wrap it: Goal(via: {name: :Plan})
+#   - richer per-STEP execution                     -> Plan(via: {name: :Fleet})  (each step a panel)
+# (This separation follows plan-and-execute / ReWOO / LLMCompiler / Magentic-One: the plan is
+# a first-class, revisable artifact; planning and execution are separate and composable.)
+#   ./jet -r agent_planner_demo::run examples/agent_planner_demo.jet   (needs ollama)
+module agent_planner_demo
+  agent Planner
+    runner Plan(model: "ollama:qwen3.6:35b-a3b")
+    ask handle(goal)
+  end
+
+  # Goal wraps Plan: the planner makes each attempt; a cheap checker verifies the acceptance
+  # condition and re-runs the whole plan with feedback until it is met (the two-loop pattern).
+  agent VerifiedPlanner
+    runner Goal(accept: "the reply has exactly three numbered points and a one-line conclusion",
+                via: {name: :Plan},
+                surface: true,
+                model: "ollama:qwen3.6:35b-a3b")
+    ask handle(goal)
+  end
+
+  # Same composition with a borderline acceptance condition: haiku 5-7-5. The two-loop runs
+  # (Plan writes it; the checker gates on 5-7-5 and re-runs until met) -- but counting
+  # syllables reliably is hard for a small checker model, so enforcement is imperfect;
+  # Goal shines most on machine-checkable conditions (a passing test, an exact count).
+  agent VerifiedHaiku
+    runner Goal(accept: "an English haiku of three lines with exactly 5, 7, and 5 syllables, not repeating the same season word",
+                via: {name: :Plan},
+                surface: true,
+                model: "ollama:qwen3.6:35b-a3b")
+    ask handle(goal)
+  end
+
+  def self.run()
+    p = agent_planner_demo::Planner.spawn()
+    io::format("plain Plan =>~n~p~n",
+               [p.handle("Outline a 3-step plan to add caching to a read-heavy API, then summarize it in one line.").await()])
+  end
+end

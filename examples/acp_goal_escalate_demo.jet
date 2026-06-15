@@ -1,0 +1,28 @@
+module acp_goal_escalate_demo
+  # Escalation (cheap-first cascade, FrugalGPT-style): give Goal a tier-ordered `models:`
+  # pool (cheapest first) plus `select: :escalate`. Round 1 attempts with the cheapest
+  # model; if the acceptance CHECK rejects it, the next round escalates to a stronger
+  # model -- so you pay for the big model ONLY when the cheap one's work doesn't pass.
+  # Each round surfaces a "Round N: <tier> (<model>)" note so you can see the cascade.
+  #
+  # The pool is the USER's choice -- any mix of Ollama models and/or ACP agents
+  # (e.g. ..., {name: "claude-code-acp", tier: :frontier}). Nothing about which models
+  # exist is hardcoded into the shape; `select: :static` (the default) just uses one doer.
+  #
+  #   ./jet acp-serve acp_goal_escalate_demo::G::handle examples/acp_goal_escalate_demo.jet
+  #
+  # Try a puzzle small models tend to flub -- the cheap model is rejected, then the strong
+  # one solves it. e.g.: "I have three daughters. Their ages are whole numbers, the product
+  # is 36 and the sum is 13. Only the oldest daughter plays piano. How old is the oldest?"
+  # -> watch it escalate cheap -> strong.
+  agent G
+    runner Goal(
+      models: [{name: "ollama:hf.co/mmnga/Llama-3.1-Swallow-8B-Instruct-v0.5-gguf:Q4_K_M", tier: :cheap},
+               {name: "ollama:qwen3.6:35b-a3b", tier: :strong}],
+      select:  :escalate,
+      checker: "ollama:qwen3.6:35b-a3b",   # a reliable judge here; can be a cheaper model in practice
+      max_rounds: 3,
+      accept: "The answer correctly solves this logic puzzle (three daughters, integer ages with product 36 and sum 13, oldest uniquely determined) and states the oldest daughter's age as a single final number. A wrong number or faulty logic must NOT be marked MET.")
+    ask handle(goal)
+  end
+end

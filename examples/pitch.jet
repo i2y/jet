@@ -1,0 +1,54 @@
+# object = actor = agent : one model, three kinds, on the BEAM.
+module pitch
+  class Point
+    def initialize(x, y)  @x = x  @y = y  end
+    def dist()  math::sqrt(@x * @x + @y * @y)  end
+  end
+
+  actor Counter
+    def initialize()  @n = 0  end
+    def inc()  @n = @n + 1  @n  end
+  end
+
+  agent Sage                           # an AI agent -- same x.method() call
+    model "ollama:qwen3.6:35b-a3b"            # a real local LLM, no API key
+    role "Answer in 3 words or fewer."
+    ask answer(q) -> {answer: String}  # native structured output
+  end
+
+  actor Worker                         # an agent is just a supervised process
+    def initialize(s)  @t = s  end
+    def add(n)  @t = @t + n  @t  end
+    def on_message(_)  erlang::error(:boom)  end   # crash on any message
+  end
+
+  def self.c(n, s)  [27] ++ "[" ++ n ++ "m" ++ s ++ [27] ++ "[0m"  end   # ANSI color
+
+  def self.supervise(name)             # respawn the worker whenever it dies
+    pitch::Worker.spawn_named(name, 0)
+    erlang::monitor(:process, erlang::whereis(name))
+    receive
+      case {:DOWN, _, _, _, why}
+        io::format(c("33", "  [supervisor] crashed (~p) -- restarting") ++ "~n", [erlang::element(1, why)])
+        pitch::supervise(name)
+    end
+  end
+
+  def self.run()
+    logger::set_primary_config(:level, :critical)
+    io::format("  Point.new(3,4).dist()  => ~p~n", [pitch::Point.new(3, 4).dist()])
+    timer::sleep(450)
+    io::format("  Counter.spawn().inc()  => ~p~n", [pitch::Counter.spawn().inc()])
+    timer::sleep(450)
+    io::format("  Sage.answer(..)        => ~p~n", [pitch::Sage.spawn().answer("capital of France?").await()])
+    timer::sleep(500)
+    erlang::spawn(:pitch, :supervise, [:worker])
+    timer::sleep(400)
+    io::format("  worker.add(10)         => ~p~n", [:worker.add(10)])
+    timer::sleep(500)
+    io::format(c("31", "  :worker ! :crash       -> killed it") ++ "~n", [])
+    :worker ! :crash
+    timer::sleep(900)
+    io::format(c("32", "  worker.add(1)          => ~p  (alive again)") ++ "~n", [:worker.add(1)])
+  end
+end

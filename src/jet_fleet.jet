@@ -1,0 +1,559 @@
+module jet_fleet
+  # `Fleet` runner: one ACP-facing agent, behind it a fleet of BEAM sub-agents.
+  #
+  #   agent Panel
+  #     runner Fleet(members: [{name: "Risks",  role: "List the failure modes."},
+  #                            {name: "Upside", role: "List the benefits."}])
+  #     ask review(topic)
+  #   end
+  #
+  # The members run in PARALLEL, each its own BEAM process with its own lens. They
+  # are monitored and crash-ISOLATED: a member that crashes is reported failed and
+  # the rest still synthesize -- the fleet never goes down. Progress streams to the
+  # client as a plan (the roster) + one tool_call per member (in_progress ->
+  # completed/failed), then the synthesized report as the answer. This is the
+  # object=actor=agent thesis at fleet scale: supervised, fault-tolerant, one face.
+
+  def self.turn(config, method, args, schema)
+    jet_http_ffi::ensure_started()
+    opts = runner_opts(config)
+    # route via the CONFIGURED backend: a cheap local `model` if set, else the agent
+    # behind `drives` (NOT a hardcoded Ollama call -- an all-ACP fleet has no Ollama).
+    router = jet_backend::resolve(nil, maps::get(:model, opts, nil), maps::get(:drives, opts, nil), nil)
+    topic = jet_acp::build_prompt(config, method, args) # the whole conversation
+    jet_acp::emit_event({:thought, <<"Deciding whether this needs the team...">>})
+    if jet_backend::is_substantive_request?(router, topic)   # new request -> convene; chitchat/refinement -> direct
+      convene(opts, topic, schema)
+    else
+      jet_acp::emit_event({:thought, <<"A follow-up -- answering directly, no fan-out needed.">>})
+      answer_directly(lead_backend_of(opts), topic, schema)
+    end
+  end
+
+  def self.lead_backend_of(opts)
+    jet_backend::resolve_lead(maps::get(:model, opts, nil),
+                              maps::get(:drives, opts, nil), maps::get(:lead, opts, nil))
+  end
+
+  # (convene-on-demand routing -- "is this a new request, or chitchat/refinement?" --
+  # now lives in jet_backend::is_substantive_request?, shared with Flow + Architect.)
+
+  # fan a turn out to the members (in parallel), then reduce. Task-agnostic: the
+  # members' roles define WHAT they do, `reduce:` defines how the lead combines
+  # them, `ground:` is optional. The analysis "panel" is just one configuration;
+  # `workspace: :worktree` switches to the parallel-codegen variant (each member
+  # edits in its own git worktree; the lead picks the best implementation).
+  def self.convene(opts, topic, schema)
+    if maps::get(:workspace, opts, nil) == :worktree
+      convene_worktree(opts, topic, schema)
+    else
+      convene_text(opts, topic, schema)
+    end
+  end
+
+  def self.convene_text(opts, topic, schema)
+    members = maps::get(:members, opts, [])
+    if solo?(members)
+      solo_answer(opts, members, topic, schema)   # 1 member -> no fan-out/synthesis (it would just restate)
+    else
+      model = maps::get(:model, opts, nil)
+      drives = maps::get(:drives, opts, nil)
+      facts = if maps::get(:ground, opts, nil) == :wikipedia    # grounding is opt-in
+        wiki_ground(topic)
+      else
+        <<>>
+      end
+      jet_acp::emit_event({:plan, plan_of(members)})          # the roster, as a checklist
+      members = lists::map({|m| add_node(m, model, drives)}, members)   # one trace node per member (running)
+      parent = erlang::self()
+      mons = spawn_all(members, model, drives, topic, facts, parent)   # fan out (parallel)
+      results = collect(maps::size(mons), mons, maps::new())  # gather, crash-isolated
+      lists::foreach({|m| jet_acp::emit_trace(maps::get(:node, m, nil), node_label(m, model, drives), "ok")}, members)
+      sid = jet_acp::next_trace_id()
+      slabel = erlang::iolist_to_binary(["🧬 synthesis · ", jet_backend::bk_label(model, drives)])
+      jet_acp::emit_trace(sid, slabel, "running")
+      report = synthesize(lead_backend_of(opts), maps::get(:reduce, opts, nil), topic, members, results)
+      jet_acp::emit_trace(sid, slabel, "ok")
+      coerce(report, schema)            # synthesize already emitted the answer once
+    end
+  end
+
+  # a trace node per member (parallel members can't thread the parent across processes, so each
+  # member node updates running -> ok from the PARENT once collect gathers it).
+  def self.node_label(m, model, drives)
+    erlang::iolist_to_binary(["🔭 ", to_bin(maps::get(:name, m, <<"member">>)), " · ", jet_backend::bk_label(maps::get(:model, m, model), maps::get(:drives, m, drives))])
+  end
+
+  def self.add_node(m, model, drives)
+    maps::put(:node, jet_acp::trace_node(node_label(m, model, drives), "running"), m)
+  end
+
+  # a Fleet needs >=2 members to be worth synthesizing; with 0 or 1, the "synthesis"
+  # just parrots the lone member (a near-duplicate of its tool_call). So answer once,
+  # directly, in that member's role -- no fan-out, no restating.
+  def self.solo?(members)
+    match members
+      case []
+        true
+      case [_one]
+        true
+      case _
+        false
+    end
+  end
+
+  def self.solo_answer(opts, members, topic, schema)
+    m = solo_member(members)
+    backend = jet_backend::resolve(maps::get(:drives, m, nil), maps::get(:model, m, nil),
+                                   maps::get(:drives, opts, nil), maps::get(:model, opts, nil))
+    role = to_bin(maps::get(:role, m, <<"Do the task and answer the user directly, in their language.">>))
+    text = jet_backend::run_streaming(backend, role, to_bin(topic))
+    out = if text == <<>>
+      jet_acp::emit_event({:text, <<"(no response)">>})
+      <<"(no response)">>
+    else
+      text
+    end
+    coerce(out, schema)
+  end
+
+  def self.solo_member(members)
+    match members
+      case [m, *_]
+        m
+      case _
+        {name: <<"Agent">>, role: <<"Do the task and answer the user directly, in their language.">>}
+    end
+  end
+
+  # --- parallel codegen (workspace: :worktree): N members each implement the SAME
+  # task in their OWN git worktree (no clobbering), then the lead compares the diffs
+  # and picks the best. MoA for code. ---
+
+  def self.convene_worktree(opts, topic, schema)
+    members = maps::get(:members, opts, [])
+    model = maps::get(:model, opts, nil)
+    drives = maps::get(:drives, opts, nil)
+    jet_acp::emit_event({:plan, plan_of(members)})
+    members = lists::map({|m| add_node(m, model, drives)}, members)   # one trace node per member (running)
+    parent = erlang::self()
+    wts = make_worktrees(members)                          # name -> worktree path (or :no_wt)
+    mons = spawn_wt_all(members, model, drives, topic, wts, parent)
+    results = collect(maps::size(mons), mons, maps::new()) # name -> the member's summary text
+    lists::foreach({|m| jet_acp::emit_trace(maps::get(:node, m, nil), node_label(m, model, drives), "ok")}, members)
+    sections = lists::map({|m| wt_section(m, results, wts)}, members)   # {name, summary, diff}
+    sid = jet_acp::next_trace_id()
+    slabel = erlang::iolist_to_binary(["🧬 synthesis · ", jet_backend::bk_label(model, drives)])
+    jet_acp::emit_trace(sid, slabel, "running")
+    report = synthesize_code(lead_backend_of(opts), topic, sections)   # emits the answer once
+    jet_acp::emit_trace(sid, slabel, "ok")
+    cleanup_worktrees(wts)                                 # always clean up the worktrees
+    coerce(report, schema)
+  end
+
+  def self.make_worktrees(members)
+    lists::foldl({|m, acc| put_wt(acc, to_bin(maps::get(:name, m, <<"agent">>)))}, maps::new(), members)
+  end
+
+  def self.put_wt(acc, name)
+    match jet_worktree::create(name)
+      case {:ok, path}
+        maps::put(name, path, acc)
+      case _
+        maps::put(name, :no_wt, acc)
+    end
+  end
+
+  def self.spawn_wt_all(members, model, drives, topic, wts, parent)
+    lists::foldl({|m, mons| spawn_wt_one(m, model, drives, topic, wts, parent, mons)}, maps::new(), members)
+  end
+
+  def self.spawn_wt_one(m, model, drives, topic, wts, parent, mons)
+    name = to_bin(maps::get(:name, m, <<"agent">>))
+    role = wt_role(to_bin(maps::get(:role, m, <<"You are a software engineer.">>)))
+    backend = jet_backend::resolve(maps::get(:drives, m, nil), maps::get(:model, m, nil), drives, model)
+    wt = maps::get(name, wts, :no_wt)
+    {pid, mref} = erlang::spawn_monitor({|| jet_fleet::member_proc_wt(parent, name, role, backend, topic, wt)})
+    jet_acp::emit_event({:tool_call, {id: name, title: name, kind: "edit", status: "in_progress"}})
+    maps::put(pid, {name, mref}, mons)
+  end
+
+  # a worktree member edits real files, so steer it away from the failure mode we
+  # saw live: incremental Edits with stale `old_string` anchors. Prefer whole-file
+  # Writes; if it must edit, read first so the anchor is exact.
+  def self.wt_role(role)
+    erlang::iolist_to_binary([role,
+      " You are working in the current directory -- your own isolated git worktree, so edit files freely. Prefer writing each file's COMPLETE contents in a single Write (create or overwrite the whole file at once) rather than many small incremental edits. If you must edit an existing file, Read it immediately before each edit so your match anchors are exact. Finish with every file complete and correct."])
+  end
+
+  # CRUCIAL: only run the member if it got its OWN worktree. If creation failed,
+  # do NOT fall back to a nil workspace -- that runs the agent in the served repo's
+  # cwd and lets it edit the user's real files (clobbering, no isolation). Skip it.
+  def self.member_proc_wt(parent, name, role, backend, topic, wt)
+    result = if wt == :no_wt
+      <<"(skipped: could not create an isolated git worktree; not editing the main repo)">>
+    else
+      jet_backend::run_in(backend, role, topic, wt)
+    end
+    parent ! {:fleet_done, erlang::self(), name, result}
+  end
+
+  def self.wt_section(m, results, wts)
+    name = to_bin(maps::get(:name, m, <<"agent">>))
+    wt = maps::get(name, wts, :no_wt)
+    diff = if wt == :no_wt
+      <<"(no worktree created)">>
+    else
+      cap(jet_worktree::diff(wt), 2500)
+    end
+    {name: name, summary: section_body(maps::get(name, results, <<"(no result)">>)), diff: diff}
+  end
+
+  def self.cleanup_worktrees(wts)
+    lists::foreach({|kv| cleanup_one(kv)}, maps::to_list(wts))
+  end
+
+  def self.cleanup_one(kv)
+    {_name, wt} = kv
+    if wt == :no_wt
+      :ok
+    else
+      jet_worktree::remove(wt)
+    end
+  end
+
+  # the lead compares the candidate diffs and picks the best implementation.
+  def self.synthesize_code(backend, topic, sections)
+    jet_acp::emit_event({:thought, <<"Comparing the implementations and picking the best...">>})
+    digest = erlang::iolist_to_binary(lists::map({|s| code_digest(s)}, sections))
+    role = "You are the lead engineer. Several team members each implemented the SAME task in isolation; their diffs are below. Compare them and pick the SINGLE best implementation. State the winner, explain briefly why it wins, then show that winner's diff verbatim. Reply in the user's language."
+    user = erlang::iolist_to_binary(["Task: ", topic, "\n\nCandidate implementations:\n", digest,
+                                     "\n\nPick the best, justify, and show its diff."])
+    text = jet_backend::run_streaming(backend, role, user)   # emits the answer once
+    if text == <<>>
+      jet_acp::emit_event({:text, digest})
+      digest
+    else
+      text
+    end
+  end
+
+  def self.code_digest(s)
+    ["\n## ", maps::get(:name, s), "\nsummary: ", maps::get(:summary, s), "\ndiff:\n", maps::get(:diff, s), "\n"]
+  end
+
+  def self.cap(bin, n)
+    if erlang::byte_size(bin) > n
+      erlang::iolist_to_binary([binary::part(bin, 0, n), "\n...(truncated)"])
+    else
+      bin
+    end
+  end
+
+  # the lead answers the latest message straight from the conversation (which
+  # already holds the panel's prior synthesis) -- no fan-out, no extra cost.
+  def self.answer_directly(backend, topic, schema)
+    role = "You are the lead of an analyst panel, mid-conversation. Answer the user's most recent message using the conversation so far (it already holds your panel's earlier analysis). Reply in the user's language. Be concise and direct."
+    user = erlang::iolist_to_binary(["Conversation:\n", topic, "\n\nAnswer the user's most recent message now."])
+    text = jet_backend::run_streaming(backend, role, user)   # emits the answer once
+    out = if text == <<>>
+      jet_acp::emit_event({:text, <<"(no response)">>})
+      <<"(no response)">>
+    else
+      text
+    end
+    coerce(out, schema)
+  end
+
+  # --- fan out: one monitored BEAM process per member ---
+
+  def self.spawn_all(members, model, drives, topic, facts, parent)
+    lists::foldl({|m, mons| spawn_one(m, model, drives, topic, facts, parent, mons)}, maps::new(), members)
+  end
+
+  def self.spawn_one(m, model, drives, topic, facts, parent, mons)
+    name = to_bin(maps::get(:name, m, <<"agent">>))
+    role = to_bin(maps::get(:role, m, <<"You are a concise analyst.">>))
+    crash = maps::get(:crash, m, false)
+    backend = jet_backend::resolve(maps::get(:drives, m, nil), maps::get(:model, m, nil), drives, model)
+    {pid, mref} = erlang::spawn_monitor({|| jet_fleet::member_proc(parent, name, role, backend, topic, facts, crash)})
+    jet_acp::emit_event({:tool_call, {id: name, title: name, kind: "think", status: "in_progress"}})
+    maps::put(pid, {name, mref}, mons)
+  end
+
+  # a sub-agent: run its lens over the topic, report back. Its backend is EITHER a
+  # local LLM OR a real external ACP agent (e.g. claude-code-acp) -- so a fleet
+  # can be all-local, all-agent, or mixed, all parallel + supervised behind one
+  # face. A crash here stays here (the monitor turns it into a failed slot).
+  def self.member_proc(parent, name, role, backend, topic, facts, crash)
+    if crash
+      erlang::error(:member_crashed)
+    else
+      parent ! {:fleet_done, erlang::self(), name, run_member(backend, role, topic, facts)}
+    end
+  end
+
+  # one member: assemble its input (the topic, grounded with any facts) and run its
+  # backend (local LLM or an ACP agent) via the shared substrate. The ROLE defines
+  # the task; the engine stays task-agnostic.
+  def self.run_member(backend, role, topic, facts)
+    input = if facts == <<>>
+      to_bin(topic)
+    else
+      erlang::iolist_to_binary(["Background facts (use these, do not contradict them):\n",
+                                facts, "\n\n", topic])
+    end
+    jet_backend::run(backend, role, input)
+  end
+
+  # --- grounding: one Wikipedia lookup feeds the whole panel real facts (no API
+  # key, one deterministic fetch -- more reliable than per-member tool loops). A
+  # tool_call surfaces it; on a miss the panel just proceeds ungrounded. ---
+
+  def self.wiki_ground(topic)
+    jet_http_ffi::ensure_started()
+    body = erlang::iolist_to_binary(["action=query&format=json&generator=search&gsrlimit=1&prop=extracts&exintro=1&explaintext=1&exchars=700&gsrsearch=",
+                                     uri_string::quote(to_bin(topic))])
+    match jet_http_ffi::post("https://en.wikipedia.org/w/api.php",
+                             [{<<"content-type">>, <<"application/x-www-form-urlencoded">>},
+                              {<<"user-agent">>, <<"JetLang/0.1 (jet acp fleet)">>}],
+                             body)
+      case {:ok, resp}
+        report_lookup(extract_wiki(maps::get(:body, resp)))
+      case _
+        <<>>
+    end
+  end
+
+  def self.report_lookup(facts)
+    if facts == <<>>
+      facts
+    else
+      jet_acp::emit_event({:tool_call, {id: "lookup", title: "Looked up facts (Wikipedia)",
+                                        kind: "fetch", status: "completed", output: facts}})
+      facts
+    end
+  end
+
+  def self.extract_wiki(body)
+    match jet_json_ffi::decode(body)
+      case {:ok, m}
+        first_extract(maps::values(maps::get(<<"pages">>, maps::get(<<"query">>, m, maps::new()), maps::new())))
+      case _
+        <<>>
+    end
+  end
+
+  def self.first_extract(pages)
+    match pages
+      case [p, *_]
+        to_bin(maps::get(<<"extract">>, p, <<>>))
+      case _
+        <<>>
+    end
+  end
+
+  # --- gather: a done message completes a slot; a DOWN fails one. Either way the
+  # count drops, so one crashed member can't stall the fleet. ---
+
+  def self.collect(remaining, mons, results)
+    if remaining <= 0
+      results
+    else
+      receive
+        case {:fleet_done, pid, name, out}
+          erlang::put(:__fleet_idle__, 0)                        # progress -> reset the idle heartbeat
+          erlang::demonitor(member_mref(pid, mons), [:flush])    # no stray DOWN after a clean finish
+          jet_acp::emit_event({:tool_call, {id: name, status: "completed", output: out}})
+          collect(remaining - 1, maps::remove(pid, mons), maps::put(name, out, results))
+        case {:DOWN, _mref, :process, pid, reason}
+          erlang::put(:__fleet_idle__, 0)
+          name = member_name(pid, mons)
+          jet_acp::emit_event({:tool_call, {id: name, status: "failed", output: crash_message(reason)}})
+          collect(remaining - 1, maps::remove(pid, mons), maps::put(name, {:failed, reason}, results))
+      after 60000
+        collect_tick(remaining, mons, results)
+      end
+    end
+  end
+
+  # No member finished for another minute. Surface a heartbeat (how many are still working)
+  # so a long-but-LIVE fan-out is visible, and after collect_cap() minutes with NO new result
+  # GIVE UP on the still-pending members (record them as timed out) so collect RETURNS instead
+  # of hanging forever -- the lead then synthesizes from whatever finished, worktrees get
+  # cleaned, and Goal can re-attempt. (Each member's own DRIVE already caps ~10 min in
+  # jet_acp::await; this is the backstop for a member wedged ABOVE the drive, e.g. in diff
+  # capture -- the silent hang that left a stray worktree and never reached Goal's Check.)
+  def self.collect_tick(remaining, mons, results)
+    ticks = collect_idle() + 1
+    erlang::put(:__fleet_idle__, ticks)
+    if ticks >= collect_cap()
+      abandon_pending(mons, results)
+    else
+      jet_acp::emit_event({:thought, erlang::iolist_to_binary(["(", erlang::integer_to_binary(remaining), " member(s) still working, ", erlang::integer_to_binary(ticks), " min with no new result…)"])})
+      collect(remaining, mons, results)
+    end
+  end
+
+  def self.collect_idle()
+    match erlang::get(:__fleet_idle__)
+      case :undefined
+        0
+      case n
+        n
+    end
+  end
+
+  def self.collect_cap()
+    12      # ~12 min with NO member finishing -> treat the rest as stalled
+  end
+
+  # record every still-pending member (left in mons) as a timeout, so collect's caller
+  # proceeds with whatever finished instead of waiting forever.
+  def self.abandon_pending(mons, results)
+    lists::foldl({|pid, acc| abandon_one(pid, mons, acc)}, results, maps::keys(mons))
+  end
+
+  def self.abandon_one(pid, mons, results)
+    name = member_name(pid, mons)
+    erlang::demonitor(member_mref(pid, mons), [:flush])
+    jet_acp::emit_event({:tool_call, {id: name, status: "failed",
+      output: erlang::iolist_to_binary(["(member timed out -- no result after ", erlang::integer_to_binary(collect_cap()), " min)"])}})
+    maps::put(name, {:failed, :timeout}, results)
+  end
+
+  def self.member_mref(pid, mons)
+    {_name, mref} = maps::get(pid, mons, {nil, nil})
+    mref
+  end
+
+  def self.member_name(pid, mons)
+    {name, _mref} = maps::get(pid, mons, {<<"?">>, nil})
+    name
+  end
+
+  # --- reduce: a REAL synthesis. A lead agent integrates the panel's notes into
+  # one conclusion (map + reduce), instead of just concatenating them. Falls back
+  # to a plain report only if the synthesis call fails, so we never return empty.
+  # The per-member analyses already live in the tool_call outputs; this final
+  # message is the integrated conclusion -- the orchestrator's actual value-add. ---
+
+  def self.synthesize(backend, reduce, topic, members, results)
+    jet_acp::emit_event({:thought, <<"Combining the team's outputs...">>})
+    user = erlang::iolist_to_binary(["Conversation so far:\n", topic,
+                                     "\n\nYour members' outputs:\n",
+                                     digest_of(members, results),
+                                     "\n\nNow produce the result for the user's most recent message, in their language."])
+    text = jet_backend::run_streaming(backend, reduce_role(reduce), user)   # emits the answer ONCE
+    if text == <<>>
+      fb = fallback_report(members, results)
+      jet_acp::emit_event({:text, fb})
+      fb
+    else
+      text
+    end
+  end
+
+  # the lead's instruction. `reduce:` from config defines how to combine the
+  # members; the default is a generic synthesis. Either way: latest message, user's
+  # language, synthesize don't list, and honor a revise request (translate/shorten).
+  def self.reduce_role(reduce)
+    base = if reduce == nil
+      "Combine your members' outputs into one coherent result that answers the user's most recent message."
+    else
+      to_bin(reduce)
+    end
+    erlang::iolist_to_binary(["You are the lead of a team. ", base,
+      " Reply in the SAME LANGUAGE the user used; synthesize rather than list the outputs. If the latest message instead asks to revise the previous answer (translate, shorten, refocus), do exactly that."])
+  end
+
+  # a compact "- Name: notes" list to feed the lead synthesizer.
+  def self.digest_of(members, results)
+    erlang::iolist_to_binary(lists::map({|m| digest_one(m, results)}, members))
+  end
+
+  def self.digest_one(m, results)
+    name = to_bin(maps::get(:name, m, <<"agent">>))
+    out = maps::get(name, results, <<"(no result)">>)
+    ["- ", name, ": ", section_body(out), "\n"]
+  end
+
+  # used only if the synthesis call fails: the plain concatenated report.
+  def self.fallback_report(members, results)
+    header = erlang::iolist_to_binary(["Fleet report (",
+                                       erlang::integer_to_binary(erlang::length(members)),
+                                       " agents, parallel + crash-isolated):\n\n"])
+    sections = lists::map({|m| section(m, results)}, members)
+    erlang::iolist_to_binary([header, sections])
+  end
+
+  def self.section(m, results)
+    name = to_bin(maps::get(:name, m, <<"agent">>))
+    out = maps::get(name, results, <<"(no result)">>)
+    ["## ", name, "\n", section_body(out), "\n\n"]
+  end
+
+  def self.section_body(out)
+    match out
+      case {:failed, reason}
+        crash_message(reason)
+      case _
+        to_bin(out)
+    end
+  end
+
+  # a human-readable crash line (the cause, not the raw Erlang term + stacktrace),
+  # while still making clear it was a real crash that the fleet isolated.
+  def self.crash_message(reason)
+    erlang::iolist_to_binary(["crashed (", reason_text(reason),
+                              ") -- isolated; the rest of the fleet was unaffected"])
+  end
+
+  # --- helpers ---
+
+  def self.plan_of(members)
+    lists::map({|m| to_bin(maps::get(:name, m, <<"agent">>))}, members)
+  end
+
+  def self.coerce(report, schema)
+    if schema == :any
+      {:ok, report}
+    else
+      jet_acp::parse_result(report, schema)
+    end
+  end
+
+  def self.runner_opts(config)
+    runner = maps::get(:runner, config, nil)
+    if erlang::is_map(runner)
+      maps::get(:opts, runner, maps::new())
+    else
+      maps::new()
+    end
+  end
+
+  # the cause, cleanly: erlang::error(X) surfaces as {X, Stacktrace} -- keep X,
+  # drop the stacktrace dump. Anything else is shown compactly.
+  def self.reason_text(reason)
+    match reason
+      case {kind, trace} if erlang::is_atom(kind) and erlang::is_list(trace)
+        erlang::atom_to_binary(kind, :utf8)
+      case _
+        if erlang::is_atom(reason)
+          erlang::atom_to_binary(reason, :utf8)
+        else
+          erlang::iolist_to_binary(io_lib::format("~P", [reason, 4]))   # depth-limited
+        end
+    end
+  end
+
+  def self.to_bin(v)
+    if erlang::is_binary(v)
+      v
+    elsif erlang::is_list(v)
+      erlang::iolist_to_binary(v)
+    else
+      erlang::iolist_to_binary(io_lib::format("~p", [v]))
+    end
+  end
+end

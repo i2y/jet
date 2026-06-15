@@ -1,6 +1,7 @@
 -module(jet_cli_ffi).
--export([write_beam/2, call_module_func/2, add_code_path/1, setup_code_paths/0,
-         get_stdlib_beam_dir/0, do_build_escript/3, do_build_release/3]).
+-export([write_beam/2, call_module_func/2, call_acp_serve/3, add_code_path/1,
+         setup_code_paths/0, get_stdlib_beam_dir/0, do_build_escript/3,
+         do_build_release/3]).
 
 write_beam(Path, Binary) when is_binary(Path) ->
     case file:write_file(binary_to_list(Path), Binary) of
@@ -14,7 +15,7 @@ setup_code_paths() ->
     JetDir = find_jet_dir(),
     StdlibDir = filename:join(JetDir, "src"),
     code:add_pathz(StdlibDir),
-    %% Also add subdirectories of src/ for Symphony etc.
+    %% Also add subdirectories of src/ to the code path (nested module layouts).
     case file:list_dir(StdlibDir) of
         {ok, Entries} ->
             lists:foreach(fun(Entry) ->
@@ -43,6 +44,14 @@ call_module_func(Module, Func) when is_binary(Module), is_binary(Func) ->
     ModAtom = binary_to_atom(Module, utf8),
     FuncAtom = resolve_func_name(Func),
     apply(ModAtom, FuncAtom, []),
+    nil.
+
+%% Serve a Jet agent over ACP by name: `jet acp-serve mod::Agent::method`.
+call_acp_serve(Module, Class, Method)
+  when is_binary(Module), is_binary(Class), is_binary(Method) ->
+    jet_acp_server:serve_named(binary_to_atom(Module, utf8),
+                               binary_to_atom(Class, utf8),
+                               binary_to_atom(Method, utf8)),
     nil.
 
 resolve_func_name(Func) ->

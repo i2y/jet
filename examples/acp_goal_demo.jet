@@ -1,0 +1,18 @@
+module acp_goal_demo
+  # Goal: the "/goal" idea as a Jet shape -- a persistent, self-verifying loop. You give
+  # a goal + a machine-checkable `accept:` condition; each round an agent ATTEMPTS it and
+  # a cheap CHECKER decides if the condition is MET, looping with feedback until met or
+  # max_rounds. It generalizes Refine (the critic becomes an explicit acceptance gate),
+  # and can wrap a sub-shape for each attempt via `via:` (Flow/Architect/Pipeline).
+  #
+  #   ./jet acp-serve acp_goal_demo::Achiever::handle examples/acp_goal_demo.jet
+  #
+  # Try: "Implement a fizzbuzz(n) function in Go" -- it will keep going until the build
+  # and tests actually pass (the checker reads the command output, not just claims).
+  agent Achiever
+    runner Goal(drives: "claude-code-acp",
+                accept: "The project builds with `go build ./...` and a test passes with `go test ./...`, demonstrated with the actual command output (not just claimed).",
+                max_rounds: 5)
+    ask handle(goal)
+  end
+end

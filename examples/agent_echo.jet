@@ -1,0 +1,27 @@
+# `agent` demo.
+#
+# `agent` desugars to an actor whose `expose`d methods dispatch to a runner,
+# passing the static config (runner/role/tools) and each method's return schema.
+# This uses the stub runner (jet_agent::dispatch), which just echoes the
+# structured call, so you can see what gets threaded through. Real runners
+# (Llm: Jet runs the LLM loop; Acp: drive an external agent via Agent Client
+# Protocol) will replace the dispatch with an actual turn. See docs/agent_design.md.
+#
+#   ./jet -r agent_echo::run examples/agent_echo.jet
+
+module agent_echo
+  agent Researcher
+    runner Echo(model: "claude-opus-4-8")
+    role "You research rigorously and cite sources."
+    tools web_search, Summarizer
+    expose research(question) -> {answer: String, sources: [String]}
+    expose summarize(text) -> {summary: String}
+  end
+
+  def self.run()
+    r = agent_echo::Researcher.spawn()
+    # agent calls are async-by-default: they return a Future, .await() the result
+    io::format("research:~n  ~p~n", [r.research("What is BEAM?").await()])
+    io::format("summarize:~n  ~p~n", [r.summarize("long text...").await()])
+  end
+end

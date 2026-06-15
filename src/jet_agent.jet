@@ -1,0 +1,451 @@
+module jet_agent
+  # Agent runtime (stub runner).
+  #
+  # `agent` exposed methods desugar to returning the marker
+  #   {:jet_agent_async, config, method, args, schema, kind}   # kind = :ask | :task
+  # jet_runtime:handle_call sees the marker and makes the call async-by-default:
+  # it spawns a worker (run_turn) and immediately replies an AsyncResult future,
+  # so the caller is never blocked. `future.await()` yields the turn's result.
+  #
+  # This stub `dispatch/4` synthesizes a schema-conforming value and validates
+  # it. Real runners (Llm: Jet runs the LLM loop; Acp: drive an external agent
+  # via Agent Client Protocol) replace dispatch/4 with an actual turn.
+
+  # Worker entry: runs the turn and delivers the result to the caller.
+  def self.run_turn(caller, ref, config, method, args, schema, kind)
+    # stash the stream target so runners can emit {ref, {:item, chunk}} as
+    # output arrives; the final value is delivered as {ref, {:done, result}}.
+    erlang::put(:__acp_stream__, {caller, ref})
+    match args
+      case [:jet_describe]
+        # agent-structure probe: reply the static composition, run nothing
+        caller ! {ref, {:item, {:describe, describe(config)}}}
+        caller ! {ref, {:done, :ok}}
+      case [:jet_list_commands]
+        # slash-command probe on a native (non-ACP) runner: no commands -> reply [] (no real turn).
+        # ACP runners never reach here; they're intercepted in jet_runtime's :Acp branch.
+        caller ! {ref, {:item, {:commands, []}}}
+        caller ! {ref, {:done, :ok}}
+      case _
+        result = try
+          dispatch(config, method, args, schema, kind)
+        catch e
+          {:error, :agent_turn_crashed, e.get(:class), e.get(:reason)}
+        end
+        caller ! {ref, {:done, result}}
+    end
+  end
+
+  def self.dispatch(config, method, args, schema, kind)
+    match runner_name(config)
+      case :Acp
+        jet_acp::turn(config, method, args, schema)
+      case :Llm
+        jet_llm::turn(config, method, args, schema)
+      case :Fleet
+        jet_fleet::turn(config, method, args, schema)
+      case :Pipeline
+        jet_pipeline::turn(config, method, args, schema)
+      case :Refine
+        jet_refine::turn(config, method, args, schema)
+      case :Debate
+        jet_debate::turn(config, method, args, schema)
+      case :Auto
+        jet_auto::turn(config, method, args, schema)
+      case :Architect
+        jet_architect::turn(config, method, args, schema)
+      case :Flow
+        jet_flow::turn(config, method, args, schema)
+      case :Goal
+        jet_goal::turn(config, method, args, schema)
+      case :Plan
+        jet_planner::turn(config, method, args, schema)
+      case _
+        stub_turn(config, schema, kind)
+    end
+  end
+
+  def self.runner_name(config)
+    runner = maps::get(:runner, config, nil)
+    if erlang::is_map(runner)
+      maps::get(:name, runner, :stub)
+    else
+      :stub
+    end
+  end
+
+  # a structured description of an agent's COMPOSITION (its declared runner shape + key params),
+  # for the Console's agent-structure visualizer. Pure: reads the static config, runs nothing.
+  def self.describe(config)
+    runner = maps::get(:runner, config, nil)
+    opts = if erlang::is_map(runner)
+      maps::get(:opts, runner, maps::new())
+    else
+      maps::new()
+    end
+    {runner: runner_name(config),
+     model: maps::get(:model, opts, nil),
+     drives: maps::get(:drives, opts, nil),
+     models: maps::get(:models, opts, []),
+     select: maps::get(:select, opts, nil),
+     via: via_name(maps::get(:via, opts, nil)),
+     memory: maps::get(:memory, config, nil)}
+  end
+
+  def self.via_name(via)
+    if erlang::is_map(via)
+      maps::get(:name, via, nil)
+    else
+      via
+    end
+  end
+
+  # Get-or-create the agent's persistent ACP connection (stored in agent state
+  # so the session is reused across turns). Returns {conn_pid, new_self}.
+  def self.ensure_acp_conn(self_obj, config, agent_pid)
+    state = erlang::element(3, self_obj)
+    existing = maps::get(:__acp_conn__, state, nil)
+    if fresh?(config)
+      if alive?(existing)
+        existing ! :__close__       # :fresh -> drop the prior session each turn
+      end
+      open_and_store(self_obj, config, agent_pid, state)
+    elsif alive?(existing)
+      {existing, self_obj}
+    else
+      open_and_store(self_obj, config, agent_pid, state)
+    end
+  end
+
+  def self.open_and_store(self_obj, config, agent_pid, state)
+    cmd = jet_acp::command_of(maps::get(:runner, config, nil))
+    conn = if jet_claude::native?(cmd)
+      jet_claude::open_connection(config, agent_pid)   # bare `claude` -> native CLI (no ACP adapter)
+    else
+      jet_acp::open_connection(config, agent_pid)       # claude-code-acp / codex / gemini / ... -> ACP
+    end
+    {conn, erlang::setelement(3, self_obj, maps::put(:__acp_conn__, conn, state))}
+  end
+
+  def self.fresh?(config)
+    maps::get(:memory, config, :session) == :fresh
+  end
+
+  # Get-or-create the agent's native memory (a per-agent ETS table OWNED by this
+  # gen_server, so the one-shot turn worker writes to it directly and it survives the
+  # worker). `:fresh` -> no memory (stateless, as the native path was before). Returns
+  # {tid_or_nil, new_self}. The tid is also injected into the worker's config (`:__mem__`)
+  # so the Llm runner can thread conversation history + facts. See jet_memory.
+  def self.ensure_mem(self_obj, config)
+    if fresh?(config) or server_owned?()
+      {nil, self_obj}
+    else
+      state = erlang::element(3, self_obj)
+      existing = maps::get(:__mem__, state, nil)
+      if existing != nil
+        {existing, self_obj}
+      else
+        handle = jet_memory::open(mem_opts(config))
+        {handle, erlang::setelement(3, self_obj, maps::put(:__mem__, handle, state))}
+      end
+    end
+  end
+
+  # memory id: `memory "<id>"` (a STRING -- Jet string literals are char lists, not
+  # binaries) -> DURABLE, snapshot-backed (survives restart). `memory :session` (an atom,
+  # the default) or no `memory` decl (nil) -> ephemeral in-RAM. (`:fresh` handled above.)
+  def self.mem_opts(config)
+    m = maps::get(:memory, config, :session)
+    if string_id?(m)
+      {id: m}
+    else
+      maps::new()
+    end
+  end
+
+  def self.string_id?(m)
+    erlang::is_binary(m) or (erlang::is_list(m) and m != [])
+  end
+
+  # Under `jet acp-serve`, the ACP server OWNS conversation memory (it does replay +
+  # loadSession), so a server-driven agent must NOT also remember -- otherwise the
+  # transcript is double-counted (the server threads it AND the agent re-threads/stores
+  # it). The server registers :jet_acp_router; its presence means "defer to the server".
+  def self.server_owned?()
+    erlang::whereis(:jet_acp_router) != :undefined
+  end
+
+  # Get-or-create the agent's PERSISTENT MCP connections (one supervised process per declared
+  # server, held in agent state so the subprocess + discovered tools are reused across turns,
+  # and server-side session state survives). Mirrors ensure_acp_conn. The conn refs are passed
+  # to the worker via config (`:__mcp_conns__`). Returns {[conn_pid], new_self}.
+  def self.ensure_mcp_conns(self_obj, config, agent_pid)
+    specs = jet_mcp_client::norm_specs(maps::get(:mcp, config, []))
+    if specs == []
+      {[], self_obj}
+    else
+      state = erlang::element(3, self_obj)
+      existing = maps::get(:__mcp_conns__, state, nil)
+      if alive_list?(existing)
+        {existing, self_obj}
+      else
+        conns = lists::map({|s| jet_mcp_client::open_conn(s, agent_pid)}, specs)
+        {conns, erlang::setelement(3, self_obj, maps::put(:__mcp_conns__, conns, state))}
+      end
+    end
+  end
+
+  def self.alive_list?(conns)
+    erlang::is_list(conns) and conns != [] and lists::all({|c| jet_mcp_client::alive?(c)}, conns)
+  end
+
+  def self.alive?(pid)
+    if erlang::is_pid(pid)
+      erlang::is_process_alive(pid)
+    else
+      false
+    end
+  end
+
+  # stub runner: :ask -> synthesize a schema-conforming value; :task -> a
+  # placeholder TurnResult (so the new ask/task surface is testable offline).
+  def self.stub_turn(config, schema, kind)
+    match kind
+      case :task
+        # emit structured events so `.stream do |ev|` is demonstrable offline
+        jet_acp::emit_event({:plan, ["analyze", "edit", "verify"]})
+        jet_acp::emit_event({:tool_call, {id: "t1", title: "run tests", kind: "execute", status: "completed"}})
+        jet_acp::emit_event({:text, "stub: did the work"})
+        # the declared tools flow declaration -> runner -> TurnResult; a real
+        # runner would resolve + invoke them mid-turn (function-call / MCP loop).
+        jet_agent::TurnResult.new({text: "stub: did the work",
+                                   ok: true,
+                                   edits: [],
+                                   commands: [],
+                                   plan: ["analyze", "edit", "verify"],
+                                   tool_calls: maps::get(:tools, config, []),
+                                   files: []})
+      case _
+        value = gen_value(schema)
+        match validate(value, schema)
+          case {:ok, v}
+            v
+          case {:error, reason}
+            {:error, :schema_validation, reason}
+        end
+    end
+  end
+
+  # --- stub value synthesis (pretends to be a structured LLM response) ---
+
+  def self.gen_value(schema)
+    if erlang::is_atom(schema)
+      gen_scalar(schema)
+    elsif erlang::is_tuple(schema)
+      {_, elem_schema} = schema
+      [gen_value(elem_schema)]
+    elsif erlang::is_map(schema)
+      maps::map({|_k, v| gen_value(v)}, schema)
+    else
+      nil
+    end
+  end
+
+  def self.gen_scalar(t)
+    match t
+      case :string
+        "stub"
+      case :int
+        0
+      case :float
+        0.0
+      case :bool
+        true
+      case :atom
+        :stub
+      case _
+        nil
+    end
+  end
+
+  # --- schema validation ---
+
+  def self.validate(value, schema)
+    if conforms(value, schema)
+      {:ok, value}
+    else
+      {:error, {:expected, schema, :got, value}}
+    end
+  end
+
+  def self.conforms(value, schema)
+    if erlang::is_atom(schema)
+      conforms_scalar(value, schema)
+    elsif erlang::is_tuple(schema)
+      if erlang::is_list(value)
+        {_, elem_schema} = schema
+        lists::all({|x| conforms(x, elem_schema)}, value)
+      else
+        false
+      end
+    elsif erlang::is_map(schema)
+      if erlang::is_map(value)
+        lists::all({|kv| conforms_field(value, kv)}, maps::to_list(schema))
+      else
+        false
+      end
+    else
+      true
+    end
+  end
+
+  def self.conforms_field(value, kv)
+    {k, t} = kv
+    if maps::is_key(k, value)
+      conforms(maps::get(k, value), t)
+    else
+      false
+    end
+  end
+
+  def self.conforms_scalar(value, t)
+    match t
+      case :string
+        erlang::is_list(value) or erlang::is_binary(value)
+      case :int
+        erlang::is_integer(value)
+      case :float
+        erlang::is_float(value)
+      case :bool
+        erlang::is_boolean(value)
+      case :atom
+        erlang::is_atom(value)
+      case _
+        true
+    end
+  end
+
+  # --- future returned to the caller (await with selective receive) ---
+
+  # Coerce a JSON-decoded value (binary keys) to a schema's atom keys,
+  # recursively, creating atoms only for schema-declared keys (bounded/safe).
+  def self.coerce(value, schema)
+    if erlang::is_atom(schema)
+      value
+    elsif erlang::is_tuple(schema)
+      coerce_list(value, schema)
+    elsif erlang::is_map(schema)
+      coerce_map(value, schema)
+    else
+      value
+    end
+  end
+
+  def self.coerce_list(value, schema)
+    {_, t} = schema
+    if erlang::is_list(value)
+      lists::map({|x| coerce(x, t)}, value)
+    else
+      value
+    end
+  end
+
+  def self.coerce_map(value, schema)
+    if erlang::is_map(value)
+      lists::foldl({|kv, acc| coerce_put(value, kv, acc)}, maps::new(), maps::to_list(schema))
+    else
+      value
+    end
+  end
+
+  def self.coerce_put(value, kv, acc)
+    {k, t} = kv
+    bkey = erlang::atom_to_binary(k, :utf8)
+    if maps::is_key(bkey, value)
+      maps::put(k, coerce(maps::get(bkey, value), t), acc)
+    elsif maps::is_key(k, value)
+      maps::put(k, coerce(maps::get(k, value), t), acc)
+    else
+      acc
+    end
+  end
+
+  # The result of a `task` (action) turn: the WORK the agent did, not a coerced
+  # answer. Built from ACP's structured tool_call/edit/plan stream (vs `ask`,
+  # which returns a typed value). Fields default empty so partial turns are ok.
+  class TurnResult
+    def initialize(fields)
+      @fields = fields
+      self
+    end
+
+    def text()
+      maps::get(:text, @fields, <<>>)
+    end
+
+    def ok?()
+      maps::get(:ok, @fields, true)
+    end
+
+    def edits()
+      maps::get(:edits, @fields, [])
+    end
+
+    def commands()
+      maps::get(:commands, @fields, [])
+    end
+
+    def plan()
+      maps::get(:plan, @fields, [])
+    end
+
+    def tool_calls()
+      maps::get(:tool_calls, @fields, [])
+    end
+
+    def files()
+      maps::get(:files, @fields, [])
+    end
+
+    def to_map()
+      @fields
+    end
+  end
+
+  class AsyncResult
+    def initialize(ref)
+      @ref = ref
+      self
+    end
+
+    def await()
+      r0 = @ref
+      jet_acp::wire("TRC ", "await:start")
+      receive
+        case {r, {:done, result}} if r == r0
+          jet_acp::wire("TRC ", "await:got-done")
+          result
+        case {r, {:item, _}} if r == r0
+          await()
+      after 600000     # a whole turn may be a multi-stage agent pipeline (minutes)
+        jet_acp::wire("TRC ", "await:TIMEOUT")
+        {:error, :agent_await_timeout}
+      end
+    end
+
+    # stream the turn's items to `callback` as they arrive; returns the final
+    # result. e.g.  agent.ask("...").stream do |chunk| display(chunk) end
+    def stream(callback)
+      r0 = @ref
+      receive
+        case {r, {:done, result}} if r == r0
+          result
+        case {r, {:item, item}} if r == r0
+          callback.(item)
+          stream(callback)
+      after 600000     # a whole turn may be a multi-stage agent pipeline (minutes)
+        {:error, :agent_await_timeout}
+      end
+    end
+  end
+end

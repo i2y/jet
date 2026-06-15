@@ -1,0 +1,37 @@
+# LOCAL (ollama) Goal + Flow CODING agent -- the all-local counterpart of Jet Verified
+# Coder. The inner Flow's TERMINAL node now has real tools (filesystem MCP write/edit + a
+# gated shell `run`), so a local model ACTUALLY writes + runs code; Goal re-attempts until
+# the (anti-simulation) acceptance condition is met. Needs ollama + node/npx.
+#
+# NOTE: SLOW -- Goal's verify loop x Flow's designer+nodes x a local tool loop compound, so
+# a local model can take many minutes per round. Best run from an ACP client (watch + cancel at will).
+# For quick local coding prefer plain Jet Coder (one Llm tool loop) or a bare local Flow
+# coder; reach for this when you want the verify-until-met loop AND a dynamic DAG, all local.
+#   mkdir -p /tmp/jet_coder
+#   jet acp-serve acp_local_coder_demo::LocalVerifiedCoder::handle examples/acp_local_coder_demo.jet
+module acp_local_coder_demo
+  agent LocalVerifiedCoder
+    mcp "npx -y @modelcontextprotocol/server-filesystem /tmp/jet_coder"
+
+    tool run(command: String) do |c|
+      os::cmd(erlang::binary_to_list(erlang::iolist_to_binary(["cd /tmp/jet_coder && ", c])))
+    end
+
+    approve do |req|
+      jet_policy::gate(req, <<"run">>, {|r| jet_policy::deny_tokens(r, jet_policy::default_deny())})
+    end
+
+    runner Goal(accept: "the requested code is written to a file in the sandbox AND a SHOWN real command run confirms it works -- the expected output must appear in actual command output, not a described or simulated result",
+                via: {name: :Flow},
+                model: "ollama:qwen3.6:35b-a3b",
+                surface: true,
+                max_rounds: 2)
+    ask handle(task)
+  end
+
+  def self.run()
+    c = acp_local_coder_demo::LocalVerifiedCoder.spawn()
+    io::format("=> ~ts~n",
+               [c.handle("Create fib.py in the working directory with fib(n) (0-indexed), then run `python3 -c \"import fib; print(fib.fib(10))\"` and report the ACTUAL printed output.").await()])
+  end
+end

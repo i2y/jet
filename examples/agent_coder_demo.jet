@@ -1,0 +1,51 @@
+# Local coding agent (experiment), NODE-FREE: a `model "ollama:..."` agent that READS/CREATES/
+# EDITS files via NATIVE jet_fs tools (no external server / no Node) and runs shell commands
+# via a `run` tool -- the native tool loop does the agentic work. `tool_fuel 25` raises the
+# per-turn tool-call budget (coding needs many rounds).
+#
+# SAFETY: the shell `run` tool is gated by `approve` (jet_policy denylist: rm/sudo/curl/... are
+# denied). A real deployment would also path-gate the file tools to the sandbox / prompt a
+# human. Work happens under /tmp/jet_coder.
+#   mkdir -p /tmp/jet_coder
+#   ./jet -r agent_coder_demo::run examples/agent_coder_demo.jet     (needs ollama; NO node/npx)
+module agent_coder_demo
+  agent Coder
+    model "ollama:qwen3.6:35b-a3b"
+    tool_fuel 25
+    role "You are a coding assistant working in the sandbox directory /tmp/jet_coder. Use read_file/write_file/edit_file/list_dir to read, create, and edit files there (always use absolute paths under /tmp/jet_coder), and the `run` tool to run shell commands. Verify your work by reading files / running them. Be concise."
+
+    tool read_file(path: String) do |p|
+      jet_fs::read(p)
+    end
+
+    tool write_file(path: String, content: String) do |p, c|
+      jet_fs::write(p, c)
+    end
+
+    tool edit_file(path: String, old: String, new: String) do |p, o, n|
+      jet_fs::edit(p, o, n)
+    end
+
+    tool list_dir(path: String) do |p|
+      jet_fs::list(p)
+    end
+
+    tool run(command: String) do |c|
+      os::cmd(erlang::binary_to_list(erlang::iolist_to_binary(["cd /tmp/jet_coder && ", c])))
+    end
+
+    # tool approval policy (DATA-DRIVEN; see jet_policy). Gate the shell `run` tool through a
+    # configurable denylist; the file tools pass. Swap default_deny() for your own token list.
+    approve do |req|
+      jet_policy::gate(req, <<"run">>, {|r| jet_policy::deny_tokens(r, jet_policy::default_deny())})
+    end
+
+    ask code(task)
+  end
+
+  def self.run()
+    c = agent_coder_demo::Coder.spawn()
+    io::format("=> ~p~n",
+               [c.code("Create /tmp/jet_coder/fib.py with fib(n) (0-indexed) and a one-line docstring, then run: python3 -c \"import fib; print(fib.fib(10))\" and report the printed output.").await()])
+  end
+end

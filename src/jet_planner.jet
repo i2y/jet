@@ -1,0 +1,236 @@
+module jet_planner
+  # Plan-and-execute: the DELIBERATIVE planner. Given a GOAL, a planner backend decomposes
+  # it into an ordered list of concrete STEPS; the runner executes them in order (each step
+  # sees the goal + earlier steps' results), tracking progress as a jet_plan plan-state that
+  # is streamed as an ACP plan (pending -> in_progress -> completed); when a step yields
+  # nothing it RE-PLANS the remaining steps; finally it synthesizes the results into the
+  # answer. (Contrast Flow, which composes a one-shot parallel DAG and does not revise it.)
+  #   runner Plan(model: "ollama:...")   |   runner Plan(drives: "claude-code-acp")
+  # Optional opts: planner:/worker: (override backends), max_steps: (default 6), max_replans:
+  # (default 2).
+
+  def self.turn(config, method, args, schema)
+    jet_http_ffi::ensure_started()
+    opts = jet_backend::opts(config)
+    model = maps::get(:model, opts, nil)
+    drives = maps::get(:drives, opts, nil)
+    planner = jet_backend::resolve_lead(model, drives, maps::get(:planner, opts, nil))
+    worker = jet_backend::resolve_lead(model, drives, maps::get(:worker, opts, nil))
+    goal = jet_backend::to_bin(jet_acp::build_prompt(config, method, args))
+    max_steps = maps::get(:max_steps, opts, 6)
+    erlang::put(:__plan_via__, {maps::get(:via, opts, nil), config, opts})   # how each step executes
+    jet_acp::emit_event({:thought, <<"Planning the steps for this goal...">>})
+    steps = plan(planner, goal, max_steps)
+    jet_acp::emit_event({:thought, erlang::iolist_to_binary(["Planned ", erlang::integer_to_binary(erlang::length(steps)), " step(s)."])})
+    done = execute(planner, worker, goal, steps, [], maps::get(:max_replans, opts, 2))
+    jet_backend::coerce(synthesize(worker, goal, done), schema)
+  end
+
+  # --- plan: decompose the goal into an ordered list of step strings ---
+
+  def self.plan(planner, goal, max_steps)
+    role = erlang::iolist_to_binary([
+      "Decompose the user's GOAL into an ordered list of at most ", erlang::integer_to_binary(max_steps),
+      " concrete, self-contained STEPS. Each step is ONE actionable instruction that builds toward the goal; a later step may use earlier results. Reply with ONLY a JSON array of step strings -- no prose, no code fences:\n",
+      "[\"first step\", \"second step\", ...]"])
+    parse_steps(jet_backend::run_silent(planner, role, goal), max_steps)
+  end
+
+  # --- execute the steps in order; re-plan the remainder when a step yields nothing ---
+
+  def self.execute(planner, worker, goal, remaining, done, replans_left)
+    emit_plan(done, remaining)
+    match remaining
+      case []
+        done
+      case [step, *rest]
+        out = run_step(worker, goal, done, step)
+        if out == <<>> and replans_left > 0
+          jet_acp::emit_event({:thought, <<"A step yielded nothing -- re-planning the remaining steps...">>})
+          execute(planner, worker, goal, replan(planner, goal, done, step), done, replans_left - 1)
+        else
+          result = if out == <<>>
+            <<"(step produced no result)">>
+          else
+            out
+          end
+          jet_acp::emit_event({:tool_call, {id: step_id(done), title: step, kind: "think", status: "completed", output: result}})
+          execute(planner, worker, goal, rest, lists::append(done, [{step, result}]), replans_left)
+        end
+    end
+  end
+
+  def self.step_id(done)
+    erlang::iolist_to_binary(["step-", erlang::integer_to_binary(erlang::length(done) + 1)])
+  end
+
+  # one step: executed (with retry) by the worker, OR delegated to a sub-shape when `via:`
+  # is set (each step becomes a whole shape run). Input = goal + earlier results + this step.
+  def self.run_step(worker, goal, done, step)
+    input = erlang::iolist_to_binary(["Goal:\n", goal, "\n\n", done_block(done), "Current step:\n", step])
+    match jet_plan::attempt(step_runner(worker, input), {|o| o != <<>>}, 2)
+      case {:ok, o, _n}
+        o
+      case {:failed, _last, _n}
+        <<>>
+    end
+  end
+
+  # how a step runs: by default a plain worker call; with `via:` set, each step is a whole
+  # SUB-SHAPE run (via: {name: :Fleet} -> each step is a panel; via: {name: :Refine} -> each
+  # step is evaluator-optimized; via: {name: :Goal} -> each step self-verifies; ...). Plan
+  # stays SEQUENTIAL (a step uses prior results) -- for PARALLEL execution use Flow, and wrap
+  # either in Goal to verify against an acceptance condition (Goal(via: {name: :Plan})).
+  def self.step_runner(worker, input)
+    {via, config, opts} = erlang::get(:__plan_via__)
+    if via == nil
+      {|_n| jet_backend::run_silent(worker, step_role(), input)}
+    else
+      {|_n| run_via(via, config, opts, input)}
+    end
+  end
+
+  def self.step_role()
+    "You are executing ONE step of a plan toward the user's goal. Do EXACTLY this step, using the results of the earlier steps. Be concrete and produce the step's result only (no preamble)."
+  end
+
+  # run a step as a sub-shape (mirrors Goal's via:): dispatch the shape with this step's
+  # input, streaming suppressed so the planner surfaces the step as one unit.
+  def self.run_via(via, config, opts, input)
+    saved = erlang::get(:__acp_stream__)
+    erlang::erase(:__acp_stream__)
+    spec = with_backends(via, opts)
+    sub = maps::put(:role, <<>>, maps::put(:runner, {name: maps::get(:name, spec, :Fleet), opts: spec}, config))
+    result = jet_agent::dispatch(sub, :run, [input], :any, :ask)
+    if saved != :undefined
+      erlang::put(:__acp_stream__, saved)
+    end
+    result_text(result)
+  end
+
+  # carry the planner's model/drives down to the sub-shape unless it set its own.
+  def self.with_backends(spec, opts)
+    s1 = if maps::is_key(:model, spec)
+      spec
+    else
+      maps::put(:model, maps::get(:model, opts, nil), spec)
+    end
+    if maps::is_key(:drives, s1) or maps::get(:drives, opts, nil) == nil
+      s1
+    else
+      maps::put(:drives, maps::get(:drives, opts), s1)
+    end
+  end
+
+  def self.result_text(result)
+    match result
+      case {:ok, t}
+        jet_backend::to_bin(t)
+      case t
+        jet_backend::to_bin(t)
+    end
+  end
+
+  # re-plan: given the goal, completed steps, and the step that failed, produce a REVISED
+  # ordered list of the remaining steps (the planner may change or replace the approach).
+  def self.replan(planner, goal, done, failed_step)
+    role = "You are RE-PLANNING. The previous step failed to produce a result. Given the goal, the completed steps with their results, and the failed step, produce a REVISED ordered JSON array of the REMAINING steps to reach the goal -- you may change, split, or replace the failed approach. Reply with ONLY a JSON array of step strings."
+    input = erlang::iolist_to_binary(["Goal:\n", goal, "\n\n", done_block(done), "The step that failed:\n", failed_step])
+    parse_steps(jet_backend::run_silent(planner, role, input), 6)
+  end
+
+  # --- synthesize the final answer from the step results (streamed) ---
+
+  def self.synthesize(worker, goal, done)
+    role = "Using the goal and the results of all the steps below, produce the FINAL answer the user asked for -- complete, coherent, and in the user's language. Do not mention the steps unless asked."
+    input = erlang::iolist_to_binary(["Goal:\n", goal, "\n\n", done_block(done), "Final answer:"])
+    out = jet_backend::run_streaming(worker, role, input)
+    if out == <<>>
+      jet_acp::emit_event({:text, <<"(no answer)">>})
+      <<"(no answer)">>
+    else
+      out
+    end
+  end
+
+  # --- ACP plan rendering: done -> completed, the next remaining -> in_progress, rest -> pending ---
+
+  def self.emit_plan(done, remaining)
+    d = lists::map(do |x| plan_entry(step_text_of(x), <<"completed">>) end, done)
+    jet_acp::emit_event({:plan, lists::append(d, pending_entries(remaining))})
+  end
+
+  def self.pending_entries(remaining)
+    match remaining
+      case []
+        []
+      case [h, *t]
+        [plan_entry(h, <<"in_progress">>), *lists::map(do |s| plan_entry(s, <<"pending">>) end, t)]
+    end
+  end
+
+  def self.plan_entry(text, status)
+    {content: text, status: status}
+  end
+
+  # --- helpers ---
+
+  def self.done_block(done)
+    if done == []
+      <<>>
+    else
+      erlang::iolist_to_binary(["Completed steps and their results:\n", lists::map(do |d| done_line(d) end, done), "\n"])
+    end
+  end
+
+  def self.done_line(d)
+    {step, result} = d
+    ["- ", step, "\n  => ", result, "\n"]
+  end
+
+  def self.step_text_of(d)
+    {step, _result} = d
+    step
+  end
+
+  # parse the planner's JSON array of step strings; cap at max; never empty.
+  def self.parse_steps(raw, max)
+    match jet_json_ffi::decode(extract_array(raw))
+      case {:ok, list}
+        norm_steps(list, max)
+      case _
+        [<<"Accomplish the goal directly and completely.">>]
+    end
+  end
+
+  def self.extract_array(raw)
+    b = jet_backend::to_bin(raw)
+    match re::run(b, "\\[[\\s\\S]*\\]", [{:capture, :first, :binary}])
+      case {:match, [json]}
+        json
+      case _
+        b
+    end
+  end
+
+  def self.norm_steps(list, max)
+    if erlang::is_list(list)
+      capped = lists::sublist(lists::foldr(do |x, acc| keep_str(x, acc) end, [], list), max)
+      if capped == []
+        [<<"Accomplish the goal directly and completely.">>]
+      else
+        capped
+      end
+    else
+      [<<"Accomplish the goal directly and completely.">>]
+    end
+  end
+
+  def self.keep_str(x, acc)
+    if erlang::is_binary(x) or erlang::is_list(x)
+      [jet_backend::to_bin(x), *acc]
+    else
+      acc
+    end
+  end
+end

@@ -1,0 +1,406 @@
+module jet_architect
+  # Self-generating topology (MetaGen-style):
+  # instead of choosing among pre-configured shapes, the orchestrator DESIGNS the
+  # team for THIS task -- it picks a shape AND writes the member roles -- then runs
+  # it. The topology is generated at runtime, not authored ahead of time.
+  #   runner Architect(model:/drives: ...)   # the designer's backend (smart is better)
+  # designer: override the designer backend; model/drives are inherited by the run.
+
+  def self.turn(config, method, args, schema)
+    jet_http_ffi::ensure_started()
+    opts = jet_backend::opts(config)
+    drives = maps::get(:drives, opts, nil)
+    designer = jet_backend::resolve_lead(maps::get(:model, opts, nil),
+                                         drives, maps::get(:designer, opts, nil))
+    router = jet_backend::resolve(nil, maps::get(:model, opts, nil), drives, nil)   # cheap local model if set, else the agent
+    topic = jet_backend::to_bin(jet_acp::build_prompt(config, method, args))
+    if jet_backend::is_substantive_request?(router, topic)
+      # a new substantive task -> design a fresh team for it.
+      jet_acp::emit_event({:thought, <<"Designing a team for this task...">>})
+      coding? = drives != nil
+      design = generate_team(designer, topic, coding?)   # offer Codegen only with a real coding agent
+      raw_shape = shape_atom(maps::get(<<"shape">>, design, <<"Fleet">>))
+      guarded = guard_shape(raw_shape, topic, coding?)   # deterministic override for misrouted code tasks
+      members = norm_members(maps::get(<<"members">>, design, []))
+      shape = validate_codegen_team(guarded, members)    # Codegen with <2 members → Pipeline
+      reason = jet_backend::to_bin(maps::get(<<"reason">>, design, <<>>))
+      arch = emit_design(shape, members, reason)               # 🏗 design node; surface WHAT + WHY
+      old = jet_acp::trace_set_parent(arch)                     # each shape emits its own member nodes under this
+      result = jet_auto::run_chosen(build_chosen(shape, members, opts), config, method, args, schema)
+      jet_acp::trace_set_parent(old)
+      result
+    else
+      # chitchat / a refinement ("did it stop?", "make it shorter") -> answer directly,
+      # with the conversation + tools, instead of designing a fresh blind team.
+      jet_acp::emit_event({:thought, <<"Continuing the conversation (no new team needed)...">>})
+      answer_followup(designer, topic, schema)
+    end
+  end
+
+  # report the chosen topology + the designer's one-line rationale to the client.
+  def self.emit_design(shape, members, reason)
+    head = ["Chose ", erlang::atom_to_binary(shape, :utf8), " -- team: ", roster(members)]
+    msg = if reason == <<>>
+      erlang::iolist_to_binary(head)
+    else
+      erlang::iolist_to_binary([head, "\nWhy: ", reason])
+    end
+    jet_acp::emit_event({:thought, msg})
+    # the 🏗 design node; returns its id so the caller nests the team's run under it
+    jet_acp::trace_node(erlang::iolist_to_binary(["🏗 ", erlang::atom_to_binary(shape, :utf8), " · team of ", erlang::integer_to_binary(erlang::length(members))]), "ok")
+  end
+
+  def self.emit_members(members)
+    lists::foreach({|m| jet_acp::emit_trace_once(erlang::iolist_to_binary(["👤 ", maps::get(:name, m, <<"?">>), " — ", maps::get(:role, m, <<>>)]), "ok")}, members)
+  end
+
+  # a follow-up is handled by the lead alone, with the full conversation (and tools)
+  # -- so it can see the team's prior work instead of starting blind.
+  def self.answer_followup(backend, topic, schema)
+    role = "You are the lead of a team, mid-conversation. Answer the user's most recent message using the conversation so far and your tools (which can read any files the team already produced). Reply in the user's language. Be concise."
+    user = erlang::iolist_to_binary(["Conversation:\n", topic, "\n\nAnswer the user's most recent message now."])
+    text = jet_backend::run_streaming(backend, role, user)
+    out = if text == <<>>
+      jet_acp::emit_event({:text, <<"(no response)">>})
+      <<"(no response)">>
+    else
+      text
+    end
+    jet_backend::coerce(out, schema)
+  end
+
+  def self.generate_team(backend, topic, coding?)
+    role = erlang::iolist_to_binary([
+      "Design the best team for the user's task. Pick ONE shape, write its members with clear, distinct roles, and give a ONE-SENTENCE reason for the choice.\n\n",
+      "ROUTING RULES (MANDATORY):\n",
+      "1. If the task involves WRITING, EDITING, or CREATING code, files, implementations, tests, fixes, or refactors → ALWAYS pick Pipeline (or Codegen for code when parallel attempts help). NEVER pick Fleet or Debate for these.\n",
+      "2. Fleet and Debate are ONLY for pure analysis, research, comparison, or answering questions whose output is text/opinion -- NOT for producing artifacts.\n",
+      "Example: 'Fix the bug in parser.jet' → Pipeline (implement → test → review), NOT Fleet.\n\n",
+      "Fleet and Debate require at least 2 members. Reply with ONLY a JSON object -- no prose, no code fences:\n",
+      "{\"shape\": \"<a name below>\", \"reason\": \"<one sentence>\", \"members\": [{\"name\": \"...\", \"role\": \"...\"}]}\n\nShapes:\n",
+      shape_menu(coding?)])
+    parse_design(jet_backend::run_silent(backend, role, topic))   # internal: don't stream the JSON
+  end
+
+  # the menu offered to the designer. Codegen needs file-editing, so it's only
+  # offered when a real coding agent (drives) backs the team.
+  def self.shape_menu(coding?)
+    base = [
+      "- Fleet: 2-4 members (REQUIRED: at least 2) examine ONE topic from different angles in parallel; a lead synthesizes. Best for analysis, research, and multi-perspective QUESTIONS whose answer is text -- not for producing a concrete artifact (use Pipeline/Codegen for that).\n",
+      "- Debate: 2-3 members argue opposing positions for 2 rounds; a judge concludes. Best for a contested yes/no or a tradeoff decision.\n",
+      "- Pipeline: 2-4 members are SEQUENTIAL stages; each transforms the previous stage's output into a CONCRETE deliverable. For writing: outline -> draft -> polish. For CODE use implement -> test -> review (NOT design -> implement -> review: a stage that has file tools just implements anyway, leaving the next stage nothing to build -- so make stage 1 ACTUALLY implement, stage 2 build+test it, stage 3 review). Name each stage for what it produces.\n",
+      "- Refine: a worker drafts and a critic reviews, looping until good. Give EXACTLY 2 members -- first the writer, then the reviewer. Best for write -> review -> fix.\n"]
+    if coding?
+      erlang::iolist_to_binary([base,
+        "- Codegen: 2-3 IMPLEMENTER members each implement the SAME coding task independently in their own git worktree; then a lead (AUTOMATIC -- do NOT add a lead/reviewer/judge member) compares the diffs and picks the best. List ONLY implementers. Best for 'implement X' where trying parallel approaches helps.\n"])
+    else
+      erlang::iolist_to_binary(base)
+    end
+  end
+
+  def self.parse_design(raw)
+    match jet_json_ffi::decode(extract_json(raw))
+      case {:ok, m}
+        if erlang::is_map(m)
+          m
+        else
+          maps::new()
+        end
+      case _
+        maps::new()
+    end
+  end
+
+  # pull the first {...} out of the model's reply (it may wrap JSON in prose/fences).
+  def self.extract_json(raw)
+    b = jet_backend::to_bin(raw)
+    match re::run(b, "\\{[\\s\\S]*\\}", [{:capture, :first, :binary}])
+      case {:match, [json]}
+        json
+      case _
+        b
+    end
+  end
+
+  def self.shape_atom(s)
+    lc = erlang::iolist_to_binary(string::lowercase(jet_backend::to_bin(s)))
+    if has?(lc, <<"debate">>)
+      :Debate
+    elsif has?(lc, <<"codegen">>) or has?(lc, <<"worktree">>)
+      :Codegen
+    elsif has?(lc, <<"pipeline">>)
+      :Pipeline
+    elsif has?(lc, <<"refine">>)
+      :Refine
+    else
+      :Fleet
+    end
+  end
+
+  def self.has?(b, sub)
+    match binary::split(b, sub)
+      case [_only]
+        false
+      case _
+        true
+    end
+  end
+
+  # Deterministic guard: if shape is Fleet/Debate but the task is clearly about
+  # code/file generation, correct to Pipeline (or Codegen if coding? is true
+  # and parallel implementations could help). This is a pure function for testing.
+  def self.guard_shape(shape, topic, coding?)
+    if (shape == :Codegen) and (not is_code_task?(topic))
+      :Fleet                                  # LLM picked Codegen for a non-code (analysis/report) task ->
+                                              # Fleet (text analysis), so members don't flail trying to
+                                              # "implement + prove" in worktrees (which hangs collect).
+    elsif needs_correction?(shape, topic)
+      if coding? and parallel_beneficial?(topic)
+        :Codegen
+      else
+        :Pipeline
+      end
+    else
+      shape
+    end
+  end
+
+  # True when shape is Fleet/Debate AND topic indicates code/file generation.
+  def self.needs_correction?(shape, topic)
+    (shape == :Fleet or shape == :Debate) and is_code_task?(topic)
+  end
+
+  # Detect code/file generation tasks: an ACTION verb (implement/fix/improve/extend/..., English or
+  # Japanese) AND a code TARGET noun (code/file/test/.jet/src/...). The conjunction is deliberate: a pure
+  # "analyze / explain / compare src/foo.jet" task has no action verb here, so it correctly
+  # stays Fleet/Debate (text answer) rather than being forced into a build pipeline.
+  def self.is_code_task?(topic)
+    t = erlang::iolist_to_binary(string::lowercase(jet_backend::to_bin(topic)))
+    has_action?(t) and has_target?(t)
+  end
+
+  def self.has_action?(t)
+    has?(t, <<"implement">>) or has?(t, <<"add ">>) or has?(t, <<"fix ">>) or
+    has?(t, <<"refactor">>) or has?(t, <<"edit ">>) or has?(t, <<"create">>) or
+    has?(t, <<"write ">>) or has?(t, <<"modify">>) or has?(t, <<"update ">>) or
+    has?(t, <<"build ">>) or has?(t, <<"change ">>) or has?(t, <<"fixing">>) or
+    has?(t, <<"adding">>) or has?(t, <<"editing">>) or has?(t, <<"creating">>) or
+    has?(t, <<"writing">>) or has?(t, <<"improve">>) or has?(t, <<"extend">>) or
+    has?(t, <<"enhance">>) or has?(t, <<"strengthen">>) or has?(t, <<"refine">>) or
+    has?(t, <<"修正">>) or has?(t, <<"実装">>) or has?(t, <<"追加">>) or
+    has?(t, <<"作成">>) or has?(t, <<"編集">>) or has?(t, <<"改善">>) or
+    has?(t, <<"拡張">>) or has?(t, <<"強化">>) or has?(t, <<"向上">>) or has?(t, <<"対応">>)
+  end
+
+  def self.has_target?(t)
+    has?(t, <<"code">>) or has?(t, <<"file">>) or has?(t, <<"test">>) or
+    has?(t, <<".jet">>) or has?(t, <<".gleam">>) or has?(t, <<".erl">>) or
+    has?(t, <<"function">>) or has?(t, <<"method">>) or has?(t, <<"class">>) or
+    has?(t, <<"module">>) or has?(t, <<"bug">>) or has?(t, <<"feature">>) or
+    has?(t, <<"src/">>) or has?(t, <<"error">>) or has?(t, <<"impl">>) or
+    has?(t, <<"機能">>) or has?(t, <<"バグ">>) or has?(t, <<"テスト">>) or
+    has?(t, <<"コード">>) or has?(t, <<"ファイル">>)
+  end
+
+  # Heuristic: parallel approaches help for "implement X" style tasks.
+  def self.parallel_beneficial?(topic)
+    t = erlang::iolist_to_binary(string::lowercase(jet_backend::to_bin(topic)))
+    has?(t, <<"implement">>) or has?(t, <<"実装">>)
+  end
+
+  # Deterministic guard: Codegen requires at least 2 implementers to be meaningful.
+  # If Codegen is selected with fewer than 2 members, fall back to Pipeline.
+  # This is a pure function for testing.
+  def self.validate_codegen_team(shape, members)
+    if shape == :Codegen and erlang::length(members) < 2
+      :Pipeline
+    else
+      shape
+    end
+  end
+
+  # ========== Unit tests for guard_shape logic (deterministic, pure functions) ==========
+
+  # Test: code task + Fleet → should correct to Pipeline (coding?=false)
+  def self.test_code_fleet_to_pipeline()
+    topic = <<"Fix the bug in parser.jet and add tests">>
+    result = guard_shape(:Fleet, topic, false)
+    expected = :Pipeline
+    {result == expected, result, expected}
+  end
+
+  # Test: code task + Fleet → should correct to Codegen (coding?=true, implement task)
+  def self.test_code_fleet_to_codegen()
+    topic = <<"Implement a new feature in jet_skills.jet">>
+    result = guard_shape(:Fleet, topic, true)
+    expected = :Codegen
+    {result == expected, result, expected}
+  end
+
+  # Test: code task + Debate → should correct to Pipeline (coding?=false)
+  def self.test_code_debate_to_pipeline()
+    topic = <<"Refactor the module src/jet_lexer.gleam">>
+    result = guard_shape(:Debate, topic, false)
+    expected = :Pipeline
+    {result == expected, result, expected}
+  end
+
+  # Test: analysis task + Fleet → should stay Fleet (no correction)
+  def self.test_analysis_fleet_stays_fleet()
+    topic = <<"Analyze the performance characteristics of the BEAM runtime">>
+    result = guard_shape(:Fleet, topic, false)
+    expected = :Fleet
+    {result == expected, result, expected}
+  end
+
+  # Test: comparison task + Debate → should stay Debate (no correction)
+  def self.test_comparison_debate_stays_debate()
+    topic = <<"Compare the tradeoffs between Redis and Memcached for caching">>
+    result = guard_shape(:Debate, topic, false)
+    expected = :Debate
+    {result == expected, result, expected}
+  end
+
+  # Test: Pipeline shape should stay Pipeline regardless
+  def self.test_pipeline_stays_pipeline()
+    topic = <<"Fix the bug in parser.jet">>
+    result = guard_shape(:Pipeline, topic, true)
+    expected = :Pipeline
+    {result == expected, result, expected}
+  end
+
+  # Test: Japanese code task + Fleet → should correct (coding?=true)
+  def self.test_japanese_code_task()
+    topic = <<"jet_skills.jet を修正してテストを追加">>
+    result = guard_shape(:Fleet, topic, true)
+    # Should correct since it's a code task
+    is_corrected = result == :Pipeline or result == :Codegen
+    {is_corrected, result, <<"Pipeline or Codegen">>}
+  end
+
+  # ========== Unit tests for validate_codegen_team (Codegen member count guard) ==========
+
+  # Test: Codegen + 1 member → should correct to Pipeline (the original bug case)
+  def self.test_codegen_1_member_to_pipeline()
+    members = [{name: <<"Analyst">>, role: <<"Analyze the task.">>}]
+    result = validate_codegen_team(:Codegen, members)
+    expected = :Pipeline
+    {result == expected, result, expected}
+  end
+
+  # Test: Codegen + 2 members → should stay Codegen
+  def self.test_codegen_2_members_stays_codegen()
+    members = [{name: <<"Impl1">>, role: <<"Implement approach A.">>},
+               {name: <<"Impl2">>, role: <<"Implement approach B.">>}]
+    result = validate_codegen_team(:Codegen, members)
+    expected = :Codegen
+    {result == expected, result, expected}
+  end
+
+  # Test: Pipeline + 1 member → should stay Pipeline (non-Codegen is unchanged)
+  def self.test_pipeline_1_member_unchanged()
+    members = [{name: <<"Stage1">>, role: <<"Do something.">>}]
+    result = validate_codegen_team(:Pipeline, members)
+    expected = :Pipeline
+    {result == expected, result, expected}
+  end
+
+  # Test: Fleet + 1 member → should stay Fleet (non-Codegen is unchanged)
+  def self.test_fleet_1_member_unchanged()
+    members = [{name: <<"Analyst">>, role: <<"Analyze.">>}]
+    result = validate_codegen_team(:Fleet, members)
+    expected = :Fleet
+    {result == expected, result, expected}
+  end
+
+  # Test runner: runs all tests and reports pass/fail
+  def self.run_tests()
+    tests = [
+      {"code_fleet_to_pipeline", test_code_fleet_to_pipeline()},
+      {"code_fleet_to_codegen", test_code_fleet_to_codegen()},
+      {"code_debate_to_pipeline", test_code_debate_to_pipeline()},
+      {"analysis_fleet_stays_fleet", test_analysis_fleet_stays_fleet()},
+      {"comparison_debate_stays_debate", test_comparison_debate_stays_debate()},
+      {"pipeline_stays_pipeline", test_pipeline_stays_pipeline()},
+      {"japanese_code_task", test_japanese_code_task()},
+      {"codegen_1_member_to_pipeline", test_codegen_1_member_to_pipeline()},
+      {"codegen_2_members_stays_codegen", test_codegen_2_members_stays_codegen()},
+      {"pipeline_1_member_unchanged", test_pipeline_1_member_unchanged()},
+      {"fleet_1_member_unchanged", test_fleet_1_member_unchanged()}
+    ]
+    results = lists::map({|{name, {pass?, got, expected}}|
+      status = if pass?
+        <<"PASS">>
+      else
+        <<"FAIL">>
+      end
+      io::format("~s: ~s (got: ~p, expected: ~p)~n", [status, name, got, expected])
+      pass?
+    }, tests)
+    passed = erlang::length(lists::filter({|x| x}, results))
+    total = erlang::length(results)
+    io::format("~n~p/~p tests passed~n", [passed, total])
+    if passed == total
+      :ok
+    else
+      :failed
+    end
+  end
+
+  def self.norm_members(list)
+    if erlang::is_list(list) and list != []
+      lists::map({|m| {name: maps::get(<<"name">>, m, <<"agent">>), role: maps::get(<<"role">>, m, <<"Analyze and answer.">>)}}, list)
+    else
+      [{name: <<"Analyst">>, role: <<"Analyze the task and answer it directly.">>}]
+    end
+  end
+
+  def self.roster(members)
+    erlang::iolist_to_binary(lists::map({|m| [maps::get(:name, m, <<"?">>), <<" ">>]}, members))
+  end
+
+  # map the generated team onto the chosen shape's opts (members/agents/stages),
+  # carrying the Architect's backend down.
+  def self.build_chosen(shape, members, opts)
+    spec = match shape
+      case :Debate
+        {name: :Debate, agents: members, rounds: 2,
+         judge: {role: <<"Weigh the sides and give a balanced, decisive verdict.">>}}
+      case :Pipeline
+        {name: :Pipeline, stages: members}
+      case :Refine
+        maps::put(:name, :Refine, refine_opts(members))
+      case :Codegen
+        {name: :Fleet, members: members, workspace: :worktree,
+         reduce: <<"Compare the candidate implementations and pick the single best; justify briefly, then show its diff.">>}
+      case _
+        {name: :Fleet, members: members,
+         reduce: <<"Synthesize the members' outputs into one clear answer for the user.">>}
+    end
+    with_backend(spec, opts)
+  end
+
+  # Refine wants a worker + a critic; map the first member to the writer and the
+  # second (if present) to the reviewer.
+  def self.refine_opts(members)
+    w = erlang::hd(members)
+    c = match members
+      case [_first, second, *_]
+        second
+      case _
+        {name: <<"Critic">>, role: <<"Critique the draft against the task; reply APPROVED only when it fully satisfies it.">>}
+    end
+    {worker: {role: maps::get(:role, w, <<"Produce the requested output.">>), name: maps::get(:name, w, <<"Worker">>)},
+     critic: {role: maps::get(:role, c, <<"Critique the draft.">>), name: maps::get(:name, c, <<"Critic">>), auto: (erlang::length(members) < 2)},
+     max_rounds: 3}
+  end
+
+  def self.with_backend(chosen, opts)
+    c1 = maps::put(:model, maps::get(:model, opts, nil), chosen)
+    if maps::get(:drives, opts, nil) == nil
+      c1
+    else
+      maps::put(:drives, maps::get(:drives, opts), c1)
+    end
+  end
+end

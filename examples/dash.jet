@@ -1,0 +1,136 @@
+# A live TUI dashboard for a supervised agent fleet. Each cell is one agent
+# (green = alive, red = just crashed). Chaos kills agents at random; the
+# supervisor restarts each instantly. The fleet never goes down.
+#   ./jet -r dash::run examples/dash.jet
+module dash
+  actor Agent
+    def initialize(id)  @id = id  end
+    def on_message(_)  erlang::error(:boom)  end
+  end
+
+  def self.esc(s)  [27] ++ s  end
+
+  # --- supervisor / state process ---------------------------------------
+  def self.boot(n)
+    fwd = launch(n, 1, maps::new())          # id => pid
+    sloop(fwd, maps::new(), 0)               # crashed: id => last-crash-ms ; restarts
+  end
+
+  def self.launch(n, i, acc)
+    if i > n
+      acc
+    else
+      pid = dash::Agent.spawn(i)
+      erlang::monitor(:process, pid)
+      launch(n, i + 1, maps::put(i, pid, acc))
+    end
+  end
+
+  def self.sloop(fwd, crashed, restarts)
+    receive
+      case {:DOWN, _ref, :process, dead, _why}
+        id = find_id(dead, maps::to_list(fwd))
+        np = dash::Agent.spawn(id)
+        erlang::monitor(:process, np)
+        sloop(maps::put(id, np, fwd),
+              maps::put(id, erlang::monotonic_time(:millisecond), crashed),
+              restarts + 1)
+      case {:chaos, k, n}
+        chaos_hit(fwd, n, k)
+        sloop(fwd, crashed, restarts)
+      case {:snap, caller}
+        caller ! {:snapshot, maps::size(fwd), restarts, crashed}
+        sloop(fwd, crashed, restarts)
+    end
+  end
+
+  def self.find_id(_pid, [])  0  end
+  def self.find_id(pid, [{id, p}, *rest])
+    if p == pid
+      id
+    else
+      find_id(pid, rest)
+    end
+  end
+
+  def self.chaos_hit(_fwd, _n, 0)  :ok  end
+  def self.chaos_hit(fwd, n, k)
+    pid = maps::get(rand::uniform(n), fwd, nil)
+    if erlang::is_pid(pid)
+      pid ! :die
+    end
+    chaos_hit(fwd, n, k - 1)
+  end
+
+  def self.chaos(state, k, n)
+    timer::sleep(110)
+    state ! {:chaos, k, n}
+    dash::chaos(state, k, n)
+  end
+
+  # --- render loop ------------------------------------------------------
+  def self.run()
+    logger::set_primary_config(:level, :critical)
+    n = 600
+    t0 = erlang::monotonic_time(:millisecond)
+    state = erlang::spawn(:dash, :boot, [n])
+    erlang::spawn(:dash, :chaos, [state, 12, n])
+    timer::sleep(150)
+    render(state, n, t0, 0, 0)
+  end
+
+  def self.render(state, n, t0, frame, lastr)
+    if frame > 100
+      io::format(esc("[0m") ++ esc("[2J") ++ esc("[H") ++
+                 "  the fleet healed itself ~p times -- and never went down.~n", [lastr])
+    else
+      state ! {:snap, erlang::self()}
+      r = receive
+        case {:snapshot, alive, restarts, crashed}
+          draw(alive, restarts, crashed, n, t0)
+          restarts
+      end
+      timer::sleep(85)
+      render(state, n, t0, frame + 1, r)
+    end
+  end
+
+  def self.draw(alive, restarts, crashed, n, t0)
+    now = erlang::monotonic_time(:millisecond)
+    io::format(esc("[2J") ++ esc("[H") ++ esc("[0m") ++
+               "  Jet -- supervised agent fleet      uptime ~ps~n~n",
+               [erlang::round((now - t0) / 1000)])
+    io::format("  fleet ~p      alive ~p      restarts ~p~n~n", [n, alive, restarts])
+    grid(1, n, crashed, now)
+    io::format(esc("[0m") ++
+               "~n  green = alive    red = just crashed (restarted in <1ms)~n", [])
+  end
+
+  def self.grid(i, n, crashed, now)
+    if i > n
+      :ok
+    else
+      io::format("  ~ts" ++ esc("[0m") ++ "~n", [grow(i, erlang::min(i + 39, n), crashed, now, [])])
+      grid(i + 40, n, crashed, now)
+    end
+  end
+
+  def self.grow(i, last, crashed, now, acc)
+    if i > last
+      acc
+    else
+      grow(i + 1, last, crashed, now, acc ++ cell(i, crashed, now))
+    end
+  end
+
+  def self.cell(id, crashed, now)
+    ts = maps::get(id, crashed, nil)
+    if ts == nil
+      esc("[42m") ++ " "       # never crashed: alive
+    elsif now - ts < 170
+      esc("[41m") ++ " "       # just crashed
+    else
+      esc("[42m") ++ " "       # restarted: alive
+    end
+  end
+end

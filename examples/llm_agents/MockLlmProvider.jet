@@ -1,4 +1,4 @@
-# LlmProviderのモック実装 — テスト用（APIを叩かない）
+# Mock implementation of LlmProvider — for testing (does not hit the API)
 module MockLlmProvider
   def self.chat(system_prompt, user_message)
     "[Mock] system=" ++ system_prompt ++ " user=" ++ user_message

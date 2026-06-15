@@ -29,7 +29,16 @@ module jet_runtime
   def self.call_method(%jet_object(__class__ = class_definition, __state__ = state), method_name, args)
     key = {method_name, length(args)}
     if maps::is_key(key, class_definition)
-      apply(maps::get(key, class_definition), [%jet_object(__class__ = class_definition, __state__ = state), *args])
+      result = apply(maps::get(key, class_definition), [%jet_object(__class__ = class_definition, __state__ = state), *args])
+      # Actor methods return a tagged {reply, new_self} tuple. For a local/
+      # internal call (not via gen_server) we can only surface the reply —
+      # state threading happens at the gen_server callback boundary.
+      match result
+        case {:__jet_actor_return__, reply, _new_self}
+          reply
+        case other
+          other
+      end
     else
       apply(maps::get({:method_missing, 2}, class_definition), [%jet_object(__class__ = class_definition, __state__ = state), method_name, args])
     end
@@ -304,7 +313,7 @@ module jet_runtime
       if maps::is_key(key, class_methods)
         erlang::apply(maps::get(key, class_methods), [self, *args])
       else
-        {:error, "TODO"}
+        {:error, {:undefined_method, method_name}}
       end
     end
 
@@ -366,7 +375,7 @@ module jet_runtime
       if maps::is_key(key, class_methods)
         erlang::apply(maps::get(key, class_methods), [self, *args])
       else
-        {:error, "TODO"}
+        {:error, {:undefined_method, method_name}}
       end
     end
 
@@ -507,66 +516,164 @@ module jet_runtime
 
   end
 
-  # Called when gen_server starts
+  # Called when gen_server starts.
+  # Actor instance state lives in a jet_object that is the gen_server state,
+  # threaded functionally through every callback (no longer the process dict).
   def self.init([args, class_definition])
+    # Kept for the self()-local-call optimization in call_method/3 above.
     put(:class_definition, class_definition)
     # Trap exits so on_terminate is called on shutdown
     erlang::process_flag(:trap_exit, true)
-    match apply(maps::get({:initialize, length(args)}, class_definition), [self(), *args])
+    fresh = %jet_object(__class__ = class_definition, __state__ = {})
+    match apply(maps::get({:initialize, length(args)}, class_definition), [fresh, *args])
       case {:error, reason}
         {:error, reason}
-      case _
-        {:ok, class_definition}
+      case new_self
+        {:ok, new_self}
     end
   end
 
-  # handle_call is invoked in response to gen_server::call
-  def self.handle_call({method_name, args}, _from, class_definition)
-    if maps::is_key({:__handle_call__, 2}, class_definition)
-      apply(maps::get({:__handle_call__, 2}, class_definition), [self(), *args])
-    elsif maps::is_key({method_name, length(args)}, class_definition)
-      response = apply(maps::get({method_name, length(args)}, class_definition), [self(), *args])
-      {:reply, response, class_definition}
-    else
-      {:reply, :error, class_definition}
-    end
-  end
-
-  def self.handle_cast({method_name, args}, class_definition)
-    if maps::is_key({:__handle_cast__, 2}, class_definition)
-      apply(maps::get({:__handle_cast__, 2}, class_definition), [self(), *args])
-    elsif maps::is_key({method_name, length(args)}, class_definition)
-      apply(maps::get({method_name, length(args)}, class_definition), [self(), *args])
-      {:noreply, class_definition}
-    else
-      {:noreply, class_definition}
-    end
-  end
-
-  def self.handle_info(message, class_definition)
-    if maps::is_key({:on_message, 1}, class_definition)
-      result = apply(maps::get({:on_message, 1}, class_definition), [self(), message])
-      match result
-        case :stop
-          {:stop, :normal, class_definition}
-        case {:stop, reason}
-          {:stop, reason, class_definition}
-        case _
-          {:noreply, class_definition}
+  # Approval hook for the Acp runner: the ACP connection process asks the agent
+  # to decide a permission request. Routes to a user-defined `on_approval(req)`
+  # method when present; otherwise defaults to :allow (backward compatible).
+  def self.handle_call({:__jet_approval__, req}, _from, self_obj)
+    class_definition = erlang::element(2, self_obj)
+    if maps::is_key({:on_approval, 1}, class_definition)
+      match apply(maps::get({:on_approval, 1}, class_definition), [self_obj, req])
+        case {:__jet_actor_return__, reply, new_self}
+          {:reply, reply, new_self}
+        case other
+          {:reply, other, self_obj}
       end
     else
-      {:noreply, class_definition}
+      {:reply, :allow, self_obj}
     end
   end
 
-  def self.terminate(reason, class_definition)
+  # handle_call is invoked in response to gen_server::call.
+  # The method receives the current self object and returns
+  # {:__jet_actor_return__, Reply, NewSelf}; untagged results (e.g. mixin
+  # methods) reply as-is and leave state unchanged.
+  def self.handle_call({method_name, args}, from, self_obj)
+    class_definition = erlang::element(2, self_obj)
+    if maps::is_key({:__handle_call__, 2}, class_definition)
+      apply(maps::get({:__handle_call__, 2}, class_definition), [self_obj, *args])
+    elsif maps::is_key({method_name, length(args)}, class_definition)
+      match apply(maps::get({method_name, length(args)}, class_definition), [self_obj, *args])
+        case {:__jet_actor_return__, reply, new_self}
+          match reply
+            case {:jet_agent_async, c, m, a, s, k}
+              # agent call: reply a future at once; the turn runs off the
+              # gen_server. Acp runners use a persistent connection (session
+              # reuse) held in agent state; others run in a one-shot worker.
+              # k = :ask (typed answer) or :task (TurnResult).
+              {caller, _tag} = from
+              ref = erlang::make_ref()
+              match jet_agent::runner_name(c)
+                case :Acp
+                  match a
+                    case [:jet_describe]
+                      caller ! {ref, {:item, {:describe, jet_agent::describe(c)}}}
+                      caller ! {ref, {:done, :ok}}
+                      {:reply, jet_agent::AsyncResult.new(ref), new_self}
+                    case [:jet_list_commands]
+                      # slash-command probe on a SEPARATE throwaway connection (one minimal prompt,
+                      # response hidden) -- doesn't touch the persistent session. Native `claude`
+                      # reads its command list from the CLI's startup init event (no API turn).
+                      if jet_claude::native?(jet_acp::command_of(maps::get(:runner, c, nil)))
+                        erlang::spawn(:jet_claude, :probe_commands_async, [caller, ref, c])
+                      else
+                        erlang::spawn(:jet_acp, :probe_commands_async, [caller, ref, c])
+                      end
+                      {:reply, jet_agent::AsyncResult.new(ref), new_self}
+                    case _
+                      {conn, ns} = jet_agent::ensure_acp_conn(new_self, c, erlang::self())
+                      conn ! {:turn, caller, ref, jet_acp::build_turn_prompt(c, m, a, s, k), s, k}
+                      {:reply, jet_agent::AsyncResult.new(ref), ns}
+                  end
+                case _
+                  # native path: get-or-create the agent's memory (an owned ETS table)
+                  # and inject its tid into the worker's config so the Llm runner can
+                  # thread conversation history + facts. `:fresh` -> mem nil (stateless).
+                  {mem, ns2} = jet_agent::ensure_mem(new_self, c)
+                  {mcp_conns, ns3} = jet_agent::ensure_mcp_conns(ns2, c, erlang::self())
+                  c2 = if mem == nil
+                    c
+                  else
+                    maps::put(:__mem__, mem, c)
+                  end
+                  c3 = if mcp_conns == []
+                    c2
+                  else
+                    maps::put(:__mcp_conns__, mcp_conns, c2)
+                  end
+                  # if the agent defines `approve` (on_approval), pass its pid so the native
+                  # tool loop can gate each tool call through it (policy-based permission).
+                  c4 = if maps::is_key({:on_approval, 1}, erlang::element(2, new_self))
+                    maps::put(:__agent__, erlang::self(), c3)
+                  else
+                    c3
+                  end
+                  erlang::spawn(:jet_agent, :run_turn, [caller, ref, c4, m, a, s, k])
+                  {:reply, jet_agent::AsyncResult.new(ref), ns3}
+              end
+            case _
+              {:reply, reply, new_self}
+          end
+        case other
+          {:reply, other, self_obj}
+      end
+    else
+      {:reply, :error, self_obj}
+    end
+  end
+
+  def self.handle_cast({method_name, args}, self_obj)
+    class_definition = erlang::element(2, self_obj)
+    if maps::is_key({:__handle_cast__, 2}, class_definition)
+      apply(maps::get({:__handle_cast__, 2}, class_definition), [self_obj, *args])
+    elsif maps::is_key({method_name, length(args)}, class_definition)
+      match apply(maps::get({method_name, length(args)}, class_definition), [self_obj, *args])
+        case {:__jet_actor_return__, _reply, new_self}
+          {:noreply, new_self}
+        case _other
+          {:noreply, self_obj}
+      end
+    else
+      {:noreply, self_obj}
+    end
+  end
+
+  def self.handle_info(message, self_obj)
+    class_definition = erlang::element(2, self_obj)
+    if maps::is_key({:on_message, 1}, class_definition)
+      match apply(maps::get({:on_message, 1}, class_definition), [self_obj, message])
+        case {:__jet_actor_return__, result, new_self}
+          match result
+            case :stop
+              {:stop, :normal, new_self}
+            case {:stop, reason}
+              {:stop, reason, new_self}
+            case _
+              {:noreply, new_self}
+          end
+        case _other
+          {:noreply, self_obj}
+      end
+    else
+      {:noreply, self_obj}
+    end
+  end
+
+  def self.terminate(reason, self_obj)
+    class_definition = erlang::element(2, self_obj)
     if maps::is_key({:on_terminate, 1}, class_definition)
-      apply(maps::get({:on_terminate, 1}, class_definition), [self(), reason])
+      apply(maps::get({:on_terminate, 1}, class_definition), [self_obj, reason])
     end
     :ok
   end
 
-  def self.code_change(_old_version, class_definition, _extra)
-    {:ok, class_definition}
+  def self.code_change(_old_version, self_obj, _extra)
+    {:ok, self_obj}
   end
 end

@@ -1,0 +1,15 @@
+# Deterministic test of the MCP server protocol core (jet_mcp::handle):
+# tools/list advertises the agent's tools; tools/call invokes the tool impl.
+module test_mcp
+  def self.run()
+    tools = [{name: :get_price, params: {item: :string}, impl: {|i| 4217}}]
+
+    listr = maps::from_list([{<<"id">>, 1}, {<<"method">>, <<"tools/list">>}])
+    io::format("tools/list => ~p~n", [jet_mcp::handle(listr, tools)])
+
+    cp = maps::from_list([{<<"name">>, <<"get_price">>},
+                          {<<"arguments">>, maps::from_list([{<<"item">>, "widget"}])}])
+    callr = maps::from_list([{<<"id">>, 2}, {<<"method">>, <<"tools/call">>}, {<<"params">>, cp}])
+    io::format("tools/call => ~p~n", [jet_mcp::handle(callr, tools)])
+  end
+end

@@ -1,20 +1,20 @@
-# ステートフルLLMクライアント
+# Stateful LLM client
 # Usage: ./jet -r LlmClient::LlmClient.demo examples/llm_client.jet
 #
-# 環境変数 ANTHROPIC_API_KEY を設定してから実行してください
+# Set the ANTHROPIC_API_KEY environment variable before running
 
 class LlmClient
   def self.demo()
     api_key = os::getenv("ANTHROPIC_API_KEY")
 
-    # デフォルト設定でクライアント作成
+    # Create a client with default settings
     client = Llm::Client.new(:claude, api_key)
 
     io::format("=== Simple chat ===~n", [])
     response = client.chat("You are a helpful assistant. Reply briefly.", "What is the BEAM virtual machine?")
     io::format("~s~n~n", [response])
 
-    # カスタム設定でクライアント作成
+    # Create a client with custom settings
     client2 = Llm::Client.new(:claude, api_key, {model: "claude-sonnet-4-20250514", max_tokens: 256})
 
     io::format("=== Multi-turn conversation ===~n", [])

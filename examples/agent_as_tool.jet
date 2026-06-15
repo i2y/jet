@@ -1,0 +1,19 @@
+# agents-as-tools: a tool's impl can drive a sub-agent. No special mechanism —
+# the inline impl just spawns + calls another agent and returns its result.
+# Shown deterministically (Sub uses the stub runner, runs offline).
+#   ./jet -r agent_as_tool::run examples/agent_as_tool.jet
+module agent_as_tool
+  agent Sub
+    role "You greet people."
+    ask greet(name) -> {msg: String}
+  end
+
+  def self.run()
+    tools = [{name: :greet_via_sub, params: {name: :string},
+              impl: {|n| agent_as_tool::Sub.spawn().greet(n).await()}}]
+    fn = maps::from_list([{<<"name">>, <<"greet_via_sub">>},
+                          {<<"arguments">>, maps::from_list([{<<"name">>, "Ada"}])}])
+    tc = maps::from_list([{<<"function">>, fn}])
+    io::format("tool drives sub-agent => ~p~n", [jet_llm::one_tool_result(tc, tools)])
+  end
+end

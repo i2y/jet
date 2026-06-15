@@ -1,0 +1,75 @@
+module jet_pipeline
+  # Pipeline shape: stages run in SEQUENCE, each stage's output becomes the next
+  # stage's input (prompt chaining / SOP -- e.g. plan -> implement -> review).
+  # The LAST stage's output IS the answer, so it's streamed as the message; the
+  # intermediate stages show as tool_calls. One runner + one dispatch over
+  # jet_backend, on the BEAM.
+  #   runner Pipeline(stages: [{name:"Plan", role:"..."}, {name:"Draft", role:"..."}])
+  # A stage may set its own `model`/`drives`; else the pipeline default is used.
+
+  def self.turn(config, method, args, schema)
+    jet_http_ffi::ensure_started()
+    opts = jet_backend::opts(config)
+    stages = maps::get(:stages, opts, [])
+    model = maps::get(:model, opts, nil)
+    drives = maps::get(:drives, opts, nil)
+    input = jet_backend::to_bin(jet_acp::build_prompt(config, method, args))
+    jet_backend::coerce(run_chain(stages, input, model, drives), schema)
+  end
+
+  def self.run_chain(stages, input, model, drives)
+    match stages
+      case []
+        input
+      case [final]
+        run_final(final, input, model, drives)            # last stage -> the answer (streamed)
+      case [stage, *rest]
+        run_chain(rest, run_step(stage, input, model, drives), model, drives)
+    end
+  end
+
+  # an intermediate step: a tool_call carrying its output, which feeds the next step.
+  def self.run_step(stage, input, model, drives)
+    {name, role, backend} = parts(stage, model, drives)
+    id = jet_acp::next_trace_id()
+    lbl = erlang::iolist_to_binary(["⛓ ", name, " · ", jet_backend::bk_label(maps::get(:model, stage, model), maps::get(:drives, stage, drives))])
+    jet_acp::emit_trace(id, lbl, "running")
+    out = jet_backend::run_silent(backend, role, input)
+    jet_acp::emit_trace(id, lbl, "ok")
+    out
+  end
+
+  # the last step: its output is the answer -> stream it as the message; the
+  # tool_call carries NO output, so the answer isn't printed twice.
+  def self.run_final(stage, input, model, drives)
+    {name, role, backend} = parts(stage, model, drives)
+    id = jet_acp::next_trace_id()
+    lbl = erlang::iolist_to_binary(["⛓ ", name, " · ", jet_backend::bk_label(maps::get(:model, stage, model), maps::get(:drives, stage, drives))])
+    jet_acp::emit_trace(id, lbl, "running")
+    out = jet_backend::run_streaming(backend, role, input)
+    jet_acp::emit_trace(id, lbl, "ok")
+    if out == <<>>
+      jet_acp::emit_event({:text, <<"(no response)">>})
+      <<"(no response)">>
+    else
+      out
+    end
+  end
+
+  def self.parts(stage, model, drives)
+    {jet_backend::to_bin(maps::get(:name, stage, <<"stage">>)),
+     frame(jet_backend::to_bin(maps::get(:role, stage, <<"You transform the input.">>))),
+     jet_backend::resolve(maps::get(:drives, stage, nil), maps::get(:model, stage, nil), drives, model)}
+  end
+
+  # frame each stage as an AUTONOMOUS pipeline step. Without this, a stage facing an
+  # underspecified task behaves like a chat assistant -- it asks the user clarifying
+  # questions, and the NEXT stage (which receives that output as input) answers them
+  # role-playing the user. There is no human mid-pipeline, so: assume, don't ask;
+  # produce the deliverable; build on the prior stage's output, don't reply to it.
+  def self.frame(role)
+    erlang::iolist_to_binary([
+      "You are ONE stage of an autonomous multi-stage pipeline. NO human is available mid-run, so do NOT ask the user questions or wait for input -- make reasonable assumptions, state them in one line, and produce your stage's concrete deliverable. Your input below is the user's task (if you are the first stage) or the PREVIOUS stage's output (otherwise); build directly on it -- do NOT role-play the user, and do NOT reply to it as if it were a chat message. When you revise an existing artifact, check its current state first and prefer rewriting it wholesale over many small patches.\n\nYour role: ",
+      role])
+  end
+end

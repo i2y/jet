@@ -1,0 +1,23 @@
+# Goal + Flow CODING agent (drives = REAL tools). Each Goal attempt runs a Flow that
+# GENERATES a dataflow DAG of CLAUDE CODE agents -- each node has the full file/shell
+# toolset -- and Goal's checker (also Claude Code) VERIFIES the acceptance condition by
+# ACTUALLY running it, re-attempting until met. This is "verified coding via Goal+Flow"
+# that genuinely writes + runs code.
+#
+# Contrast the LOCAL ollama Goal+Flow: its nodes call jet_backend::run_ollama (a bare LLM
+# call, NO tools) -- they can only SIMULATE coding. Real local coding would need the shape
+# layer to thread tools/MCP into node calls (a bigger change); `drives:` gets it for free.
+#
+# SLOW: many Claude Code calls per round. Needs claude-code-acp.
+#   jet acp-serve acp_goal_flow_coder_demo::VerifiedCoder::handle examples/acp_goal_flow_coder_demo.jet
+# Try: "Create fib.py with fib(n) (0-indexed) and confirm fib(10) == 55 by running it."
+module acp_goal_flow_coder_demo
+  agent VerifiedCoder
+    runner Goal(accept: "the requested code is written to a file AND a SHOWN real command run confirms it works -- the expected output must appear in actual terminal output, not a described or simulated result",
+                via: {name: :Flow},
+                surface: true,
+                max_rounds: 3,
+                drives: "claude-code-acp")
+    ask handle(task)
+  end
+end

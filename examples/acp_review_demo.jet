@@ -1,0 +1,17 @@
+# Coding with Fleet, the easy half: a READ-ONLY code-review ensemble.
+# Three Claude Code reviewers read the same code from different lenses (security,
+# correctness, performance) in parallel; the lead consolidates their findings.
+# Read-only, so no workspace conflicts. Just a CONFIGURATION of the general Fleet.
+#   jet acp-serve acp_review_demo::Review::review examples/acp_review_demo.jet
+# then prompt e.g.  "Review src/jet_backend.jet"
+module acp_review_demo
+  agent Review
+    runner Fleet(drives: "claude-code-acp",
+                 reduce: "Consolidate the reviewers' findings into ONE prioritized list (High/Medium/Low). Drop duplicates and likely false positives. Keep file:line citations. Be concise.",
+                 members: [
+      {name: "Security",    role: "Review the code the user names for SECURITY issues only. Use your tools to read the file(s). List concrete issues as 'file:line - issue - one-line fix'. If you find none, say 'no security issues found'. Do not edit anything."},
+      {name: "Correctness", role: "Review the named code for CORRECTNESS bugs and edge cases only. Read the file(s) with your tools. List concrete issues as 'file:line - issue'. Do not edit anything."},
+      {name: "Performance", role: "Review the named code for PERFORMANCE issues only. Read the file(s) with your tools. List concrete issues as 'file:line - issue'. Do not edit anything."}])
+    ask review(request)
+  end
+end

@@ -1,0 +1,24 @@
+module acp_refine_escalate_demo
+  # The SAME escalation cascade as Goal, now in Refine -- proof that `select: :escalate`
+  # over a tier-ordered `models:` pool is a SHARED jet_backend capability, not Goal-specific.
+  # Here the WORKER escalates: round 1 drafts with the cheapest model; if the critic rejects
+  # it, the next round retries with a stronger model (cheap-first cascade). The pool lives on
+  # the worker sub-map; the critic is independent. (See acp_goal_escalate_demo for the doer.)
+  #
+  #   ./jet acp-serve acp_refine_escalate_demo::R::write examples/acp_refine_escalate_demo.jet
+  #
+  # Try a small-model-trap puzzle: the cheap worker's draft is rejected, then the strong
+  # worker solves it. e.g. "Three daughters... ages multiply to 36, sum to 13... only the
+  # oldest plays piano... how old is the oldest?"
+  agent R
+    runner Refine(
+      worker: {models: [{name: "ollama:hf.co/mmnga/Llama-3.1-Swallow-8B-Instruct-v0.5-gguf:Q4_K_M", tier: :cheap},
+                        {name: "ollama:qwen3.6:35b-a3b", tier: :strong}],
+               select: :escalate,
+               role: "You solve the given task and write the answer."},
+      critic: {model: "ollama:qwen3.6:35b-a3b",
+               role: "You are a strict grader. Evaluate whether the final number and the reasoning are correct."},
+      max_rounds: 3)
+    ask write(task)
+  end
+end

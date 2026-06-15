@@ -1,5 +1,5 @@
 -module(jet_http_ffi).
--export([post/3, post_stream/4, ensure_started/0]).
+-export([post/3, post_plain/3, post_stream/4, post_stream_plain/4, ensure_started/0]).
 
 %% Ensure gun + SSL applications are started
 ensure_started() ->
@@ -26,11 +26,45 @@ post(Url, Headers, Body) ->
             {error, Reason}
     end.
 
+%% Plain-HTTP POST (no TLS) — e.g. a local Ollama server on :11434
+post_plain(Url, Headers, Body) ->
+    {Host, Port, Path} = parse_url(Url),
+    case jet_gun_ffi:connect(Host, Port, #{transport => tcp, protocols => [http]}) of
+        {ok, ConnPid} ->
+            try
+                {ok, StreamRef} = jet_gun_ffi:post(ConnPid, Path, Headers, Body),
+                case jet_gun_ffi:await_response(ConnPid, StreamRef) of
+                    {ok, #{status := StatusCode, body := RespBody}} ->
+                        {ok, #{status => StatusCode, body => RespBody}};
+                    {error, Reason} ->
+                        {error, Reason}
+                end
+            after
+                jet_gun_ffi:close(ConnPid)
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
 %% Streaming POST — for SSE (Server-Sent Events)
 %% Callback receives: {data, Binary} | {done, Binary} | {error, Reason}
 post_stream(Url, Headers, Body, Callback) ->
     {Host, Port, Path} = parse_url(Url),
     case jet_gun_ffi:connect(Host, Port, #{}) of
+        {ok, ConnPid} ->
+            {ok, StreamRef} = jet_gun_ffi:post(ConnPid, Path, Headers, Body),
+            Result = jet_gun_ffi:stream_response(ConnPid, StreamRef, Callback),
+            jet_gun_ffi:close(ConnPid),
+            Result;
+        {error, Reason} ->
+            Callback({error, Reason}),
+            {error, Reason}
+    end.
+
+%% Streaming POST over plain HTTP (no TLS) — e.g. local Ollama with stream:true
+post_stream_plain(Url, Headers, Body, Callback) ->
+    {Host, Port, Path} = parse_url(Url),
+    case jet_gun_ffi:connect(Host, Port, #{transport => tcp, protocols => [http]}) of
         {ok, ConnPid} ->
             {ok, StreamRef} = jet_gun_ffi:post(ConnPid, Path, Headers, Body),
             Result = jet_gun_ffi:stream_response(ConnPid, StreamRef, Callback),

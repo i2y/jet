@@ -1,0 +1,270 @@
+module jet_memory
+  # Per-agent conversation + fact memory, BEAM-native. A memory HANDLE is
+  # {:mem, tid, path}: an owned `public` ETS table (the hot store, written DIRECTLY by
+  # the one-shot turn worker so it survives a worker crash and lives/dies with the agent)
+  # plus an optional snapshot PATH.
+  #   path == nil -> EPHEMERAL (in-RAM only). `memory :session` (the default).
+  #   path set    -> DURABLE: every mutation write-throughs a JSON snapshot and open/1
+  #                  reloads it, so memory survives the agent -- and the whole BEAM --
+  #                  restarting. Keyed by an id: the agent's `memory "<id>"` surface form.
+  # (`memory :fresh` = no memory at all; handled in jet_agent::ensure_mem, which passes
+  # nil as the handle here.)
+  #
+  # Storage (one :set table per agent):
+  #   :turns           -> [{user_bin, assistant_bin}]  chronological RECENT window
+  #   :summary         -> binary                        rolling summary of compacted-out turns
+  #   {:fact, key_bin} -> value_bin                     durable notes (remember/recall)
+  #
+  # This module is PURE storage + byte-budget windowing + snapshotting. Summarization
+  # needs the model, so the caller (the Llm runner) does it: window/2 -> summarize the
+  # overflow -> set_summary/2 + compact/2. Budgets are in BYTES (a bytes-as-proxy-for-
+  # tokens heuristic; a real tokenizer is a later refinement).
+
+  def self.open()
+    open(maps::new())
+  end
+
+  def self.open(opts)
+    tid = ets::new(:jet_memory, [:set, :public])
+    path = id_path(maps::get(:id, opts, nil), maps::get(:dir, opts, default_dir()))
+    if path != nil
+      load_snapshot(tid, path)
+    end
+    {:mem, tid, path}
+  end
+
+  def self.default_dir()
+    ".jet/memory"
+  end
+
+  def self.tid_of(h)
+    erlang::element(2, h)
+  end
+
+  def self.path_of(h)
+    erlang::element(3, h)
+  end
+
+  # --- low-level get/put over the :set table ---
+  def self.get(h, key, default)
+    match ets::lookup(tid_of(h), key)
+      case [{_k, v}]
+        v
+      case _
+        default
+    end
+  end
+
+  def self.put(h, key, value)
+    ets::insert(tid_of(h), {key, value})
+    :ok
+  end
+
+  # --- conversation turns ---
+  def self.turns(h)
+    get(h, :turns, [])
+  end
+
+  def self.append_turn(h, user, assistant)
+    if h == nil
+      :ok
+    else
+      put(h, :turns, lists::append(turns(h), [{to_bin(user), to_bin(assistant)}]))
+      snapshot(h)
+    end
+  end
+
+  def self.summary(h)
+    if h == nil
+      <<>>
+    else
+      get(h, :summary, <<>>)
+    end
+  end
+
+  def self.set_summary(h, s)
+    put(h, :summary, to_bin(s))
+    snapshot(h)
+  end
+
+  # Split the stored turns by a byte budget: the newest turns that fit stay as the
+  # verbatim RECENT window; the older overflow is returned as TO_COMPACT for the caller
+  # to fold into the summary (then call compact/2). Always keeps >= 1 recent turn.
+  # Returns {to_compact_chronological, recent_chronological}.
+  def self.window(h, budget)
+    if h == nil
+      {[], []}
+    else
+      take_within(lists::reverse(turns(h)), budget, 0, [])
+    end
+  end
+
+  # rev = remaining turns, NEWEST-first. acc = kept turns already in chronological order
+  # (prepending each older-processed turn keeps acc oldest-first). Stop once the budget
+  # is exceeded, but never with an empty window.
+  def self.take_within(rev, budget, used, acc)
+    match rev
+      case []
+        {[], acc}
+      case [t, *more]
+        cost = turn_cost(t)
+        if acc != [] and used + cost > budget
+          {lists::reverse(rev), acc}     # rev is newest-first -> reverse to chronological older set
+        else
+          take_within(more, budget, used + cost, [t, *acc])
+        end
+    end
+  end
+
+  # Drop the compacted-out older turns: keep only `recent` as the live window.
+  def self.compact(h, recent)
+    put(h, :turns, recent)
+    snapshot(h)
+  end
+
+  # --- durable facts (remember/recall) ---
+  def self.remember(h, key, value)
+    if h == nil
+      :ok
+    else
+      put(h, {:fact, to_bin(key)}, to_bin(value))
+      snapshot(h)
+    end
+  end
+
+  # v1: return ALL facts as [{key_bin, value_bin}]; recency/keyword/embedding recall
+  # is a later refinement (the query is accepted now so the API is stable).
+  def self.recall(h, _query)
+    if h == nil
+      []
+    else
+      lists::foldl({|kv, acc| fact_acc(kv, acc)}, [], ets::tab2list(tid_of(h)))
+    end
+  end
+
+  def self.fact_acc(kv, acc)
+    match kv
+      case {{:fact, k}, v}
+        lists::append(acc, [{k, v}])
+      case _
+        acc
+    end
+  end
+
+  # --- byte-budget cost (proxy for tokens) ---
+  def self.turn_cost(t)
+    {u, a} = t
+    erlang::byte_size(to_bin(u)) + erlang::byte_size(to_bin(a))
+  end
+
+  def self.to_bin(x)
+    if erlang::is_binary(x)
+      x
+    elsif erlang::is_list(x)
+      erlang::iolist_to_binary(x)
+    else
+      erlang::iolist_to_binary(io_lib::format("~p", [x]))
+    end
+  end
+
+  # --- durability: write-through JSON snapshot + reload (path == nil -> no-op) ---
+
+  def self.snapshot(h)
+    path = path_of(h)
+    if path == nil
+      :ok
+    else
+      filelib::ensure_dir(path)
+      file::write_file(path, jet_json_ffi::encode(to_json(h)))
+    end
+  end
+
+  def self.to_json(h)
+    {turns: lists::map({|t| turn_json(t)}, turns(h)),
+     summary: summary(h),
+     facts: facts_json(recall(h, <<>>))}
+  end
+
+  def self.turn_json(t)
+    {u, a} = t
+    [u, a]
+  end
+
+  def self.facts_json(facts)
+    lists::foldl({|kv, acc| put_fact_json(kv, acc)}, maps::new(), facts)
+  end
+
+  def self.put_fact_json(kv, acc)
+    {k, v} = kv
+    maps::put(k, v, acc)
+  end
+
+  def self.id_path(id, dir)
+    if id == nil
+      nil
+    else
+      erlang::iolist_to_binary([to_bin(dir), "/", sanitize(to_bin(id)), ".json"])
+    end
+  end
+
+  # keep the id to a single path segment (no traversal). The id is the agent's own
+  # `memory "<id>"`, but be defensive anyway.
+  def self.sanitize(b)
+    binary::replace(b, <<"/">>, <<"_">>, [:global])
+  end
+
+  def self.load_snapshot(tid, path)
+    match file::read_file(path)
+      case {:ok, bin}
+        load_json(tid, bin)
+      case _
+        :ok
+    end
+  end
+
+  def self.load_json(tid, bin)
+    match jet_json_ffi::decode(bin)
+      case {:ok, obj}
+        if erlang::is_map(obj)
+          ets::insert(tid, {:turns, decode_turns(maps::get(<<"turns">>, obj, []))})
+          ets::insert(tid, {:summary, maps::get(<<"summary">>, obj, <<>>)})
+          load_facts(tid, maps::get(<<"facts">>, obj, maps::new()))
+          :ok
+        else
+          :ok       # old/unknown snapshot format (e.g. a bare array) -> start fresh, don't crash
+        end
+      case _
+        :ok
+    end
+  end
+
+  def self.decode_turns(list)
+    if erlang::is_list(list)
+      lists::foldr({|x, acc| decode_turn_acc(x, acc)}, [], list)
+    else
+      []
+    end
+  end
+
+  def self.decode_turn_acc(x, acc)
+    match x
+      case [u, a]
+        [{to_bin(u), to_bin(a)}, *acc]
+      case _
+        acc
+    end
+  end
+
+  def self.load_facts(tid, obj)
+    if erlang::is_map(obj)
+      lists::foreach({|kv| insert_fact(tid, kv)}, maps::to_list(obj))
+    else
+      :ok
+    end
+  end
+
+  def self.insert_fact(tid, kv)
+    {k, v} = kv
+    ets::insert(tid, {{:fact, to_bin(k)}, to_bin(v)})
+  end
+end

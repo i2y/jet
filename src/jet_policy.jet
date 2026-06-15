@@ -1,0 +1,95 @@
+module jet_policy
+  # Composable, DATA-DRIVEN tool-approval policies for an agent's `approve do |req| ... end`
+  # block (the native tool gate calls on_approval(req); see jet_llm::approved?). Each policy
+  # takes the request map -- req = {name, kind, title, args} -- and returns :allow | :deny.
+  # Configure by passing token / prefix lists; no per-agent matching code.
+  #
+  #   approve do |req|
+  #     jet_policy::gate(req, <<"run">>, {|r| jet_policy::deny_tokens(r, jet_policy::default_deny())})
+  #   end
+
+  def self.allow_all(_req)
+    :allow
+  end
+
+  def self.deny_all(_req)
+    :deny
+  end
+
+  # Gate ONE tool (by name) through `policy` (a fn req -> :allow|:deny); other tools pass.
+  def self.gate(req, tool, policy)
+    if to_bin(maps::get(:name, req, <<>>)) == to_bin(tool)
+      policy.(req)
+    else
+      :allow
+    end
+  end
+
+  # DENYLIST: :deny if any of `tokens` appears in any string arg of the request; else :allow.
+  def self.deny_tokens(req, tokens)
+    if any_contains?(args_text(req), tokens)
+      :deny
+    else
+      :allow
+    end
+  end
+
+  # ALLOWLIST: :allow only if an arg starts with one of `prefixes`; else :deny.
+  def self.allow_prefixes(req, prefixes)
+    if any_prefix?(args_text(req), prefixes)
+      :allow
+    else
+      :deny
+    end
+  end
+
+  # A sensible default shell denylist (destructive / networking commands). Extend or replace
+  # it -- it's just data: `jet_policy::deny_tokens(r, jet_policy::default_deny() ++ [<<"npm ">>])`.
+  def self.default_deny()
+    [<<"rm ">>, <<"rm-">>, <<"sudo">>, <<"mkfs">>, <<" dd ">>, <<"chmod">>, <<"chown">>,
+     <<"curl">>, <<"wget">>, <<"ssh ">>, <<"scp ">>, <<"shutdown">>, <<"reboot">>,
+     <<"killall">>, <<"kill ">>, <<":(){">>, <<"> /">>, <<">/">>, <<"mv /">>]
+  end
+
+  # --- helpers ---
+
+  # all string arg VALUES joined, so a denylist/allowlist scans the whole command.
+  def self.args_text(req)
+    args = maps::get(:args, req, maps::new())
+    if erlang::is_map(args)
+      erlang::iolist_to_binary(lists::map({|v| to_bin(v)}, maps::values(args)))
+    else
+      to_bin(args)
+    end
+  end
+
+  def self.any_contains?(text, tokens)
+    lists::any({|t| contains?(text, to_bin(t))}, tokens)
+  end
+
+  def self.contains?(text, sub)
+    match binary::split(text, sub)
+      case [_only]
+        false
+      case _
+        true
+    end
+  end
+
+  def self.any_prefix?(text, prefixes)
+    t = erlang::binary_to_list(text)
+    lists::any({|p| lists::prefix(erlang::binary_to_list(to_bin(p)), t)}, prefixes)
+  end
+
+  def self.to_bin(x)
+    if erlang::is_binary(x)
+      x
+    elsif erlang::is_atom(x)
+      erlang::atom_to_binary(x, :utf8)
+    elsif erlang::is_list(x)
+      erlang::iolist_to_binary(x)
+    else
+      erlang::iolist_to_binary(io_lib::format("~p", [x]))
+    end
+  end
+end

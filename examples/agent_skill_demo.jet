@@ -1,0 +1,18 @@
+# Agent Skills with progressive disclosure on the native Llm runner. The agent always
+# sees a CATALOG (name + description) of skills under `skills "<dir>"`; it loads a skill's
+# full SKILL.md ON DEMAND via the `skill` tool. The greeter skill dictates an exact phrase,
+# so a matching reply proves the skill body was loaded and followed.
+#   ./jet -r agent_skill_demo::run examples/agent_skill_demo.jet   (needs ollama)
+module agent_skill_demo
+  agent Concierge
+    model "ollama:qwen3.6:35b-a3b"
+    skills "examples/skills"
+    role "You help users. You have skills; when one fits the request, load it with the `skill` tool and follow its instructions precisely."
+    ask handle(request) -> {reply: String}
+  end
+
+  def self.run()
+    c = agent_skill_demo::Concierge.spawn()
+    io::format("handle => ~p~n", [c.handle("Please greet a new teammate named Ada.").await()])
+  end
+end

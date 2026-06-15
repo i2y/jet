@@ -1,0 +1,13 @@
+# Refine (evaluator-optimizer LOOP). A worker drafts, a
+# critic evaluates; if not APPROVED, the worker revises with the feedback, up to
+# max_rounds. Unlike Fleet (parallel) or Pipeline (linear), this is a feedback loop.
+#   jet acp-serve acp_refine_demo::Poet::compose examples/acp_refine_demo.jet
+module acp_refine_demo
+  agent Poet
+    runner Refine(model: "ollama:qwen3.6:35b-a3b",
+                  max_rounds: 3,
+                  worker: {role: "Write a haiku for the user's topic. Output only the 3 lines."},
+                  critic: {role: "Check the haiku is exactly 3 lines with a 5-7-5 syllable pattern and on-topic."})
+    ask compose(topic)
+  end
+end

@@ -1,0 +1,14 @@
+# Pipeline (sequential), the opposite of Fleet.
+# Stages run in order, each one's output feeding the next: Outline -> Draft ->
+# Polish. (prompt chaining / SOP.) All local llama3.2 here; a stage could drive
+# Claude Code instead.
+#   jet acp-serve acp_pipeline_demo::Writer::write examples/acp_pipeline_demo.jet
+module acp_pipeline_demo
+  agent Writer
+    runner Pipeline(model: "ollama:qwen3.6:35b-a3b", stages: [
+      {name: "Outline", role: "Produce a tight 3-bullet outline for the user's request. Output only the outline."},
+      {name: "Draft",   role: "Write a short draft from the outline you are given. Output only the draft."},
+      {name: "Polish",  role: "Tighten and clarify the draft you are given into a final short paragraph. Output only the final text."}])
+    ask write(request)
+  end
+end

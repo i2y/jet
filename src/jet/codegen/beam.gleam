@@ -77,6 +77,63 @@ fn is_kernel_module_func(name: String, arity: Int) -> Bool {
   }
 }
 
+/// Erlang auto-imported BIFs that should resolve to `erlang:f(args)` even when
+/// called bare inside instance/actor methods. Without this, a bare `tuple_size(x)`
+/// in a method routes through call_method (treated as a self-method) and fails —
+/// which is why these previously required an explicit `erlang::` prefix.
+///
+/// Guard BIFs (is_list, is_map, ...) are intentionally excluded so guard
+/// expressions keep working; spawn/apply/self and the throw/error/exit family
+/// are handled elsewhere. A user method whose name+arity collides with one of
+/// these is shadowed (call it via `self.name(...)`) — same rule Erlang applies
+/// to locally-defined functions that shadow an auto-imported BIF.
+fn is_auto_bif(name: String, arity: Int) -> Bool {
+  case name, arity {
+    "abs", 1 -> True
+    "ceil", 1 -> True
+    "floor", 1 -> True
+    "round", 1 -> True
+    "trunc", 1 -> True
+    "float", 1 -> True
+    "max", 2 -> True
+    "min", 2 -> True
+    "size", 1 -> True
+    "tuple_size", 1 -> True
+    "byte_size", 1 -> True
+    "bit_size", 1 -> True
+    "map_size", 1 -> True
+    "map_get", 2 -> True
+    "setelement", 3 -> True
+    "make_ref", 0 -> True
+    "node", 0 -> True
+    "node", 1 -> True
+    "binary_part", 2 -> True
+    "binary_part", 3 -> True
+    "iolist_size", 1 -> True
+    "iolist_to_binary", 1 -> True
+    "atom_to_binary", 1 -> True
+    "atom_to_binary", 2 -> True
+    "binary_to_atom", 1 -> True
+    "binary_to_atom", 2 -> True
+    "binary_to_existing_atom", 1 -> True
+    "binary_to_float", 1 -> True
+    "binary_to_integer", 1 -> True
+    "binary_to_integer", 2 -> True
+    "integer_to_binary", 1 -> True
+    "integer_to_binary", 2 -> True
+    "float_to_binary", 1 -> True
+    "float_to_binary", 2 -> True
+    "list_to_integer", 2 -> True
+    "list_to_pid", 1 -> True
+    "pid_to_list", 1 -> True
+    "term_to_binary", 1 -> True
+    "term_to_binary", 2 -> True
+    "binary_to_term", 1 -> True
+    "binary_to_term", 2 -> True
+    _, _ -> False
+  }
+}
+
 // --- Public API ---
 
 pub fn compile(module: ast.Module) -> CompileResult {
@@ -309,8 +366,17 @@ fn collect_peer_getters(
             line: peer.line,
             args: [ast.Var("self", 0)],
             guards: [],
+            // Actor methods return the tagged {reply, self} tuple so the
+            // gen_server callbacks can thread state; peer getters don't mutate.
             body: [
-              ast.AtomLit(peer.name, 0),
+              ast.TupleLit(
+                [
+                  ast.AtomLit("__jet_actor_return__", 0),
+                  ast.AtomLit(peer.name, 0),
+                  ast.Var("self", 0),
+                ],
+                0,
+              ),
             ],
             context: ast.ActorInstanceMethod,
           )
@@ -963,19 +1029,34 @@ fn expr_to_erl(expr: ast.Expr, ctx: Context, mode: Mode) -> ErlSyntax {
               erl_application(kernel_func, erl_args)
               |> erl_set_pos(line)
             }
-            False -> {
-              let call_method =
-                erl_module_qualifier(
-                  erl_atom("jet_runtime"),
-                  erl_atom("call_method"),
-                )
-              erl_application(call_method, [
-                erl_variable("self"),
-                erl_atom(method_name),
-                erl_list(erl_args),
-              ])
-              |> erl_set_pos(line)
-            }
+            False ->
+              case is_auto_bif(method_name, list.length(args)) {
+                True -> {
+                  // Auto-imported Erlang BIF: call directly as erlang:f(args).
+                  // Fixes the footgun where bare BIF calls in instance/actor
+                  // methods routed through call_method and required `erlang::`.
+                  let bif =
+                    erl_module_qualifier(
+                      erl_atom("erlang"),
+                      erl_atom(method_name),
+                    )
+                  erl_application(bif, erl_args)
+                  |> erl_set_pos(line)
+                }
+                False -> {
+                  let call_method =
+                    erl_module_qualifier(
+                      erl_atom("jet_runtime"),
+                      erl_atom("call_method"),
+                    )
+                  erl_application(call_method, [
+                    erl_variable("self"),
+                    erl_atom(method_name),
+                    erl_list(erl_args),
+                  ])
+                  |> erl_set_pos(line)
+                }
+              }
           }
         }
         _ -> {
@@ -1299,6 +1380,31 @@ fn expr_to_erl(expr: ast.Expr, ctx: Context, mode: Mode) -> ErlSyntax {
       erl_catch_expr(expr_to_erl(inner, ctx, ExprMode))
       |> erl_set_pos(line)
 
+    // try / catch / finally
+    ast.TryExpr(body, has_catch, catch_var, catch_body, finally, line) -> {
+      let body_erl = list.map(body, fn(e) { expr_to_erl(e, ctx, ExprMode) })
+      let finally_erl = list.map(finally, fn(e) { expr_to_erl(e, ctx, ExprMode) })
+      case has_catch {
+        True -> {
+          let catch_erl =
+            list.map(catch_body, fn(e) { expr_to_erl(e, ctx, ExprMode) })
+          erl_try_catch(body_erl, catch_var, catch_erl, finally_erl)
+          |> erl_set_pos(line)
+        }
+        False ->
+          erl_try_finally(body_erl, finally_erl)
+          |> erl_set_pos(line)
+      }
+    }
+
+    // raise expr  ->  erlang:error(expr)
+    ast.RaiseExpr(value, line) ->
+      erl_application(
+        erl_module_qualifier(erl_atom("erlang"), erl_atom("error")),
+        [expr_to_erl(value, ctx, ExprMode)],
+      )
+      |> erl_set_pos(line)
+
     // Comprehensions
     ast.ListComp(template, generators, guard, line) -> {
       let qualifiers =
@@ -1480,6 +1586,20 @@ fn erl_match_expr(pattern: ErlSyntax, body: ErlSyntax) -> ErlSyntax
 
 @external(erlang, "jet_ffi", "erl_case_expr")
 fn erl_case_expr(argument: ErlSyntax, clauses: List(ErlSyntax)) -> ErlSyntax
+
+@external(erlang, "jet_codegen_ffi", "erl_try_catch")
+fn erl_try_catch(
+  body: List(ErlSyntax),
+  catch_var: String,
+  catch_body: List(ErlSyntax),
+  after_body: List(ErlSyntax),
+) -> ErlSyntax
+
+@external(erlang, "jet_codegen_ffi", "erl_try_finally")
+fn erl_try_finally(
+  body: List(ErlSyntax),
+  after_body: List(ErlSyntax),
+) -> ErlSyntax
 
 @external(erlang, "jet_ffi", "erl_receive_expr")
 fn erl_receive_expr(clauses: List(ErlSyntax)) -> ErlSyntax

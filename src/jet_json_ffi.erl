@@ -15,6 +15,7 @@ encode_value(V) when is_integer(V) -> integer_to_binary(V);
 encode_value(V) when is_float(V) -> float_to_binary(V, [{decimals, 17}, compact]);
 encode_value(V) when is_binary(V) -> encode_string(V);
 encode_value(V) when is_atom(V) -> encode_string(atom_to_binary(V, utf8));
+encode_value([]) -> <<"[]">>;  %% empty list is an empty JSON array (use <<>> for "")
 encode_value(V) when is_list(V) ->
     case is_charlist(V) of
         true -> encode_string(unicode:characters_to_binary(V));

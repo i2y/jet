@@ -1,0 +1,17 @@
+# `Llm` runner via local Ollama, with NATIVE structured output: the model's
+# generation is constrained to a JSON Schema derived from `-> {…}` (no prompt
+# shim, no fence/prose fragility).
+#   ./jet -r agent_ollama::run examples/agent_ollama.jet   (needs `ollama serve`)
+module agent_ollama
+  agent Extractor
+    model "ollama:qwen3.6:35b-a3b"
+    role "Extract structured facts. Be accurate and terse."
+    ask city(name) -> {country: String, population: Int}
+  end
+
+  def self.run()
+    e = agent_ollama::Extractor.spawn()
+    io::format("Tokyo => ~p~n", [e.city("Tokyo").await()])
+    io::format("Paris => ~p~n", [e.city("Paris").await()])
+  end
+end

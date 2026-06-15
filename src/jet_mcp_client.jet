@@ -1,0 +1,325 @@
+module jet_mcp_client
+  # MCP *client*: lets the in-process Llm runner CONSUME tools from an external MCP server
+  # (the mirror of jet_mcp, which is the server). It spawns the server as a subprocess and
+  # speaks MCP JSON-RPC over stdio -- reusing jet_port_ffi (process) + jet_json_ffi (JSON),
+  # exactly as jet_acp drives external ACP agents. Only the `tools` subset is implemented
+  # (initialize / tools/list / tools/call); resources/prompts/sampling and the HTTP-SSE
+  # transport are follow-ups.
+  #
+  # connect/1 returns {:ok, port, descriptors}: each descriptor is a normal Jet tool map
+  #   {name, desc, json_schema, mcp: port}
+  # so jet_llm's tool loop treats a remote tool exactly like a local `tool` impl -- except
+  # invoke_tool sees the `:mcp` key and forwards the call to the server (see jet_llm).
+  #
+  # Per-port connection state (buffer + request id) lives in the process dictionary: the
+  # turn worker that opens the port is the only one that reads/writes it, sequentially.
+
+  def self.connect(cmd)
+    match jet_port_ffi::open(cmd, [:separate_stderr])
+      case {:ok, port}
+        handshake(port)
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  def self.handshake(port)
+    send_req(port, 1, "initialize", init_params())
+    match recv(port, <<>>, 1)
+      case {:ok, _resp, buf1}
+        send_note(port, "notifications/initialized", maps::new())
+        send_req(port, 2, "tools/list", maps::new())
+        match recv(port, buf1, 2)
+          case {:ok, resp, buf2}
+            put_buf(port, buf2)
+            erlang::put({:__mcp_id__, port}, 3)
+            {:ok, port, descriptors(port, tools_of(resp))}
+          case {:error, reason}
+            jet_port_ffi::close(port)
+            {:error, reason}
+        end
+      case {:error, reason}
+        jet_port_ffi::close(port)
+        {:error, reason}
+    end
+  end
+
+  def self.init_params()
+    {protocolVersion: "2024-11-05",
+     capabilities: {},
+     clientInfo: {name: "jet", version: "0.1.0"}}
+  end
+
+  def self.tools_of(resp)
+    maps::get(<<"tools">>, maps::get(<<"result">>, resp, maps::new()), [])
+  end
+
+  # a server tool {name, description, inputSchema} -> a Jet tool descriptor. The inputSchema
+  # is already JSON Schema, so it's carried verbatim as :json_schema (jet_llm passes it
+  # straight to the model). :mcp marks it remote so invoke_tool forwards the call.
+  def self.descriptors(port, tools)
+    if erlang::is_list(tools)
+      lists::map({|t| descriptor(port, t)}, tools)
+    else
+      []
+    end
+  end
+
+  def self.descriptor(port, t)
+    name = maps::get(<<"name">>, t, <<"tool">>)
+    {name: erlang::binary_to_atom(name, :utf8),
+     desc: maps::get(<<"description">>, t, name),
+     json_schema: maps::get(<<"inputSchema">>, t, maps::new()),
+     mcp: port}
+  end
+
+  # call a remote tool: tools/call with the raw args map; return its text content.
+  def self.call(port, name, args)
+    id = next_id(port)
+    send_req(port, id, "tools/call", {name: to_bin(name), arguments: args})
+    match recv(port, get_buf(port), id)
+      case {:ok, resp, rest}
+        put_buf(port, rest)
+        extract(resp)
+      case {:error, reason}
+        erlang::iolist_to_binary(["mcp call failed: ", io_lib::format("~p", [reason])])
+    end
+  end
+
+  # MCP tool result: {result: {content: [{type: "text", text: ...}, ...]}} -> joined text.
+  def self.extract(resp)
+    result = maps::get(<<"result">>, resp, maps::new())
+    content = maps::get(<<"content">>, result, [])
+    if erlang::is_list(content)
+      erlang::iolist_to_binary(lists::map({|b| block_text(b)}, content))
+    else
+      <<>>
+    end
+  end
+
+  def self.block_text(b)
+    if erlang::is_map(b)
+      to_bin(maps::get(<<"text">>, b, <<>>))
+    else
+      <<>>
+    end
+  end
+
+  def self.close(port)
+    erlang::erase({:__mcp_buf__, port})
+    erlang::erase({:__mcp_id__, port})
+    jet_port_ffi::close(port)
+  end
+
+  # --- PERSISTENT connection: one process owns the MCP server subprocess + its discovered
+  # tools ACROSS turns (so the server isn't re-spawned each turn, and any server-side session
+  # state survives). The turn worker sends it {:mcp_call,...}/{:mcp_tools,...}; the process
+  # monitors the agent and closes the port when the agent dies. Mirrors jet_acp's connection. ---
+
+  def self.open_conn(cmd, agent_pid)
+    erlang::spawn(:jet_mcp_client, :conn_init, [cmd, agent_pid])
+  end
+
+  def self.conn_init(cmd, agent_pid)
+    erlang::monitor(:process, agent_pid)
+    match jet_port_ffi::open(cmd, [:separate_stderr])
+      case {:ok, port}
+        handshake_then_loop(port)
+      case {:error, _reason}
+        :error
+    end
+  end
+
+  def self.handshake_then_loop(port)
+    send_req(port, 1, "initialize", init_params())
+    match recv(port, <<>>, 1)
+      case {:ok, _r, buf1}
+        send_note(port, "notifications/initialized", maps::new())
+        send_req(port, 2, "tools/list", maps::new())
+        match recv(port, buf1, 2)
+          case {:ok, resp, buf2}
+            conn_loop(port, descriptors_for_conn(erlang::self(), tools_of(resp)), buf2, 3)
+          case {:error, _r}
+            jet_port_ffi::close(port)
+        end
+      case {:error, _r}
+        jet_port_ffi::close(port)
+    end
+  end
+
+  # the conn process: serve tool listings + calls sequentially; threaded buf/id (no process
+  # dict). Exits (closing the port) when the agent goes DOWN or the server exits.
+  def self.conn_loop(port, tools, buf, next_id)
+    receive
+      case {:mcp_tools, from, ref}
+        from ! {ref, tools}
+        conn_loop(port, tools, buf, next_id)
+      case {:mcp_call, from, ref, name, args}
+        {result, buf2} = do_call(port, next_id, name, args, buf)
+        from ! {ref, result}
+        conn_loop(port, tools, buf2, next_id + 1)
+      case :__close__
+        jet_port_ffi::close(port)
+      case {:DOWN, _mref, :process, _p, _reason}
+        jet_port_ffi::close(port)
+      case {p, {:exit_status, _st}} if p == port
+        :ok
+    end
+  end
+
+  def self.do_call(port, id, name, args, buf)
+    send_req(port, id, "tools/call", {name: to_bin(name), arguments: args})
+    match recv(port, buf, id)
+      case {:ok, resp, rest}
+        {extract(resp), rest}
+      case {:error, reason}
+        {erlang::iolist_to_binary(["mcp call failed: ", io_lib::format("~p", [reason])]), buf}
+    end
+  end
+
+  def self.descriptors_for_conn(conn_pid, tools)
+    if erlang::is_list(tools)
+      lists::map({|t| descriptor_conn(conn_pid, t)}, tools)
+    else
+      []
+    end
+  end
+
+  def self.descriptor_conn(conn_pid, t)
+    name = maps::get(<<"name">>, t, <<"tool">>)
+    {name: erlang::binary_to_atom(name, :utf8),
+     desc: maps::get(<<"description">>, t, name),
+     json_schema: maps::get(<<"inputSchema">>, t, maps::new()),
+     mcp: conn_pid}
+  end
+
+  # --- worker-side: ask a conn process for its tools / to run a call ---
+
+  def self.tools_of_conn(conn_pid)
+    if alive?(conn_pid)
+      ref = erlang::make_ref()
+      conn_pid ! {:mcp_tools, erlang::self(), ref}
+      receive
+        case {r, tools} if r == ref
+          tools
+      after 10000
+        []
+      end
+    else
+      []
+    end
+  end
+
+  def self.call_conn(conn_pid, name, args)
+    if alive?(conn_pid)
+      ref = erlang::make_ref()
+      conn_pid ! {:mcp_call, erlang::self(), ref, name, args}
+      receive
+        case {r, result} if r == ref
+          result
+      after 60000
+        <<"mcp call timeout">>
+      end
+    else
+      <<"mcp server not connected">>
+    end
+  end
+
+  def self.alive?(pid)
+    erlang::is_pid(pid) and erlang::is_process_alive(pid)
+  end
+
+  # config[:mcp] -> list of command strings (a single char-list command, or a list of them).
+  def self.norm_specs(specs)
+    if erlang::is_binary(specs)
+      [specs]
+    elsif erlang::is_list(specs)
+      match specs
+        case []
+          []
+        case [h, *_]
+          if erlang::is_integer(h)
+            [specs]
+          else
+            specs
+          end
+      end
+    else
+      []
+    end
+  end
+
+  # --- ndjson JSON-RPC over the port (mirror of jet_acp::await) ---
+
+  # read ndjson lines until the response whose "id" == id; skip notifications / other ids.
+  def self.recv(port, buf, id)
+    match binary::split(buf, <<"\n">>)
+      case [line, rest]
+        match jet_json_ffi::decode(line)
+          case {:ok, msg}
+            if maps::get(<<"id">>, msg, nil) == id
+              {:ok, msg, rest}
+            else
+              recv(port, rest, id)
+            end
+          case _
+            recv(port, rest, id)
+        end
+      case _
+        receive
+          case {p, {:data, data}} if p == port
+            recv(port, erlang::iolist_to_binary([buf, data]), id)
+          case {p, {:exit_status, _st}} if p == port
+            {:error, :closed}
+        after 30000
+          {:error, :timeout}
+        end
+    end
+  end
+
+  def self.send_req(port, id, method, params)
+    jet_port_ffi::send_input(port,
+      erlang::iolist_to_binary([jet_json_ffi::encode({jsonrpc: "2.0", id: id, method: method, params: params}), "\n"]))
+  end
+
+  def self.send_note(port, method, params)
+    jet_port_ffi::send_input(port,
+      erlang::iolist_to_binary([jet_json_ffi::encode({jsonrpc: "2.0", method: method, params: params}), "\n"]))
+  end
+
+  # --- per-port state (process dict; the opening worker owns it) ---
+
+  def self.next_id(port)
+    n = match erlang::get({:__mcp_id__, port})
+          case :undefined
+            3
+          case v
+            v
+        end
+    erlang::put({:__mcp_id__, port}, n + 1)
+    n
+  end
+
+  def self.get_buf(port)
+    match erlang::get({:__mcp_buf__, port})
+      case :undefined
+        <<>>
+      case b
+        b
+    end
+  end
+
+  def self.put_buf(port, b)
+    erlang::put({:__mcp_buf__, port}, b)
+  end
+
+  def self.to_bin(x)
+    if erlang::is_binary(x)
+      x
+    elsif erlang::is_atom(x)
+      erlang::atom_to_binary(x, :utf8)
+    else
+      erlang::iolist_to_binary(x)
+    end
+  end
+end

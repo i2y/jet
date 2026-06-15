@@ -24,7 +24,8 @@
     module_exports/1, module_attributes/1,
     format_error/1,
     codepoint_to_string/1,
-    actor_put/2
+    actor_put/2,
+    make_exception/3
 ]).
 
 %% erl_syntax constructors - accept Gleam-friendly types
@@ -256,3 +257,9 @@ codepoint_to_string(Code) ->
 actor_put(Key, Value) ->
     erlang:put(Key, Value),
     Value.
+
+%% Wrap a caught Class:Reason:Stacktrace into an exception object.
+%% Returned as a plain map, so in Jet the catch variable supports
+%% e.get(:class), e.get(:reason), e.get(:stacktrace) via the map methods.
+make_exception(Class, Reason, Stacktrace) ->
+    #{class => Class, reason => Reason, stacktrace => Stacktrace}.

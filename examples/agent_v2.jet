@@ -1,0 +1,36 @@
+# New flagship agent surface: `ask` (typed answer) vs `task` (TurnResult).
+# No runner declared => stub runner, so this runs offline (no external agent).
+#   ./jet -r agent_v2::run examples/agent_v2.jet
+module agent_v2
+  agent Demo
+    role "demo"
+
+    ask research(question) -> {answer: String, sources: [String]}   # typed answer
+    task fix(description)                                            # work -> TurnResult
+  end
+
+  def self.run()
+    d = agent_v2::Demo.spawn()
+
+    answer = d.research("what is the BEAM?").await()
+    io::format("ask  research => ~p~n", [answer])
+
+    tr = d.fix("make the failing test pass").await()
+    io::format("task fix      => ok?=~p plan=~p text=~p~n", [tr.ok?(), tr.plan(), tr.text()])
+
+    io::format("--- streaming task events (.stream do |ev|) ---~n", [])
+    tr2 = d.fix("refactor the parser").stream do |ev|
+      match ev
+        case {:plan, steps}
+          io::format("  plan:      ~p~n", [steps])
+        case {:tool_call, t}
+          io::format("  tool_call: ~ts (~ts)~n", [t.get(:title), t.get(:status)])
+        case {:text, s}
+          io::format("  text:      ~ts~n", [s])
+        case _
+          :ok
+      end
+    end
+    io::format("stream final  => ok?=~p~n", [tr2.ok?()])
+  end
+end

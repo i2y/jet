@@ -197,16 +197,18 @@ module Kernel
     {:object, module_name, state.merge(new_state)}
   end
 
-  def cast() if is_pid(self)
-    Kernel::Caster.new(self)
+  # Actor self is now the state object, not the pid; the actor's pid is
+  # erlang:self() since these run inside the actor's gen_server process.
+  def cast()
+    Kernel::Caster.new(erlang::self())
   end
 
-  def stop() if is_pid(self)
-    gen_server::stop(self)
+  def stop()
+    gen_server::stop(erlang::self())
   end
 
-  def stop(reason, timeout) if is_pid(self)
-    gen_server::stop(self, reason, timeout)
+  def stop(reason, timeout)
+    gen_server::stop(erlang::self(), reason, timeout)
   end
 
   class Future
@@ -243,8 +245,8 @@ module Kernel
     end
   end
 
-  def async() if is_pid(self)
-    Kernel::AsyncCaller.new(self)
+  def async()
+    Kernel::AsyncCaller.new(erlang::self())
   end
 
   class AsyncCaller

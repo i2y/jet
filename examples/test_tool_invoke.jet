@@ -1,0 +1,8 @@
+module test_tool_invoke
+  def self.run()
+    tools = [{name: :get_price, params: {item: :string}, impl: {|i| 4217}}]
+    fn = maps::from_list([{<<"name">>, <<"get_price">>}, {<<"arguments">>, maps::from_list([{<<"item">>, "widget"}])}])
+    tc = maps::from_list([{<<"function">>, fn}])
+    io::format("invoke path => ~p~n", [jet_llm::one_tool_result(tc, tools)])
+  end
+end

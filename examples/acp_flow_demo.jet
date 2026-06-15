@@ -1,0 +1,16 @@
+module acp_flow_demo
+  # Flow: a runtime dataflow orchestrator. A designer GENERATES a dataflow graph (DAG) of
+  # agents for THIS task -- the topology itself is composed at runtime, not selected
+  # from a menu (that's Architect). Independent nodes run in PARALLEL as supervised
+  # BEAM processes (crash-isolated); a node runs once its deps are done and receives
+  # their outputs; the single terminal node's output is the answer. All-Claude here.
+  #
+  #   ./jet acp-serve acp_flow_demo::Composer::handle examples/acp_flow_demo.jet
+  #
+  # Try: "Compare three caching strategies for a read-heavy API and recommend one"
+  #      (the designer fans out one node per strategy, then joins them in a final).
+  agent Composer
+    runner Flow(drives: "claude-code-acp")
+    ask handle(task)
+  end
+end

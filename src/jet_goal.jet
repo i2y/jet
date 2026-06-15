@@ -1,0 +1,298 @@
+module jet_goal
+  # Goal: a persistent, self-verifying loop (the "/goal" idea). You give a GOAL and a
+  # machine-checkable ACCEPTANCE condition; each round an agent (or a whole sub-shape)
+  # ATTEMPTS it, then a cheap CHECKER decides whether the condition is MET. It iterates,
+  # feeding back what's still missing, until MET or the round cap. The value is closing
+  # the loop -- the checker is the acceptance gate, exploiting the asymmetry that
+  # CHECKING is cheap while DOING is expensive.
+  #
+  # Relationship to the other shapes:
+  #   - It GENERALIZES Refine (evaluator-optimizer): the subjective critic becomes an
+  #     explicit acceptance check against `accept:`, plus a budget + persistent goal.
+  #   - It sits ABOVE Architect/Flow/Pipeline: set `via:` and each attempt is a whole
+  #     sub-shape run (Flow generates a DAG, Architect designs a team, ...). Goal is the
+  #     verify-until-met layer; the sub-shape is how each attempt is made.
+  #
+  #   runner Goal(accept: "go test ./... passes", max_rounds: 5, drives: "claude-code-acp")
+  #   runner Goal(accept: "...", via: {name: :Flow})   # each attempt = a generated DAG
+
+  def self.turn(config, method, args, schema)
+    jet_http_ffi::ensure_started()
+    opts = jet_backend::opts(config)
+    model = maps::get(:model, opts, nil)
+    drives = maps::get(:drives, opts, nil)
+    raw = jet_backend::to_bin(jet_acp::build_prompt(config, method, args))
+    max = maps::get(:max_rounds, opts, 4)
+    checker = checker_backend(opts, model, drives)
+    via = maps::get(:via, opts, nil)              # optional sub-shape for each attempt
+    # the acceptance condition can come from OUTSIDE via the ACP prompt ("...Accept: X"),
+    # which OVERRIDES the agent's config `accept:`; if neither, derive one from the goal.
+    {goal, accept} = resolve_goal_and_accept(raw, opts, checker)
+    jet_acp::emit_event({:thought, erlang::iolist_to_binary(["Working toward the goal. Done when: ", accept])})
+    jet_backend::coerce(loop(goal, accept, build_doers(opts, model, drives, goal), checker, via, config, opts, max, 1, <<>>), schema)
+  end
+
+  # --- the acceptance condition: prompt-explicit ("...Accept: X") OVERRIDES the config
+  # `accept:`, which overrides a derived one. So an ACP client sets the bar per request,
+  # a purpose-built agent can default it, and a bare goal still gets a checkable one. ---
+
+  def self.resolve_goal_and_accept(raw, opts, checker)
+    {goal, prompt_accept} = split_accept(raw)
+    accept = if prompt_accept != nil
+      prompt_accept
+    else
+      match maps::find(:accept, opts)
+        case {:ok, a}
+          jet_backend::to_bin(a)
+        case :error
+          derive_accept(checker, goal)
+      end
+    end
+    {goal, accept}
+  end
+
+  # split the prompt at an acceptance marker (English/Japanese) -> {goal, accept | nil}.
+  def self.split_accept(raw)
+    try_markers(raw, [<<"受け入れ:">>, <<"Accept:">>, <<"accept:">>, <<"ACCEPT:">>, <<"Done when:">>, <<"DONE WHEN:">>])
+  end
+
+  def self.try_markers(raw, markers)
+    match markers
+      case []
+        {raw, nil}
+      case [m, *rest]
+        match binary::split(raw, m)
+          case [g, a]
+            {trim_bin(g), trim_bin(a)}
+          case _
+            try_markers(raw, rest)
+        end
+    end
+  end
+
+  def self.trim_bin(b)
+    erlang::iolist_to_binary(string::trim(jet_backend::to_bin(b)))
+  end
+
+  # nothing given anywhere -> have the (cheap) checker propose a machine-checkable one.
+  def self.derive_accept(checker, goal)
+    role = "Given a goal, state ONE concise, MACHINE-CHECKABLE acceptance condition that confirms it is fully met -- prefer something verifiable with a command, test, or count (e.g. 'go test ./... passes', 'all listed endpoints return HTTP 200', 'the output file has exactly 10 rows'). Reply with ONLY the condition (one or two sentences), no preamble."
+    out = jet_backend::run_silent(checker, role, goal)
+    if out == <<>>
+      <<"The goal is fully and correctly accomplished, with concrete evidence shown.">>
+    else
+      out
+    end
+  end
+
+  def self.loop(goal, accept, doers, checker, via, config, opts, max, round, feedback)
+    d = jet_backend::at(doers, round)
+    label = trace_label(round, maps::get(:label, d, nil))
+    jet_acp::emit_trace(round, label, "running")
+    jet_acp::round_note(round, maps::get(:label, d, nil), erlang::length(doers))
+    work = attempt(maps::get(:backend, d, nil), via, config, opts, goal, accept, feedback, round)
+    oldp = jet_acp::trace_set_parent(round)              # the acceptance check sits at the round level
+    verdict = verify(checker, accept, work, round)
+    jet_acp::trace_set_parent(oldp)
+    if met?(verdict)
+      jet_acp::emit_trace(round, label, "accepted")
+      finalize(work, round, true, <<>>, maps::get(:surface, opts, false))
+    elsif round >= max
+      jet_acp::emit_trace(round, label, "best-effort")
+      finalize(work, round, false, verdict, maps::get(:surface, opts, false))
+    else
+      jet_acp::emit_trace(round, label, "rejected")
+      loop(goal, accept, doers, checker, via, config, opts, max, round + 1, verdict)
+    end
+  end
+
+  def self.trace_label(round, model)
+    base = erlang::iolist_to_binary(["Round ", erlang::integer_to_binary(round)])
+    if model == nil
+      base
+    else
+      erlang::iolist_to_binary([base, " · ", jet_backend::to_bin(model)])
+    end
+  end
+
+  # doer selection. Static = one backend. `select: :escalate` over a tier-ordered `models:`
+  # pool (cheapest first) makes round N use the Nth model -- so a failed acceptance check
+  # escalates the NEXT attempt to a stronger model. Cheap-first cascade (FrugalGPT-style):
+  # pay for the big model only when the cheap one's work doesn't pass. The pool entries are
+  # the user's choice; nothing about which models exist is hardcoded into the shape.
+  #   models: [{name: "ollama:small", tier: :cheap}, {name: "ollama:big", tier: :strong},
+  #            {name: "claude-code-acp", tier: :frontier}], select: :escalate
+  # the per-round doer list: the shared escalation pool (jet_backend) if `select: :escalate`
+  # + `models:` is set, else the single static doer (resolved only now, so an escalate-only
+  # config with no `model:` never hits the no-backend path).
+  def self.build_doers(opts, model, drives, task)
+    match jet_backend::resolve_pool(opts)
+      case {:escalate, doers}
+        doers
+      case {:route, doers}                    # router picks one model up front for this task
+        [jet_backend::route_pick(opts, doers, task)]
+      case :static
+        [{backend: jet_backend::resolve_lead(model, drives, maps::get(:doer, opts, nil)), label: static_label(model, drives)}]
+    end
+  end
+
+  # label a static (non-pool) doer with its model/driver so the trace still names what ran
+  def self.static_label(model, drives)
+    if model != nil
+      jet_backend::to_bin(model)
+    elsif drives != nil
+      jet_backend::to_bin(drives)
+    else
+      nil
+    end
+  end
+
+  # one attempt: a single agent (default), or a whole sub-shape run SILENTLY (so Goal
+  # shows it as one "Attempt rN" step and can check its result).
+  def self.attempt(doer, via, config, opts, goal, accept, feedback, round)
+    input = attempt_input(goal, accept, feedback)
+    if via == nil                                          # completion emitted by loop, which alone
+      jet_backend::run_silent(doer, attempt_role(), input) # knows if this attempt is the final one
+    else
+      old = jet_acp::trace_set_parent(round)               # the sub-shape's spans nest under this round
+      result = run_subshape_silent(via, config, opts, input)
+      jet_acp::trace_set_parent(old)
+      result
+    end
+  end
+
+  def self.attempt_role()
+    "You are working toward a goal over multiple rounds. Do the work to satisfy the goal AND its acceptance condition. If you have tools, USE them to produce real, verifiable results (write files, run tests/commands, and SHOW the evidence/output). If you were told what is still missing, fix exactly that. Reply with your result and the evidence for it."
+  end
+
+  def self.attempt_input(goal, accept, feedback)
+    base = ["Goal:\n", goal, "\n\nAcceptance condition you must satisfy:\n", accept]
+    if feedback == <<>>
+      erlang::iolist_to_binary(base)
+    else
+      erlang::iolist_to_binary([base, "\n\nThe previous attempt did NOT pass. Still missing / failing:\n", feedback, "\n\nFix exactly this and show the evidence."])
+    end
+  end
+
+  # run a sub-shape (Plan/Flow/Architect/...) as the attempt. By default its inner streaming
+  # is SUPPRESSED (Goal surfaces each attempt as one Attempt/Check step). `surface: true`
+  # KEEPS the inner stream, so the sub-shape's own plan / DAG / tool_calls flow to the client
+  # too -- you see inside each attempt (noisier: intermediate attempt text also streams).
+  def self.run_subshape_silent(via, config, opts, input)
+    surface = maps::get(:surface, opts, false)
+    saved = erlang::get(:__acp_stream__)
+    if surface
+      :ok                              # keep the stream target -> inner events surface
+    else
+      erlang::erase(:__acp_stream__)
+    end
+    spec = with_backends(via, opts)
+    name = maps::get(:name, spec, :Fleet)
+    sub = maps::put(:role, <<>>, maps::put(:runner, {name: name, opts: spec}, config))
+    result = jet_agent::dispatch(sub, :run, [input], :any, :ask)   # dispatch handles every shape
+    if surface
+      :ok
+    else
+      restore_stream(saved)
+    end
+    result_text(result)
+  end
+
+  def self.restore_stream(saved)
+    if saved != :undefined
+      erlang::put(:__acp_stream__, saved)
+    end
+  end
+
+  # carry Goal's model/drives down to the sub-shape unless it set its own.
+  def self.with_backends(spec, opts)
+    s1 = if maps::is_key(:model, spec)
+      spec
+    else
+      maps::put(:model, maps::get(:model, opts, nil), spec)
+    end
+    if maps::is_key(:drives, s1) or maps::get(:drives, opts, nil) == nil
+      s1
+    else
+      maps::put(:drives, maps::get(:drives, opts), s1)
+    end
+  end
+
+  def self.result_text(result)
+    match result
+      case {:ok, t}
+        jet_backend::to_bin(t)
+      case t
+        jet_backend::to_bin(t)
+    end
+  end
+
+  # the cheap acceptance checker: reads the attempt + condition, replies MET or what's
+  # missing. Cheap by design -- checking is far cheaper than doing.
+  def self.verify(checker, accept, work, round)
+    role = "You are a STRICT acceptance checker. Decide if the acceptance condition is FULLY met by the work shown, with concrete evidence. Reply with EXACTLY the word MET (nothing else) if and only if it is fully satisfied. Otherwise reply with a short, specific list of what is still missing or failing. Do not be lenient: if the required evidence (e.g. passing test output) is not shown, it is NOT met."
+    input = erlang::iolist_to_binary(["Acceptance condition:\n", accept, "\n\nWork to check:\n", work, "\n\nReply MET, or what is still missing."])
+    id = erlang::iolist_to_binary(["check-", erlang::integer_to_binary(round)])
+    lbl = erlang::iolist_to_binary(["✓ acceptance check ", erlang::integer_to_binary(round)])
+    jet_acp::emit_trace(id, lbl, "running")
+    out = jet_backend::run_silent(checker, role, input)
+    jet_acp::emit_trace(id, lbl, "ok")
+    out
+  end
+
+  # MET only if the verdict *starts with* "met" (so "not met..." is a rejection).
+  def self.met?(verdict)
+    t = erlang::iolist_to_binary(string::trim(string::lowercase(jet_backend::to_bin(verdict))))
+    match binary::split(t, <<"met">>)
+      case [<<>>, _rest]
+        true
+      case _
+        false
+    end
+  end
+
+  # the final answer: the accepted (or best) attempt, emitted ONCE, with a status line.
+  # When `surface` is on, the attempt's work was ALREADY streamed live, so re-emitting it as
+  # {:text} would double it -- emit only the status line in that case.
+  def self.finalize(work, round, met, feedback, surface)
+    rounds = erlang::integer_to_binary(round)
+    status = if met
+      erlang::iolist_to_binary(["Goal met in ", rounds, " round(s)."])
+    else
+      erlang::iolist_to_binary(["Stopped after ", rounds, " round(s) without fully meeting the goal; still missing: ", feedback])
+    end
+    jet_acp::emit_event({:thought, status})
+    if surface
+      :ok                              # surfacing already streamed the attempt -- don't repeat it
+    else
+      jet_acp::emit_event({:text, work})
+    end
+    work
+  end
+
+  # checker backend: explicit `checker:` wins; else prefer the cheap local model; else
+  # the agent; else a clear no-backend error.
+  def self.checker_backend(opts, model, drives)
+    c = maps::get(:checker, opts, nil)
+    if c != nil
+      jet_backend::resolve_lead(model, drives, c)
+    elsif model != nil
+      {:ollama, jet_backend::model_name(model)}
+    elsif drives != nil
+      {:acp, jet_backend::to_bin(drives)}
+    else
+      jet_backend::no_backend()
+    end
+  end
+
+  def self.emit(kind, title, round, status, output)
+    rid = erlang::iolist_to_binary([kind, "-", erlang::integer_to_binary(round)])
+    base = {id: rid, title: erlang::iolist_to_binary([title, " r", erlang::integer_to_binary(round)]),
+            kind: "think", status: status}
+    if output == nil
+      jet_acp::emit_event({:tool_call, base})
+    else
+      jet_acp::emit_event({:tool_call, maps::put(:output, output, base)})
+    end
+  end
+end

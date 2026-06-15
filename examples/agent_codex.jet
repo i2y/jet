@@ -1,0 +1,38 @@
+# Drive OpenAI Codex over ACP via the official adapter @zed-industries/codex-acp.
+#
+# Codex's own "App Server" is a *different* protocol; the adapter speaks ACP, so
+# the SAME `Acp` runner that drives Claude Code drives Codex — only the command
+# differs. This is the payoff of building on the standard: zero new Jet code.
+#
+# Prerequisites: Node (for `npx`) + Codex auth — a ChatGPT subscription, or
+# CODEX_API_KEY / OPENAI_API_KEY in the environment. Then:
+#   ./jet -r agent_codex::run examples/agent_codex.jet
+module agent_codex
+  agent Coder
+    runner Acp(command: "npx @zed-industries/codex-acp")
+    role "You are a precise coding assistant. Be concise."
+
+    expose ask(question) -> {answer: String}   # structured result
+    expose task(instruction)                    # no schema -> plain text
+
+    # permission policy (on_approval hook): allow file reads/edits, refuse shell
+    def on_approval(req)
+      match req.get(:kind)
+        case "execute"
+          :deny
+        case _
+          :allow
+      end
+    end
+  end
+
+  def self.run()
+    c = agent_codex::Coder.spawn()
+    io::format("ask => ~p~n", [c.ask("What is the BEAM, in one sentence?").await()])
+
+    # streaming variant:
+    # c.task("List three BEAM languages").stream do |chunk|
+    #   io::format("~ts", [chunk])
+    # end
+  end
+end

@@ -1,0 +1,492 @@
+module jet_acp_server
+  # ACP *agent* (server) -- the mirror of jet_acp (the ACP client). Exposes a Jet
+  # agent over ACP stdio so any ACP client can drive it.
+  #
+  # Architecture (bidirectional): one process cannot block on io::get_line AND its
+  # mailbox, so stdin reading and protocol handling are split:
+  #   reader  -- the only stdin reader; forwards each line to the router.
+  #   router  -- owns stdout + all state. Incoming requests it handles inline;
+  #              a session/prompt it runs in its OWN turn process so it stays
+  #              responsive -- which lets the agent make outbound requests
+  #              (fs/terminal/permission) *mid-turn* via request/2.
+  #   turn    -- one per prompt: runs the agent turn, routes stream events to the
+  #              router as {:out, msg}, finishes with {:turn_done, ...}.
+  #   jet_acp_server::serve(spawn_fn, :method)  /  serve_named(mod, Agent, :method)
+
+  def self.serve(spawn_fn, method)
+    logger::set_primary_config(:level, :critical)   # keep stdout protocol-only
+    router = erlang::spawn(:jet_acp_server, :router_loop,
+                           [{sessions: maps::new(), pending: maps::new(),
+                             spawn_fn: spawn_fn, method: method, next_id: 1000000}])
+    erlang::register(:jet_acp_router, router)
+    reader_loop(router)
+  end
+
+  # serve an agent by name -- `jet acp-serve mod::Agent::method` builds the spawn
+  # closure for you, so an agent file needs no serve boilerplate at all.
+  def self.serve_named(module_name, class_name, method)
+    serve({|_| jet_runtime::call_method(jet_runtime::new_class(module_name, class_name), :spawn, [])},
+          method)
+  end
+
+  # --- reader: stdin -> router ---
+
+  def self.reader_loop(router)
+    match io::get_line("")
+      case :eof
+        router ! :stdin_closed
+      case {:error, _r}
+        router ! :stdin_closed
+      case line
+        router ! {:stdin, line}
+        reader_loop(router)
+    end
+  end
+
+  # --- router: the single owner of stdout + state ---
+
+  def self.router_loop(st)
+    receive
+      case {:stdin, line}
+        router_loop(on_stdin(line, st))
+      case {:out, msg}
+        send_msg(msg)
+        router_loop(st)
+      case {:rpc, rmethod, params, from}
+        router_loop(send_request(rmethod, params, from, st))
+      case {:turn_done, sid, user_msg, answer, reqid}
+        send_result(reqid, {stopReason: "end_turn"})
+        append_to_session(sid, user_msg, answer, st)   # append in the router (serialized); jet_memory snapshots
+        router_loop(st)
+      case :stdin_closed
+        :ok
+    end
+  end
+
+  def self.on_stdin(line, st)
+    dbg("IN  ", line)
+    match jet_json_ffi::decode(erlang::iolist_to_binary(line))
+      case {:ok, msg}
+        if maps::is_key(<<"method">>, msg)
+          on_request(msg, st)        # client -> us
+        else
+          on_response(msg, st)       # client's reply to one of our requests
+        end
+      case _
+        st
+    end
+  end
+
+  def self.on_request(msg, st)
+    id = maps::get(<<"id">>, msg, nil)
+    match maps::get(<<"method">>, msg, nil)
+      case <<"initialize">>
+        send_result(id, {protocolVersion: 1,
+                         agentInfo: {name: "jet", version: "0.1.0"},
+                         agentCapabilities: {loadSession: persist_enabled?()},   # advertise resume only when we persist
+                         authMethods: []})           # no auth -> the client won't prompt to log in
+        st
+      case <<"session/new">>
+        pid = erlang::apply(maps::get(:spawn_fn, st), [0])     # a session = one Jet agent
+        sid = new_sid()
+        send_result(id, {sessionId: sid})
+        # {agent pid, jet_memory handle}; last_sid scopes the agent's outbound fs requests
+        put_session(sid, {pid, open_mem(sid)}, maps::put(:last_sid, sid, st))
+      case <<"session/load">>
+        # resume a prior thread: restore its turns from disk, replay them to the
+        # client, then continue with full memory (the loadSession capability).
+        params = maps::get(<<"params">>, msg, maps::new())
+        load_session(id, maps::get(<<"sessionId">>, params, nil), st)
+      case <<"session/prompt">>
+        params = maps::get(<<"params">>, msg, maps::new())
+        start_turn(id,
+                   maps::get(<<"sessionId">>, params, nil),
+                   prompt_text(maps::get(<<"prompt">>, params, [])),
+                   st)
+      case <<"session/cancel">>
+        st
+      case _
+        if id == nil
+          st                                         # an unhandled notification
+        else
+          send_error(id, -32601, "method not supported by jet agent")
+          st
+        end
+    end
+  end
+
+  # client's response to an outbound request -> hand the value to the waiter.
+  def self.on_response(msg, st)
+    id = maps::get(<<"id">>, msg, nil)
+    pending = maps::get(:pending, st)
+    match maps::get(id, pending, nil)
+      case nil
+        st
+      case from
+        from ! {:rpc_reply, response_value(msg)}
+        maps::put(:pending, maps::remove(id, pending), st)
+    end
+  end
+
+  def self.response_value(msg)
+    match maps::find(<<"result">>, msg)
+      case {:ok, r}
+        {:ok, r}
+      case :error
+        {:error, maps::get(<<"error">>, msg, nil)}
+    end
+  end
+
+  # spawn a turn in its own process so the router stays free to service the
+  # agent's outbound requests while the turn runs.
+  def self.start_turn(reqid, sid, user_msg, st)
+    router = erlang::self()
+    match maps::get(sid, maps::get(:sessions, st), nil)
+      case {apid, mem}
+        erlang::spawn(:jet_acp_server, :turn_proc,
+                      [router, reqid, sid, conv_text(mem, user_msg), user_msg,
+                       apid, maps::get(:method, st)])
+        st
+      case _
+        send_error(reqid, -32602, "unknown session")
+        st
+    end
+  end
+
+  def self.turn_proc(router, reqid, sid, conv, user_msg, apid, method)
+    ar = jet_runtime::call_method(apid, method, [conv])
+    response = jet_runtime::call_method(ar, :stream, [{|ev| route_event(router, sid, ev)}])
+    router ! {:turn_done, sid, user_msg, response_text(response), reqid}
+  end
+
+  def self.route_event(router, sid, ev)
+    match forward_msg(sid, ev)
+      case nil
+        :ok
+      case msg
+        router ! {:out, msg}
+    end
+  end
+
+  # --- outbound requests (agent -> client), called from runners/tool impls ---
+
+  # make a request to the ACP client and block for its response. Runs in a turn
+  # process (or a tool impl on it); the router services it concurrently.
+  def self.request(rmethod, params)
+    if erlang::whereis(:jet_acp_router) == :undefined
+      {:error, :no_acp_client}
+    else
+      :jet_acp_router ! {:rpc, rmethod, params, erlang::self()}
+      receive
+        case {:rpc_reply, result}
+          result
+      after 120000
+        {:error, :acp_request_timeout}
+      end
+    end
+  end
+
+  def self.read_file(path)
+    request("fs/read_text_file", {path: to_text(path)})
+  end
+
+  def self.write_file(path, content)
+    request("fs/write_text_file", {path: to_text(path), content: to_text(content)})
+  end
+
+  def self.request_permission(params)
+    request("session/request_permission", params)    # sessionId injected by the router
+  end
+
+  def self.send_request(rmethod, params, from, st)
+    id = maps::get(:next_id, st)
+    # ACP fs/permission requests are session-scoped; inject the current sessionId
+    # (some ACP clients reject fs/read_text_file without it). Assumes one active session per
+    # acp-serve process -- the common case (a client typically spawns one process per thread).
+    full = maps::put(:sessionId, maps::get(:last_sid, st, nil), params)
+    send_msg({jsonrpc: "2.0", id: id, method: rmethod, params: full})
+    maps::put(:next_id, id + 1,
+              maps::put(:pending, maps::put(id, from, maps::get(:pending, st)), st))
+  end
+
+  # --- stream event -> ACP session/update map (built here, routed by the turn) ---
+
+  # {:text}->agent_message_chunk  {:thought}->agent_thought_chunk
+  # {:tool_call,m}->tool_call/tool_call_update  {:plan}->plan
+  def self.forward_msg(sid, ev)
+    match ev
+      case {:text, chunk}
+        notify_update(sid, {sessionUpdate: "agent_message_chunk",
+                            content: {type: "text", text: to_text(chunk)}})
+      case {:thought, chunk}
+        notify_update(sid, {sessionUpdate: "agent_thought_chunk",
+                            content: {type: "text", text: to_text(chunk)}})
+      case {:tool_call, info}
+        tool_call_msg(sid, info)
+      case {:plan, entries}
+        notify_update(sid, {sessionUpdate: "plan", entries: plan_entries(entries)})
+      case _
+        nil
+    end
+  end
+
+  def self.notify_update(sid, body)
+    {jsonrpc: "2.0", method: "session/update", params: {sessionId: sid, update: body}}
+  end
+
+  # first sighting of a tool-call id (this turn) is a create; later are updates.
+  def self.tool_call_msg(sid, info)
+    id = to_text(maps::get(:id, info, <<"tool">>))
+    status = to_text(maps::get(:status, info, <<"in_progress">>))
+    seen_key = {:__acp_tc__, id}
+    if erlang::get(seen_key) == :undefined
+      erlang::put(seen_key, true)
+      notify_update(sid, {sessionUpdate: "tool_call",
+                          toolCallId: id,
+                          title: to_text(maps::get(:title, info, <<"tool">>)),
+                          kind: to_text(maps::get(:kind, info, <<"other">>)),
+                          status: status})
+    else
+      notify_update(sid, with_output({sessionUpdate: "tool_call_update",
+                                      toolCallId: id, status: status},
+                                     maps::get(:output, info, nil)))
+    end
+  end
+
+  def self.with_output(body, output)
+    if output == nil
+      body
+    else
+      maps::put(:content,
+                [{type: "content", content: {type: "text", text: to_text(output)}}],
+                body)
+    end
+  end
+
+  def self.plan_entries(entries)
+    if erlang::is_list(entries)
+      lists::map({|e| plan_entry(e)}, entries)
+    else
+      []
+    end
+  end
+
+  def self.plan_entry(e)
+    if erlang::is_map(e)
+      {content: to_text(entry_field(e, :content, <<"content">>, <<"(step)">>)),
+       priority: to_text(entry_field(e, :priority, <<"priority">>, <<"medium">>)),
+       status: to_text(entry_field(e, :status, <<"status">>, <<"pending">>))}
+    else
+      {content: to_text(e), priority: "medium", status: "pending"}
+    end
+  end
+
+  # read a plan-entry field by atom key (Jet-native, e.g. from a shape) or binary
+  # key (JSON-decoded, e.g. a child agent's forwarded plan).
+  def self.entry_field(e, akey, bkey, default)
+    if maps::is_key(akey, e)
+      maps::get(akey, e)
+    elsif maps::is_key(bkey, e)
+      maps::get(bkey, e)
+    else
+      default
+    end
+  end
+
+  # --- conversation memory: backed by jet_memory (one handle per session). The server
+  # OWNS it (replay + loadSession need the turns); server-driven agents defer to it via
+  # jet_agent::server_owned?. The prompt uses a byte-budget WINDOW of recent turns (+ a
+  # rolling summary if present) so a long thread isn't re-sent whole each turn; the full
+  # history stays in jet_memory for replay. Persistence is jet_memory's snapshot. ---
+
+  def self.open_mem(sid)
+    if persist_enabled?()
+      jet_memory::open({id: sid, dir: session_dir()})    # durable: snapshot to session_dir/<sid>.json
+    else
+      jet_memory::open(maps::new())                      # ephemeral in-RAM
+    end
+  end
+
+  def self.append_to_session(sid, user_msg, answer, st)
+    match maps::get(sid, maps::get(:sessions, st), nil)
+      case {_apid, mem}
+        jet_memory::append_turn(mem, user_msg, answer)   # mutates the shared ETS + write-through snapshot
+      case _
+        :ok
+    end
+  end
+
+  def self.conv_text(mem, user)
+    {_to_compact, recent} = jet_memory::window(mem, prompt_budget())
+    summary = jet_memory::summary(mem)
+    if recent == [] and summary == <<>>
+      user
+    else
+      erlang::iolist_to_binary([summary_text(summary), turns_text(recent), "User: ", user])
+    end
+  end
+
+  def self.prompt_budget()
+    24000     # recent-turns byte budget for the prompt (bounds a long thread's resend)
+  end
+
+  def self.summary_text(summary)
+    if summary == <<>>
+      []
+    else
+      ["Summary of earlier conversation:\n", summary, "\n\n"]
+    end
+  end
+
+  def self.turns_text(turns)
+    erlang::iolist_to_binary(lists::map({|t| pair_text(t)}, turns))
+  end
+
+  def self.pair_text(t)
+    {u, a} = t
+    ["User: ", u, "\n\nAssistant: ", a, "\n\n"]
+  end
+
+  def self.response_text(r)
+    match r
+      case {:ok, v}
+        to_text(v)
+      case _
+        <<>>
+    end
+  end
+
+  # --- session persistence + resume (the loadSession capability) ---
+
+  def self.load_session(reqid, sid, st)
+    mem = open_mem(sid)             # reloads the snapshot from disk
+    pid = erlang::apply(maps::get(:spawn_fn, st), [0])
+    replay(sid, jet_memory::turns(mem))   # MUST replay the conversation before responding
+    send_result(reqid, {})          # LoadSessionResponse: all fields optional -> {} (NOT null;
+                                    # some clients reject null: "expected struct LoadSessionResponse")
+    put_session(sid, {pid, mem}, maps::put(:last_sid, sid, st))
+  end
+
+  def self.replay(sid, turns)
+    lists::foreach({|t| replay_turn(sid, t)}, turns)
+  end
+
+  def self.replay_turn(sid, t)
+    {u, a} = t
+    send_msg(notify_update(sid, {sessionUpdate: "user_message_chunk",
+                                 content: {type: "text", text: to_text(u)}}))
+    send_msg(notify_update(sid, {sessionUpdate: "agent_message_chunk",
+                                 content: {type: "text", text: to_text(a)}}))
+  end
+
+  # session persistence config (env vars, in the same spirit as JET_ACP_LOG):
+  #   JET_ACP_SESSIONS_DIR -> override the directory (default ~/.jet/acp_sessions)
+  #   JET_ACP_NO_PERSIST   -> set (to anything) to disable persistence; default = ON
+  def self.persist_enabled?()
+    os::getenv("JET_ACP_NO_PERSIST") == false
+  end
+
+  def self.session_dir()
+    match os::getenv("JET_ACP_SESSIONS_DIR")
+      case false
+        default_session_dir()
+      case ""
+        default_session_dir()
+      case dir
+        dir
+    end
+  end
+
+  def self.default_session_dir()
+    match os::getenv("HOME")
+      case false
+        "/tmp/jet_acp_sessions"
+      case home
+        home ++ "/.jet/acp_sessions"
+    end
+  end
+
+  # --- session map helpers ---
+
+  def self.put_session(sid, value, st)
+    maps::put(:sessions, maps::put(sid, value, maps::get(:sessions, st)), st)
+  end
+
+  # --- text / prompt helpers ---
+
+  def self.prompt_text(blocks)
+    if erlang::is_list(blocks)
+      erlang::iolist_to_binary(lists::map({|b| block_text(b)}, blocks))
+    else
+      <<>>
+    end
+  end
+
+  def self.block_text(b)
+    if erlang::is_map(b)
+      match maps::get(<<"type">>, b, nil)
+        case <<"resource_link">>
+          link_text(b)            # @-mentions: surface the real path to the agent
+        case _
+          maps::get(<<"text">>, b, <<>>)
+      end
+    else
+      <<>>
+    end
+  end
+
+  # an @-mentioned file/dir arrives as a resource_link {name, uri}; hand the agent
+  # the real filesystem path so it doesn't have to guess (and hallucinate) one.
+  def self.link_text(b)
+    name = to_text(maps::get(<<"name">>, b, <<"file">>))
+    path = strip_file_uri(to_text(maps::get(<<"uri">>, b, <<>>)))
+    erlang::iolist_to_binary(["\n[attached: ", name, " -> ", path, "]\n"])
+  end
+
+  def self.strip_file_uri(uri)
+    binary::replace(uri, <<"file://">>, <<>>)
+  end
+
+  def self.to_text(v)
+    if erlang::is_binary(v)
+      v
+    elsif erlang::is_list(v)
+      erlang::iolist_to_binary(v)
+    elsif erlang::is_map(v)
+      jet_json_ffi::encode(v)
+    else
+      erlang::iolist_to_binary(io_lib::format("~p", [v]))
+    end
+  end
+
+  def self.new_sid()
+    erlang::integer_to_binary(erlang::unique_integer([:positive]))
+  end
+
+  # --- send helpers (router process only -> serialized stdout) ---
+
+  def self.send_result(id, result)
+    send_msg({jsonrpc: "2.0", id: id, result: result})
+  end
+
+  def self.send_error(id, code, message)
+    send_msg({jsonrpc: "2.0", id: id, error: {code: code, message: message}})
+  end
+
+  def self.send_msg(msg)
+    out = erlang::iolist_to_binary([jet_json_ffi::encode(msg), "\n"])
+    dbg("OUT ", out)
+    io::put_chars(out)
+  end
+
+  # optional wire log for debugging real ACP clients: set JET_ACP_LOG to a
+  # path and every line in/out is appended there. Off (and zero-cost) otherwise.
+  def self.dbg(tag, data)
+    match os::getenv("JET_ACP_LOG")
+      case false
+        :ok
+      case path
+        file::write_file(path, erlang::iolist_to_binary([tag, data]), [:append])
+    end
+  end
+end

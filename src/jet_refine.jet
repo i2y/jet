@@ -1,0 +1,138 @@
+module jet_refine
+  # Evaluator-Optimizer shape: a WORKER produces a draft, a CRITIC evaluates it;
+  # if not approved, the worker revises with the feedback. Loop until APPROVED or
+  # max_rounds. (Anthropic's evaluator-optimizer; great for "write -> review ->
+  # fix".) A loop, structurally unlike Fleet (parallel) or Pipeline (linear).
+  #   runner Refine(worker: {role:"..."}, critic: {role:"..."}, max_rounds: 3)
+  # worker/critic may each set model/drives; else the runner default.
+
+  def self.turn(config, method, args, schema)
+    jet_http_ffi::ensure_started()
+    opts = jet_backend::opts(config)
+    model = maps::get(:model, opts, nil)
+    drives = maps::get(:drives, opts, nil)
+    worker = maps::get(:worker, opts, maps::new())
+    critic = maps::get(:critic, opts, maps::new())
+    max = maps::get(:max_rounds, opts, 3)
+    cb = jet_backend::resolve(maps::get(:drives, critic, nil), maps::get(:model, critic, nil), drives, model)
+    task = jet_backend::to_bin(jet_acp::build_prompt(config, method, args))
+    # the worker may escalate (retry a rejected draft on a stronger model) or route (a cheap
+    # router picks one model for this task). Else: one worker, resolved only in :static so an
+    # escalate/route-only worker skips the no-backend path.
+    wdoers = match jet_backend::resolve_pool(worker)
+      case {:escalate, ds}
+        ds
+      case {:route, ds}
+        [jet_backend::route_pick(worker, ds, task)]
+      case :static
+        [{backend: jet_backend::resolve(maps::get(:drives, worker, nil), maps::get(:model, worker, nil), drives, model), label: nil}]
+    end
+    wrole = jet_backend::to_bin(maps::get(:role, worker, <<"You produce the requested output.">>))
+    crole = jet_backend::to_bin(maps::get(:role, critic, <<"You critique the draft.">>))
+    bk = bk_label(model, drives)
+    # the two role nodes -- each member's drafts/critiques nest UNDER its node (not as a flat list)
+    wnode = jet_acp::trace_node(erlang::iolist_to_binary(["👤 ", jet_backend::to_bin(maps::get(:name, worker, <<"Worker">>)), " · ", bk]), "ok")
+    cauto = maps::get(:auto, critic, false)
+    cbase = ["🔎 ", jet_backend::to_bin(maps::get(:name, critic, <<"Critic">>))]
+    clabel = if cauto
+      erlang::iolist_to_binary([cbase, " (auto) · ", bk])
+    else
+      erlang::iolist_to_binary([cbase, " · ", bk])
+    end
+    cnode = jet_acp::trace_node(clabel, "ok")
+    out = loop(wdoers, wrole, cb, crole, task, <<>>, max, 1, wnode, cnode)
+    jet_acp::emit_event({:text, out})
+    jet_backend::coerce(out, schema)
+  end
+
+  # a display label for the member's backend (its driver, else model)
+  def self.bk_label(model, drives)
+    if drives != nil
+      jet_backend::to_bin(drives)
+    elsif model != nil
+      jet_backend::to_bin(model)
+    else
+      <<"?">>
+    end
+  end
+
+  def self.loop(wdoers, wrole, cb, crole, task, feedback, max, round, wnode, cnode)
+    w = jet_backend::at(wdoers, round)
+    jet_acp::round_note(round, maps::get(:label, w, nil), erlang::length(wdoers))
+    d = draft_step(maps::get(:backend, w, nil), wrole, task, feedback, round, wnode)
+    if round >= max
+      d                                                  # out of rounds -> return the latest draft
+    else
+      crit = critic_step(cb, crole, task, d, round, cnode)
+      if approved?(crit)
+        d
+      else
+        loop(wdoers, wrole, cb, crole, task, crit, max, round + 1, wnode, cnode)   # revise with the feedback
+      end
+    end
+  end
+
+  # a draft nested UNDER the worker node; its span updates running -> ok in place
+  def self.draft_step(wb, wrole, task, feedback, round, wnode)
+    old = jet_acp::trace_set_parent(wnode)
+    id = erlang::iolist_to_binary([wnode, "-draft-", erlang::integer_to_binary(round)])   # unique per Refine run
+    lbl = erlang::iolist_to_binary(["✍️ draft ", erlang::integer_to_binary(round)])
+    jet_acp::emit_trace(id, lbl, "running")
+    out = generate(wb, wrole, task, feedback, round)
+    jet_acp::emit_trace(id, lbl, "ok")
+    jet_acp::trace_set_parent(old)
+    out
+  end
+
+  def self.critic_step(cb, crole, task, draft, round, cnode)
+    old = jet_acp::trace_set_parent(cnode)
+    id = erlang::iolist_to_binary([cnode, "-critic-", erlang::integer_to_binary(round)])   # unique per Refine run
+    lbl = erlang::iolist_to_binary(["🔎 review ", erlang::integer_to_binary(round)])
+    jet_acp::emit_trace(id, lbl, "running")
+    out = critique(cb, crole, task, draft, round)
+    jet_acp::emit_trace(id, lbl, "ok")
+    jet_acp::trace_set_parent(old)
+    out
+  end
+
+  # produce a draft (its tool_call COMPLETION is emitted by loop, which alone knows
+  # whether this draft is the final one -- final -> the message; rejected -> a tool_call).
+  def self.generate(wb, wrole, task, feedback, round)
+    input = if feedback == <<>>
+      task
+    else
+      erlang::iolist_to_binary([task, "\n\nYour previous attempt got this feedback -- revise to fully address it:\n", feedback])
+    end
+    jet_backend::run_silent(wb, wrole, input)
+  end
+
+  def self.critique(cb, crole, task, draft, round)
+    role = erlang::iolist_to_binary([crole,
+      " If the draft fully satisfies the task, reply with EXACTLY the word APPROVED and nothing else. Otherwise give specific, actionable feedback (no praise)."])
+    input = erlang::iolist_to_binary(["Task:\n", task, "\n\nDraft to evaluate:\n", draft])
+    jet_backend::run_silent(cb, role, input)
+  end
+
+  # APPROVED only if the critique *starts with* "approved" (so "not approved ..."
+  # is correctly treated as a rejection).
+  def self.approved?(crit)
+    t = erlang::iolist_to_binary(string::trim(string::lowercase(jet_backend::to_bin(crit))))
+    match binary::split(t, <<"approved">>)
+      case [<<>>, _rest]
+        true
+      case _
+        false
+    end
+  end
+
+  def self.emit(kind, title, round, status, output)
+    rid = erlang::iolist_to_binary([kind, "-", erlang::integer_to_binary(round)])
+    base = {id: rid, title: erlang::iolist_to_binary([title, " r", erlang::integer_to_binary(round)]),
+            kind: "think", status: status}
+    if output == nil
+      jet_acp::emit_event({:tool_call, base})
+    else
+      jet_acp::emit_event({:tool_call, maps::put(:output, output, base)})
+    end
+  end
+end

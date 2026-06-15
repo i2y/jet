@@ -1,0 +1,22 @@
+# Composition: an agent's `tool`s (other agents / functions) flow from
+# declaration -> runner -> TurnResult. A real runner resolves + invokes them
+# mid-turn (function-call / MCP loop); here the stub surfaces the wiring offline.
+#   ./jet -r agent_compose::run examples/agent_compose.jet
+module agent_compose
+  agent Summarizer
+    role "You summarize crisply."
+    ask summarize(text) -> {summary: String}
+  end
+
+  agent Orchestrator
+    role "You coordinate research."
+    tool Summarizer, web_search        # other agents / tools become its tools
+    task research(topic)
+  end
+
+  def self.run()
+    o = agent_compose::Orchestrator.spawn()
+    tr = o.research("BEAM schedulers").await()
+    io::format("task research => tool_calls=~p plan=~p~n", [tr.tool_calls(), tr.plan()])
+  end
+end

@@ -1,0 +1,60 @@
+module jet_mcp
+  # MCP *server*: exposes a Jet agent's `tool`s to an external agent (the Acp
+  # runner's coding agent connects here via session/new mcpServers, the mirror
+  # of jet_acp which is the ACP *client*). Speaks MCP JSON-RPC.
+  #
+  # `handle/2` maps one request to {:reply, response} | :noreply, reusing the
+  # tool descriptors + helpers from jet_llm. The stdio transport (serve loop),
+  # the `./jet mcp` CLI entry, and the ACP `mcpServers` wiring are the
+  # integration layer (follow-up; needs a live agent to exercise).
+
+  def self.handle(msg, tools)
+    id = maps::get(<<"id">>, msg, nil)
+    match maps::get(<<"method">>, msg, nil)
+      case <<"initialize">>
+        reply(id, {protocolVersion: "2024-11-05",
+                   capabilities: {tools: {}},
+                   serverInfo: {name: "jet", version: "0.1.0"}})
+      case <<"tools/list">>
+        reply(id, {tools: tool_defs(tools)})
+      case <<"tools/call">>
+        call(id, maps::get(<<"params">>, msg, maps::new()), tools)
+      case <<"notifications/initialized">>
+        :noreply
+      case _
+        err(id, -32601, "method not found")
+    end
+  end
+
+  def self.tool_defs(tools)
+    lists::map({|t| tool_def(t)}, tools)
+  end
+
+  def self.tool_def(t)
+    name = erlang::atom_to_binary(maps::get(:name, t), :utf8)
+    {name: name,
+     description: jet_llm::desc_of(t),
+     inputSchema: jet_llm::to_json_schema(maps::get(:params, t, maps::new()))}
+  end
+
+  def self.call(id, params, tools)
+    name = maps::get(<<"name">>, params, <<>>)
+    args = maps::get(<<"arguments">>, params, maps::new())
+    match jet_llm::find_tool(name, tools)
+      case {:ok, t}
+        out = erlang::apply(maps::get(:impl, t),
+                            jet_llm::arg_values(jet_llm::param_names_of(t), args))
+        reply(id, {content: [{type: "text", text: jet_llm::to_content(out)}]})
+      case :error
+        err(id, -32602, "unknown tool")
+    end
+  end
+
+  def self.reply(id, result)
+    {:reply, {jsonrpc: "2.0", id: id, result: result}}
+  end
+
+  def self.err(id, code, message)
+    {:reply, {jsonrpc: "2.0", id: id, error: {code: code, message: message}}}
+  end
+end

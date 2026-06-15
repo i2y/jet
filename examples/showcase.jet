@@ -163,6 +163,7 @@ module showcase
 
     def work()
       @count = @count + 1
+      @count
     end
   end
 

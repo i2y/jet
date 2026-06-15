@@ -1,0 +1,24 @@
+# Smoke test: a Jet agent that DRIVES Claude Code over ACP (Jet = ACP client).
+#   ./jet -r cc_test::run examples/cc_test.jet
+module cc_test
+  agent Coder
+    drives "claude-code-acp"
+    workspace "/tmp"                 # neutral cwd -> no project CLAUDE.md/skills confusing it
+    role "Be concise. Answer in one short sentence. Do not edit files."
+    task ask(question)
+  end
+
+  def self.run()
+    c = cc_test::Coder.spawn()
+    io::format("driving claude-code-acp...~n", [])
+    tr = c.ask("What is 2 + 2? Reply with just the number.").await()
+    r = match tr
+      case {:ok, x}
+        x
+      case x
+        x
+    end
+    io::format("=== Claude Code answered ===~n~ts~n", [r.text()])
+    jet_port_ffi::cleanup_all()      # kill the adapter before the escript halts (no leak)
+  end
+end

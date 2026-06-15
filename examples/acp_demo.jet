@@ -1,0 +1,10 @@
+# A Jet agent exposed over ACP -- nothing but the agent itself. Serve it by name
+# (no serve boilerplate in the file):
+#   jet acp-serve acp_demo::Sage::reply examples/acp_demo.jet
+module acp_demo
+  agent Sage
+    model "ollama:qwen3.6:35b-a3b"
+    role "You are a helpful assistant. Be concise."
+    ask reply(message)                 # no schema -> free-text answer
+  end
+end

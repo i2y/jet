@@ -669,6 +669,7 @@ fn keyword_or_name(name: String) -> Token {
     "expose" -> token.Expose
     "peers" -> token.Peers
     "actor" -> token.Actor
+    "agent" -> token.Agent
     "nil" -> token.Nil
     "true" -> token.True
     "false" -> token.False

@@ -18,6 +18,7 @@ pub fn run(args: List(String)) -> Nil {
     Compile(file_path) -> compile_file(file_path)
     CompileAndRun(file_path, module_func) ->
       compile_and_run(file_path, module_func)
+    AcpServe(file_path, spec) -> compile_and_serve(file_path, spec)
     Build(dir, output_dir) -> build_directory(dir, output_dir)
     Escript(app_module, dir, output) -> build_escript(app_module, dir, output)
     Release(app_module, dir, output) -> build_release(app_module, dir, output)
@@ -32,6 +33,7 @@ pub fn run(args: List(String)) -> Nil {
 type Command {
   Compile(path: String)
   CompileAndRun(path: String, module_func: String)
+  AcpServe(path: String, spec: String)
   Build(dir: String, output_dir: Option(String))
   Escript(app_module: String, dir: String, output: Option(String))
   Release(app_module: String, dir: String, output: Option(String))
@@ -42,6 +44,7 @@ type Command {
 fn parse_cli_args(args: List(String)) -> Command {
   case args {
     ["-r", module_func, file_path] -> CompileAndRun(file_path, module_func)
+    ["acp-serve", spec, file_path] -> AcpServe(file_path, spec)
     ["--help"] -> Help
     ["-h"] -> Help
     // build command
@@ -106,6 +109,47 @@ fn compile_and_run(file_path: String, module_func: String) -> Nil {
             }
             _ -> {
               io.println("Error: expected Module::func format")
+              halt(1)
+            }
+          }
+        }
+        Error(reason) -> {
+          io.println("Error writing .beam file: " <> reason)
+          halt(1)
+        }
+      }
+    }
+    Error(e) -> {
+      io.println(error.format(e))
+      halt(1)
+    }
+  }
+}
+
+// --- ACP serve command ---
+
+// Compile an agent file, then serve its agent over ACP (stdio JSON-RPC) by name.
+// `jet acp-serve mod::Agent::method file.jet` — no serve boilerplate in the file.
+fn compile_and_serve(file_path: String, spec: String) -> Nil {
+  case do_compile(file_path) {
+    Ok(#(module_name, binary)) -> {
+      let beam_path = compute_beam_path(file_path, module_name)
+      case write_beam(beam_path, binary) {
+        Ok(_) -> {
+          let beam_dir = case string.split(beam_path, "/") {
+            [_single] -> "."
+            parts -> {
+              let dir_parts = list.take(parts, list.length(parts) - 1)
+              string.join(dir_parts, "/")
+            }
+          }
+          add_code_path(beam_dir)
+          // Parse Module::Agent::method
+          case string.split(spec, "::") {
+            [mod_name, agent_name, method_name] ->
+              call_acp_serve(mod_name, agent_name, method_name)
+            _ -> {
+              io.println("Error: expected Module::Agent::method format")
               halt(1)
             }
           }
@@ -237,7 +281,7 @@ fn build_escript(
 
 fn collect_beam_dirs(user_dir: String, stdlib_dir: String) -> List(String) {
   let base = [user_dir, stdlib_dir]
-  // Add subdirectories of stdlib (jet_orchestra, symphony, etc.)
+  // Add subdirectories of stdlib (for any namespaced stdlib packages)
   case simplifile.read_directory(stdlib_dir) {
     Ok(entries) -> {
       let subdirs =
@@ -337,6 +381,7 @@ fn print_usage() -> Nil {
   io.println("Commands:")
   io.println("  <file.jet>                    Compile a single .jet file")
   io.println("  -r Module::func <file.jet>    Compile and run a module function")
+  io.println("  acp-serve M::Agent::method <f> Serve a Jet agent over ACP (stdio)")
   io.println("  build [dir]                   Compile all .jet files in directory")
   io.println("  escript <Module> [dir]         Build an escript executable")
   io.println("  release <Module> [dir]         Generate an OTP release")
@@ -358,6 +403,9 @@ fn write_beam(path: String, binary: BitArray) -> Result(Nil, String)
 
 @external(erlang, "jet_cli_ffi", "call_module_func")
 fn call_module_func(module: String, func: String) -> Nil
+
+@external(erlang, "jet_cli_ffi", "call_acp_serve")
+fn call_acp_serve(module: String, agent: String, method: String) -> Nil
 
 @external(erlang, "jet_cli_ffi", "add_code_path")
 fn add_code_path(dir: String) -> Nil

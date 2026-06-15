@@ -1,0 +1,17 @@
+# Native MCP CLIENT: a `model "ollama:..."` agent CONSUMES tools from an external MCP
+# server declared with `mcp "<command>"`. The in-process Llm tool loop discovers the
+# server's tools (tools/list) and calls them (tools/call) just like local `tool` impls.
+#   ./jet -r agent_mcp_demo::run examples/agent_mcp_demo.jet   (needs ollama + node/npx)
+module agent_mcp_demo
+  agent Echoer
+    model "ollama:qwen3.6:35b-a3b"
+    mcp "npx -y @modelcontextprotocol/server-everything"
+    role "You echo text. Call the `echo` tool with the user's text, then report EXACTLY what it returned as `reply`. Do not invent text."
+    ask say(text) -> {reply: String}
+  end
+
+  def self.run()
+    e = agent_mcp_demo::Echoer.spawn()
+    io::format("say => ~p~n", [e.say("Echo this exactly: BANANA-42").await()])
+  end
+end

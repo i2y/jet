@@ -1,0 +1,114 @@
+module jet_auto
+  # A META-orchestrator (LLM-driven, not RL-trained): a runner
+  # that picks the SHAPE at runtime. Instead of hardcoding one topology, you list
+  # candidate shapes with a `when:`, and a router chooses which fits the task, then
+  # runs it. This is the "which topology" decision made dynamically -- the direction
+  # MetaGen/Maestro push with learning; here a cheap LLM router does the selecting.
+  #   runner Auto(shapes: [
+  #     {name: :Debate,   when: "a contested yes/no proposition", agents:[...], rounds:2, judge:{...}},
+  #     {name: :Fleet,    when: "multi-perspective analysis of one topic", members:[...], reduce:"..."},
+  #     {name: :Pipeline, when: "a multi-step transform", stages:[...]}])
+
+  def self.turn(config, method, args, schema)
+    jet_http_ffi::ensure_started()
+    opts = jet_backend::opts(config)
+    model = maps::get(:model, opts, nil)
+    shapes = maps::get(:shapes, opts, [])
+    topic = jet_backend::to_bin(jet_acp::build_prompt(config, method, args))
+    chosen = pick(router_backend(opts), topic, shapes)
+    if chosen == nil
+      jet_acp::emit_event({:text, <<"(Auto: no shapes configured)">>})
+      jet_backend::coerce(<<"(no shapes configured)">>, schema)
+    else
+      jet_acp::emit_event({:thought, erlang::iolist_to_binary(["Routing to the ",
+        erlang::atom_to_binary(maps::get(:name, chosen, :Fleet), :utf8), " shape for this task."])})
+      run_chosen(inherit(chosen, opts), config, method, args, schema)
+    end
+  end
+
+  # the chosen shape inherits the Auto-level model/drives unless it overrides them,
+  # so `Auto(drives:"claude-code-acp", ...)` makes every chosen shape run on that agent.
+  def self.inherit(chosen, opts)
+    c1 = if maps::is_key(:model, chosen)
+      chosen
+    else
+      maps::put(:model, maps::get(:model, opts, nil), chosen)
+    end
+    if maps::is_key(:drives, c1) or maps::get(:drives, opts, nil) == nil
+      c1
+    else
+      maps::put(:drives, maps::get(:drives, opts), c1)
+    end
+  end
+
+  # the router backend: the high-leverage choice (a wrong shape wastes the whole
+  # downstream run), so it defaults to the SMART backend -- `drives` (the configured ACP agent)
+  # if set, else `model`. Override explicitly with `router:` ("ollama:x" or a command).
+  def self.router_backend(opts)
+    router = maps::get(:router, opts, nil)
+    if router == nil
+      jet_backend::resolve_lead(maps::get(:model, opts, nil), maps::get(:drives, opts, nil), nil)
+    elsif jet_llm::ollama?(router)
+      {:ollama, jet_llm::ollama_model(router)}
+    else
+      {:acp, jet_backend::to_bin(router)}
+    end
+  end
+
+  # the router: pick the shape whose `when:` best fits the task. Defaults to the
+  # first shape if unsure (so it always runs something sensible).
+  def self.pick(router_b, topic, shapes)
+    if shapes == []
+      nil
+    else
+      menu = erlang::iolist_to_binary(lists::map({|s| menu_line(s)}, shapes))
+      role = "Choose the single best approach for the user's task from the menu. Reply with EXACTLY the chosen approach's name (one word), nothing else."
+      resp = jet_backend::run_silent(router_b, role,
+                              erlang::iolist_to_binary(["Task:\n", topic, "\n\nApproaches:\n", menu, "\n\nName:"]))
+      match_shape(resp, shapes)
+    end
+  end
+
+  def self.menu_line(s)
+    ["- ", erlang::atom_to_binary(maps::get(:name, s, :Fleet), :utf8), ": ",
+     jet_backend::to_bin(maps::get(:when, s, <<"general">>)), "\n"]
+  end
+
+  def self.match_shape(resp, shapes)
+    lc = erlang::iolist_to_binary(string::lowercase(jet_backend::to_bin(resp)))
+    match lists::filter({|s| names_in?(lc, maps::get(:name, s, :x))}, shapes)
+      case [s, *_]
+        s
+      case _
+        erlang::hd(shapes)
+    end
+  end
+
+  def self.names_in?(lc, name)
+    match binary::split(lc, erlang::iolist_to_binary(string::lowercase(erlang::atom_to_binary(name, :utf8))))
+      case [_only]
+        false
+      case _
+        true
+    end
+  end
+
+  # run the chosen shape: wrap its spec as the runner opts and dispatch to its
+  # runner module. (The spec IS the opts -- name + members/stages/agents/...)
+  def self.run_chosen(chosen, config, method, args, schema)
+    name = maps::get(:name, chosen, :Fleet)
+    sub = maps::put(:runner, {name: name, opts: chosen}, config)
+    match name
+      case :Fleet
+        jet_fleet::turn(sub, method, args, schema)
+      case :Pipeline
+        jet_pipeline::turn(sub, method, args, schema)
+      case :Refine
+        jet_refine::turn(sub, method, args, schema)
+      case :Debate
+        jet_debate::turn(sub, method, args, schema)
+      case _
+        jet_fleet::turn(sub, method, args, schema)
+    end
+  end
+end

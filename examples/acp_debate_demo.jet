@@ -1,0 +1,15 @@
+# Debate (mesh). Two agents argue over 2 rounds, each
+# seeing the debate so far; a judge concludes. Unlike Fleet/Pipeline/Refine, this
+# is a multi-round cross-examination.
+#   jet acp-serve acp_debate_demo::Forum::debate examples/acp_debate_demo.jet
+module acp_debate_demo
+  agent Forum
+    runner Debate(model: "ollama:qwen3.6:35b-a3b",
+                  rounds: 2,
+                  agents: [
+                    {name: "Pro", role: "You argue IN FAVOR of the proposition. Be concrete."},
+                    {name: "Con", role: "You argue AGAINST the proposition. Be concrete."}],
+                  judge: {role: "You are the moderator. Weigh both sides and give a balanced verdict in 2-3 sentences."})
+    ask debate(proposition)
+  end
+end

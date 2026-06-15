@@ -1,4 +1,4 @@
-# LlmProviderの本番実装 — Claude APIを使用
+# Production implementation of LlmProvider — uses the Claude API
 module ClaudeLlmProvider
   def self.chat(system_prompt, user_message)
     api_key = os::getenv("ANTHROPIC_API_KEY")

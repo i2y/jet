@@ -1,0 +1,16 @@
+# Coding with Fleet, the hard half: parallel CODE GENERATION (MoA for
+# code). Two Claude Code members implement the SAME task, each in its OWN git
+# worktree (workspace: :worktree) so their edits never clobber each other; the
+# lead compares the diffs and picks the best. Worktrees are auto-removed after.
+#   jet acp-serve acp_codegen_demo::Build::build examples/acp_codegen_demo.jet
+# then prompt e.g.  "Create src/demo_square.jet with a function square(n)=n*n"
+module acp_codegen_demo
+  agent Build
+    runner Fleet(drives: "claude-code-acp",
+                 workspace: :worktree,
+                 members: [
+      {name: "Minimal", role: "Implement the requested change with the smallest, cleanest diff. Make the edit with your tools, then reply with a one-line summary."},
+      {name: "Robust",  role: "Implement the requested change favoring clear naming and an edge-case check. Make the edit with your tools, then reply with a one-line summary."}])
+    ask build(task)
+  end
+end

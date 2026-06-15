@@ -1,0 +1,555 @@
+module jet_flow
+  # Flow: a step beyond Architect. Architect SELECTS a shape from a fixed
+  # menu; Flow GENERATES the topology itself -- a designer writes a dataflow GRAPH
+  # (DAG) of agent nodes for THIS task. Each node is one agent with a role; it runs
+  # once its `deps` are done and receives their outputs. Independent nodes run in
+  # PARALLEL as monitored BEAM processes (crash-isolated); the single terminal node's
+  # output is the answer. This GENERALIZES Fleet (fan-out + sink), Pipeline (a chain),
+  # and everything between (diamonds, multi-branch joins) -- composed at runtime, not
+  # picked from a list.
+  #   runner Flow(drives: "claude-code-acp")    # designer = the smart backend
+  # A node may carry "tier":"fast"|"smart" -> heterogeneous, cost-aware execution.
+  # "fast" drops to the cheap local model ONLY when an explicit `model:` is set; with
+  # `drives:` alone every node stays on the coding agent (no silent downgrade to a weak model).
+
+  def self.turn(config, method, args, schema)
+    jet_http_ffi::ensure_started()
+    opts = jet_backend::opts(config)
+    model = maps::get(:model, opts, nil)   # nil = no explicit model; do NOT silently route "fast" nodes to an assumed weak model
+    drives = maps::get(:drives, opts, nil)
+    skills_dir = maps::get(:skills, config, nil)
+    cat = jet_skills::catalog(skills_dir)
+    tools = lists::append(node_tools(config), jet_llm::skill_tools(cat, skills_dir))   # local + MCP + the `skill` tool
+    skills_block = erlang::iolist_to_binary(jet_skills::catalog_block(cat))             # skills catalog for the terminal node's prompt
+    erlang::put(:__approve_agent__, maps::get(:__agent__, config, nil))                 # gate node tool calls via the agent's `approve`
+    designer = jet_backend::resolve_lead(model, drives, maps::get(:designer, opts, nil))
+    router = jet_backend::resolve(nil, model, drives, nil)   # cheap local model if set, else the agent
+    topic = jet_backend::to_bin(jet_acp::build_prompt(config, method, args))
+    if jet_backend::is_substantive_request?(router, topic)
+      # a new substantive task -> design a fresh dataflow graph for it.
+      jet_acp::emit_event({:thought, <<"Designing a dataflow graph for this task...">>})
+      design = generate_graph(designer, topic)
+      reason = jet_backend::to_bin(maps::get(<<"reason">>, design, <<>>))
+      {nodes, sink} = ensure_sink(norm_nodes(maps::get(<<"nodes">>, design, [])))
+      announce(nodes, sink, reason)                       # show the generated topology
+      jet_backend::coerce(execute(nodes, sink, topic, model, drives, tools, skills_block), schema)
+    else
+      # chitchat / a refinement of the prior answer -> continue directly, no new graph.
+      jet_acp::emit_event({:thought, <<"Continuing the conversation (no new graph needed)...">>})
+      answer_followup(designer, topic, schema)
+    end
+  end
+
+  # --- the designer generates a graph (internal: don't stream the JSON) ---
+
+  def self.generate_graph(backend, topic)
+    role = erlang::iolist_to_binary([
+      "Design a DATAFLOW GRAPH of agents to solve the user's task. Each node is one agent with a `role`; it runs AFTER its `deps` and receives their outputs. Put independent work in SEPARATE nodes with no deps between them (they run in parallel); chain a node after another only when it needs that output. Exactly ONE final node should depend on the others and produce the user's answer. Keep it small (2-5 nodes). Optionally tag a node \"tier\":\"fast\" (simple) or \"smart\" (hard). Reply with ONLY JSON -- no prose, no code fences:\n",
+      "{\"reason\":\"<one sentence>\",\"nodes\":[{\"id\":\"research\",\"role\":\"...\",\"deps\":[]},{\"id\":\"final\",\"role\":\"...\",\"deps\":[\"research\"]}]}"])
+    parse_json(jet_backend::run_silent(backend, role, topic))
+  end
+
+  def self.parse_json(raw)
+    match jet_json_ffi::decode(extract_json(raw))
+      case {:ok, m}
+        if erlang::is_map(m)
+          m
+        else
+          maps::new()
+        end
+      case _
+        maps::new()
+    end
+  end
+
+  def self.extract_json(raw)
+    b = jet_backend::to_bin(raw)
+    match re::run(b, "\\{[\\s\\S]*\\}", [{:capture, :first, :binary}])
+      case {:match, [json]}
+        json
+      case _
+        b
+    end
+  end
+
+  # --- normalize + make the graph safe to execute ---
+
+  def self.norm_nodes(list)
+    if erlang::is_list(list) and list != []
+      valid = lists::filter({|n| n != nil}, lists::map({|n| norm_node(n)}, list))
+      if valid == []
+        [default_node()]
+      else
+        valid
+      end
+    else
+      [default_node()]
+    end
+  end
+
+  def self.norm_node(n)
+    if erlang::is_map(n)
+      id = jet_backend::to_bin(maps::get(<<"id">>, n, <<>>))
+      role = jet_backend::to_bin(maps::get(<<"role">>, n, <<>>))
+      if id == <<>> or role == <<>>
+        nil
+      else
+        {id: id, role: role, deps: norm_deps(maps::get(<<"deps">>, n, [])),
+         tier: jet_backend::to_bin(maps::get(<<"tier">>, n, <<>>))}
+      end
+    else
+      nil
+    end
+  end
+
+  def self.norm_deps(d)
+    if erlang::is_list(d)
+      lists::map({|x| jet_backend::to_bin(x)}, d)
+    else
+      []
+    end
+  end
+
+  def self.default_node()
+    {id: <<"answer">>, role: <<"Answer the user's task directly and completely, in their language.">>, deps: [], tier: <<>>}
+  end
+
+  # drop deps that point at a missing id or at the node itself (so a hallucinated
+  # edge can't deadlock the executor), then pick the single sink (the answer node).
+  def self.ensure_sink(nodes0)
+    nodes = clean_deps(nodes0)
+    match terminals(nodes)
+      case [only]
+        {nodes, only}
+      case terms
+        ids = node_ids(nodes)
+        deps = if terms == []
+          ids                                            # a cycle -> the synth waits on all
+        else
+          terms
+        end
+        synth = {id: <<"__final__">>, deps: deps, tier: <<>>,
+                 role: <<"Combine the upstream results into one clear, complete answer for the user, in their language.">>}
+        {lists::append(nodes, [synth]), <<"__final__">>}
+    end
+  end
+
+  def self.clean_deps(nodes)
+    ids = node_ids(nodes)
+    lists::map({|n| maps::put(:deps, valid_deps(n, ids), n)}, nodes)
+  end
+
+  def self.valid_deps(n, ids)
+    self_id = maps::get(:id, n)
+    lists::filter({|d| (d != self_id) and lists::member(d, ids)}, maps::get(:deps, n, []))
+  end
+
+  # terminals = ids that nothing else depends on (graph outputs).
+  def self.terminals(nodes)
+    alldeps = lists::flatten(lists::map({|n| maps::get(:deps, n, [])}, nodes))
+    lists::filter({|id| not lists::member(id, alldeps)}, node_ids(nodes))
+  end
+
+  def self.node_ids(nodes)
+    lists::map({|n| maps::get(:id, n)}, nodes)
+  end
+
+  # --- announce the generated topology (so the user SEES what was composed) ---
+
+  def self.announce(nodes, sink, reason)
+    status = lists::foldl({|n, acc| maps::put(maps::get(:id, n), <<"pending">>, acc)}, maps::new(), nodes)
+    erlang::put(:__flow_plan__, {nodes, sink, status})
+    emit_plan()
+    if reason != <<>>
+      jet_acp::emit_event({:thought, erlang::iolist_to_binary(["Why this graph: ", reason])})
+    end
+  end
+
+  # re-emit the WHOLE plan with each node's current status (an ACP plan update replaces
+  # the plan), so its entries tick pending -> in_progress -> completed as the graph runs.
+  def self.plan_mark(id, status)
+    match erlang::get(:__flow_plan__)
+      case {nodes, sink, statuses}
+        erlang::put(:__flow_plan__, {nodes, sink, maps::put(id, status, statuses)})
+        emit_plan()
+      case _
+        :ok
+    end
+  end
+
+  def self.emit_plan()
+    match erlang::get(:__flow_plan__)
+      case {nodes, sink, statuses}
+        jet_acp::emit_event({:plan, lists::map({|n| plan_entry_of(n, sink, statuses)}, nodes)})
+      case _
+        :ok
+    end
+  end
+
+  def self.plan_entry_of(n, sink, statuses)
+    {content: plan_line(n, sink), status: maps::get(maps::get(:id, n), statuses, <<"pending">>)}
+  end
+
+  def self.plan_line(n, sink)
+    id = maps::get(:id, n)
+    deps = maps::get(:deps, n, [])
+    src = if deps == []
+      <<"start">>
+    else
+      join_bins(deps, <<"+">>)
+    end
+    tail = if id == sink
+      <<" -> ANSWER">>
+    else
+      <<>>
+    end
+    erlang::iolist_to_binary([id, " (<- ", src, ")", tail])
+  end
+
+  def self.join_bins(list, sep)
+    match list
+      case []
+        <<>>
+      case [h, *t]
+        lists::foldl({|x, acc| erlang::iolist_to_binary([acc, sep, x])}, jet_backend::to_bin(h), t)
+    end
+  end
+
+  # --- execute the DAG in waves: every node whose deps are done runs NOW, in
+  # parallel; repeat until only the sink is left, then stream the sink's answer. ---
+
+  # tools = the agent's local + MCP tool descriptors; threaded to the TERMINAL node only
+  # (intermediate nodes stay TEXT-only by design -- step_role -- to avoid parallel clobbering).
+  def self.node_tools(config)
+    lists::append(jet_llm::exec_tools(maps::get(:tools, config, [])),
+                  jet_llm::mcp_conn_tools(maps::get(:__mcp_conns__, config, [])))
+  end
+
+  def self.execute(nodes, sink, task, model, drives, tools, skills_block)
+    run_waves(nodes, sink, task, model, drives, maps::new(), tools, skills_block)
+  end
+
+  def self.run_waves(nodes, sink, task, model, drives, done, tools, skills_block)
+    others = lists::filter({|n| (maps::get(:id, n) != sink) and (not maps::is_key(maps::get(:id, n), done))}, nodes)
+    if others == []
+      run_final(find_node(nodes, sink), task, model, drives, done, tools, skills_block)   # the answer, streamed once
+    else
+      ready = lists::filter({|n| deps_done?(n, done)}, others)
+      wave = if ready == []
+        [erlang::hd(others)]                            # no progress (dangling/cycle) -> force one
+      else
+        ready
+      end
+      run_waves(nodes, sink, task, model, drives, maps::merge(done, run_wave(wave, task, model, drives, done)), tools, skills_block)
+    end
+  end
+
+  def self.deps_done?(n, done)
+    lists::all({|d| maps::is_key(d, done)}, maps::get(:deps, n, []))
+  end
+
+  def self.find_node(nodes, id)
+    match lists::filter({|n| maps::get(:id, n) == id}, nodes)
+      case [n, *_]
+        n
+      case _
+        default_node()
+    end
+  end
+
+  # one wave: spawn a monitored BEAM process per ready node, gather (crash-isolated).
+  def self.run_wave(wave, task, model, drives, done)
+    parent = erlang::self()
+    mons = lists::foldl({|n, acc| spawn_node(n, task, model, drives, done, parent, acc)}, maps::new(), wave)
+    collect(maps::size(mons), mons, maps::new())
+  end
+
+  def self.spawn_node(n, task, model, drives, done, parent, mons)
+    id = maps::get(:id, n)
+    backend = node_backend(n, model, drives)
+    input = node_input(n, task, done)
+    role = step_role(maps::get(:role, n))       # intermediate: TEXT only, no files (avoids parallel clobbering)
+    {pid, mref} = erlang::spawn_monitor({|| jet_flow::node_proc(parent, id, backend, role, input)})
+    label = erlang::iolist_to_binary(["🔹 ", id, " · ", jet_backend::bk_label(model, drives)])
+    flow_node_put(id, jet_acp::trace_node(label, "running"), label)   # a struct node; its tools nest under it
+    plan_mark(id, <<"in_progress">>)
+    maps::put(pid, {id, mref}, mons)
+  end
+
+  # node_id -> {trace_id, label}, so collect/forward_progress (all in the PARENT process) can
+  # update a node's span and parent its relayed tool_calls to it.
+  def self.flow_nodes()
+    match erlang::get(:__flow_nodes__)
+      case :undefined
+        maps::new()
+      case x
+        x
+    end
+  end
+
+  def self.flow_node_put(id, tid, label)
+    erlang::put(:__flow_nodes__, maps::put(id, {tid, label}, flow_nodes()))
+  end
+
+  def self.flow_tid(id)
+    match maps::get(id, flow_nodes(), nil)
+      case nil
+        nil
+      case pair
+        {tid, _label} = pair
+        tid
+    end
+  end
+
+  def self.flow_done(id, status)
+    match maps::get(id, flow_nodes(), nil)
+      case nil
+        :ok
+      case pair
+        {tid, label} = pair
+        jet_acp::emit_trace(tid, label, status)
+    end
+  end
+
+  # an intermediate node's output is consumed as TEXT by downstream nodes; any external
+  # change it makes (files, commands) is never passed on, and parallel nodes share one
+  # workspace, so doing the real work in an intermediate node just makes them collide.
+  # So intermediate nodes produce text; ONLY the final node makes the real deliverable.
+  # (Domain-neutral: "deliverable" is code+files, a document, a decision -- per the task.)
+  def self.step_role(role)
+    erlang::iolist_to_binary([
+      "You are an intermediate node in a dataflow graph. Produce your result as TEXT (your analysis, plan, design, or draft) -- the next node receives only your text. Do NOT produce the final deliverable or change anything outside this reply yet (don't write shared files, run commands, or otherwise act on the world) -- a LATER node does that. Work autonomously: do not ask questions; state any assumptions in one line. Your role: ",
+      jet_backend::to_bin(role)])
+  end
+
+  def self.final_role(role, skills_block)
+    erlang::iolist_to_binary([
+      "You are the FINAL node of a dataflow graph. Using the upstream outputs above, produce the actual deliverable the task calls for -- working code and files, a written document, a decision, whatever it asks -- complete and correct. Work autonomously: do not ask questions; state any assumptions in one line. Your role: ",
+      jet_backend::to_bin(role), skills_block])
+  end
+
+  def self.node_proc(parent, id, backend, role, input)
+    # a node runs in its OWN process, so its live tool activity would be invisible.
+    # Point its event stream at the parent (tagged with this node's id) so collect can
+    # surface the node's tool_calls (namespaced) while it works -- visibility for long
+    # nodes. Its TEXT chunks are dropped there (they're the node's result, delivered
+    # below as {:flow_done}, not part of the user's answer).
+    erlang::put(:__acp_stream__, {parent, {:flow_progress, id}})
+    parent ! {:flow_done, erlang::self(), id, node_attempt(backend, role, input)}
+  end
+
+  # a node now RETRIES (up to 3) on a transient crash/empty result instead of failing the
+  # wave, and each retry REPLANS -- the role is reframed to "take a different approach".
+  # Only after every attempt fails does it return a marked failure (graceful degradation,
+  # a last resort) -- Phase 4: a failing node triggers retry/replan, not record-and-skip.
+  def self.node_attempt(backend, role, input)
+    match jet_plan::attempt(
+            {|n| jet_backend::run(backend, attempt_role(role, n), input)},
+            {|out| out != <<>>},
+            3)
+      case {:ok, out, _n}
+        out
+      case {:failed, _last, n}
+        erlang::iolist_to_binary(["(node produced no result after ", erlang::integer_to_binary(n), " attempts)"])
+    end
+  end
+
+  def self.attempt_role(role, n)
+    if n == 1
+      role
+    else
+      erlang::iolist_to_binary([jet_backend::to_bin(role),
+        "\n\n(A previous attempt failed or returned nothing. Take a DIFFERENT approach this time and produce a concrete result.)"])
+    end
+  end
+
+  def self.collect(remaining, mons, results)
+    if remaining <= 0
+      results
+    else
+      receive
+        case {:flow_done, pid, id, out}
+          erlang::demonitor(node_mref(pid, mons), [:flush])
+          flow_done(id, "ok")
+          plan_mark(id, <<"completed">>)
+          collect(remaining - 1, maps::remove(pid, mons), maps::put(id, out, results))
+        case {:DOWN, _mref, :process, pid, reason}
+          id = node_name(pid, mons)
+          flow_done(id, "error")
+          plan_mark(id, <<"completed">>)
+          collect(remaining - 1, maps::remove(pid, mons), maps::put(id, fail_text(id), results))
+        case {{:flow_progress, nid}, {:item, ev}}
+          forward_progress(nid, ev)                # surface a running node's tool_calls, namespaced
+          collect(remaining, mons, results)
+      after 45000
+        # nodes run in their OWN processes, so a long node (e.g. a whole build) emits
+        # nothing on the main stream -- which would idle-time-out the turn and kill it
+        # with no output. Heartbeat keeps the turn alive AND shows it's still working.
+        jet_acp::emit_event({:thought, erlang::iolist_to_binary(["Still working: ", running_ids(mons), "..."])})
+        collect(remaining, mons, results)
+      end
+    end
+  end
+
+  # re-emit a running node's tool_call on the main stream, namespaced by node id (so
+  # parallel nodes don't collide and you can tell whose action it is). Everything else
+  # (the node's text/thoughts) is dropped -- the text is the node's RESULT, not the answer.
+  def self.forward_progress(nid, ev)
+    match ev
+      case {:tool_call, info}
+        jet_acp::emit_event({:tool_call, relabel(nid, info)})
+      case _
+        :ok
+    end
+  end
+
+  # parent the running node's relayed tool_call to that node's trace span, so it nests under the
+  # node (instead of namespacing the label -- the tree placement now does the attribution).
+  def self.relabel(nid, info)
+    match flow_tid(nid)
+      case nil
+        info
+      case tid
+        maps::put(:parent, tid, info)
+    end
+  end
+
+  def self.running_ids(mons)
+    join_bins(lists::map({|kv| pair_id(kv)}, maps::to_list(mons)), <<", ">>)
+  end
+
+  def self.pair_id(kv)
+    {_pid, {id, _mref}} = kv
+    id
+  end
+
+  def self.node_mref(pid, mons)
+    {_id, mref} = maps::get(pid, mons, {nil, nil})
+    mref
+  end
+
+  def self.node_name(pid, mons)
+    {id, _mref} = maps::get(pid, mons, {<<"?">>, nil})
+    id
+  end
+
+  # --- a node's input is the task plus its dependencies' outputs (labeled) ---
+
+  def self.node_input(n, task, done)
+    deps = maps::get(:deps, n, [])
+    if deps == []
+      task
+    else
+      erlang::iolist_to_binary(["Task:\n", task, "\n\nResults from upstream steps:\n",
+                                lists::map({|d| dep_block(d, done)}, deps)])
+    end
+  end
+
+  def self.dep_block(d, done)
+    ["\n## ", d, "\n", maps::get(d, done, <<>>), "\n"]
+  end
+
+  # the terminal node streams its output as the answer ONCE (tool_call carries no
+  # output, so it isn't printed twice -- same rule as Pipeline/Refine).
+  def self.run_final(n, task, model, drives, done, tools, skills_block)
+    id = maps::get(:id, n)
+    backend = node_backend(n, model, drives)
+    input = node_input(n, task, done)
+    frole = final_role(maps::get(:role, n), skills_block)   # final role + the skills catalog (so the node can call `skill`)
+    flabel = erlang::iolist_to_binary(["🟢 ", id, " · ", jet_backend::bk_label(model, drives)])
+    flow_node_put(id, jet_acp::trace_node(flabel, "running"), flabel)   # terminal node: its tools nest under it
+    plan_mark(id, <<"in_progress">>)
+    final = if tools == []
+      out = jet_backend::run_streaming(backend, frole, input)   # final: writes the real files
+      if out == <<>>
+        recovered = final_retry(backend, frole, input)   # streamed nothing -> retry/replan
+        if recovered != <<>>
+          jet_acp::emit_event({:text, recovered})        # the retry wasn't token-streamed -> emit once
+        end
+        recovered
+      else
+        out
+      end
+    else
+      # terminal node WITH tools: run a tool-use loop so a LOCAL model actually writes/runs
+      # (not just describes). An ACP backend ignores `tools` and uses its own toolset.
+      res = jet_backend::run_tools(backend, frole, input, tools)
+      if res != <<>>
+        jet_acp::emit_event({:text, res})   # the tool loop isn't token-streamed -> emit once
+      end
+      res
+    end
+    flow_done(id, "ok")
+    plan_mark(id, <<"completed">>)
+    if final == <<>>
+      jet_acp::emit_event({:text, <<"(no response)">>})
+      <<"(no response)">>
+    else
+      final
+    end
+  end
+
+  # the terminal node streamed nothing -> retry it (non-streaming, replan-framed) up to 2x
+  # before giving up, so a transient empty answer doesn't become "(no response)".
+  def self.final_retry(backend, role, input)
+    match jet_plan::attempt({|nn| jet_backend::run(backend, attempt_role(role, nn + 1), input)},
+                            {|o| o != <<>>}, 2)
+      case {:ok, o, _n}
+        o
+      case {:failed, _last, _n}
+        <<>>
+    end
+  end
+
+  # --- per-node backend: a node's "tier" can route it to a cheap or a smart model ---
+
+  def self.node_backend(n, model, drives)
+    tier_backend(maps::get(:tier, n, <<>>), model, drives)
+  end
+
+  def self.tier_backend(tier, model, drives)
+    lc = erlang::iolist_to_binary(string::lowercase(jet_backend::to_bin(tier)))
+    if (model != nil) and (contains?(lc, <<"fast">>) or contains?(lc, <<"cheap">>) or contains?(lc, <<"local">>))
+      {:ollama, jet_backend::model_name(model)}        # honor "fast" ONLY when a cheap model was explicitly set
+    elsif (drives != nil) and (contains?(lc, <<"smart">>) or contains?(lc, <<"hard">>))
+      {:acp, jet_backend::to_bin(drives)}
+    else
+      jet_backend::resolve(nil, nil, drives, model)
+    end
+  end
+  # (a "fast" node with NO explicit model lands in the resolve() default above -- the
+  # configured agent (drives) when set, else the explicit model, else a clear error.
+  # No silent model downgrade, and no env-assuming default.)
+
+  def self.contains?(text, sub)
+    match binary::split(jet_backend::to_bin(text), jet_backend::to_bin(sub))
+      case [_only]
+        false
+      case _
+        true
+    end
+  end
+
+  # --- a follow-up is handled by the lead alone, with the conversation + tools ---
+
+  def self.answer_followup(backend, topic, schema)
+    role = "You are the lead of a team, mid-conversation. Answer the user's most recent message using the conversation so far and your tools (they can read anything the team already produced). Reply in the user's language. Be concise."
+    user = erlang::iolist_to_binary(["Conversation:\n", topic, "\n\nAnswer the user's most recent message now."])
+    text = jet_backend::run_streaming(backend, role, user)
+    out = if text == <<>>
+      jet_acp::emit_event({:text, <<"(no response)">>})
+      <<"(no response)">>
+    else
+      text
+    end
+    jet_backend::coerce(out, schema)
+  end
+
+  def self.crash_text(reason)
+    erlang::iolist_to_binary(io_lib::format("crashed: ~p", [reason]))
+  end
+
+  def self.fail_text(id)
+    erlang::iolist_to_binary(["(node ", id, " failed)"])
+  end
+end

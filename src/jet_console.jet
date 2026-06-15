@@ -1,0 +1,128 @@
+module jet_console
+  # The BEAM-side bridge between a Jet agent's live event stream and a frontend. An agent
+  # method returns an AsyncResult that already streams events via `.stream(callback)`; the
+  # events are the SAME ones the ACP server emits: {:text,_} / {:thought,_} /
+  # {:tool_call,_} / {:plan,_}. jet_console::render/1 maps one event to a display line -- the
+  # shared "view" logic. print_stream/1 is a ready terminal console (an editor-less frontend);
+  # a Phoenix LiveView reuses the SAME render/1 from handle_info({ref,{:item,ev}}, socket).
+  #   agent = agent_web_demo::Researcher.spawn()
+  #   jet_console::print_stream(agent.research("..."))   # drives it + prints the live stream
+
+  # Map one agent event to a display line (binary; <<>> means "nothing to show").
+  def self.render(ev)
+    match ev
+      case {:text, t}
+        txt(t)                                                  # the assistant's answer/output
+      case {:thought, t}
+        erlang::iolist_to_binary(["· ", txt(t)])                # a thinking / status line
+      case {:tool_call, info}
+        render_tool(info)                                       # a tool call (id + status)
+      case {:plan, items}
+        render_plan(items)                                      # the plan / task checklist
+      case _
+        <<>>
+    end
+  end
+
+  def self.render_tool(info)
+    if erlang::is_map(info)
+      id = txt(maps::get(:id, info, maps::get(:title, info, <<"tool">>)))
+      status = txt(maps::get(:status, info, <<"…">>))
+      erlang::iolist_to_binary(["▸ ", id, " [", status, "]"])
+    else
+      <<>>
+    end
+  end
+
+  def self.render_plan(items)
+    if erlang::is_list(items)
+      erlang::iolist_to_binary(["▤ plan:\n", lists::join(<<"\n">>, lists::map({|it| plan_line(it)}, items))])
+    else
+      <<>>
+    end
+  end
+
+  def self.plan_line(it)
+    if erlang::is_map(it)
+      label = txt(maps::get(:title, it, maps::get(:id, it, maps::get(:content, it, <<"·">>))))
+      status = txt(maps::get(:status, it, <<>>))
+      if status == <<>>
+        erlang::iolist_to_binary(["  - ", label])
+      else
+        erlang::iolist_to_binary(["  [", status, "] ", label])
+      end
+    else
+      erlang::iolist_to_binary(["  - ", txt(it)])
+    end
+  end
+
+  # Terminal console: drive an AsyncResult's stream, print each rendered event as it arrives,
+  # and return the final result. (.stream/1 is AsyncResult's existing item->callback loop.)
+  def self.print_stream(async_result)
+    async_result.stream({|ev| emit_line(render(ev))})
+  end
+
+  # Frontend bridge. SPAWN this so it becomes the turn's caller (= event target); it calls the
+  # agent method and forwards each rendered event then the final result to sink as plain
+  # messages: {:jet_event, line} then {:jet_done, result}. A Phoenix LiveView spawns it with
+  # self() as sink and consumes those two shapes in handle_info.
+  def self.run_to(apid, method, args, sink)
+    ar = jet_runtime::call_method(apid, method, args)
+    result = ar.stream({|ev| forward(sink, ev)})
+    erlang::send(sink, {:jet_done, result})
+    :ok
+  end
+
+  def self.forward(sink, ev)
+    erlang::send(sink, {:jet_event, render(ev)})
+  end
+
+  # like run_to, but forwards the RAW structured event ({:text,_} / {:thought,_} /
+  # {:tool_call,_} / {:plan,_}) instead of a rendered line, so a rich frontend with
+  # per-kind panels can style each kind itself. {:jet_event_raw, ev} then {:jet_done, result}.
+  def self.run_to_raw(apid, method, args, sink)
+    ar = jet_runtime::call_method(apid, method, args)
+    result = ar.stream({|ev| forward_raw(sink, ev)})
+    erlang::send(sink, {:jet_done, result})
+    :ok
+  end
+
+  def self.forward_raw(sink, ev)
+    erlang::send(sink, {:jet_event_raw, ev})
+  end
+
+  # like run_to_raw, but every message carries `tag` (e.g. a thread id) so a multi-thread
+  # frontend can route concurrent agents' streams: {:jet_event_tag, tag, ev} then
+  # {:jet_done_tag, tag, result}.
+  def self.run_to_tagged(apid, method, args, sink, tag)
+    ar = jet_runtime::call_method(apid, method, args)
+    result = ar.stream({|ev| forward_tagged(sink, tag, ev)})
+    erlang::send(sink, {:jet_done_tag, tag, result})
+    :ok
+  end
+
+  def self.forward_tagged(sink, tag, ev)
+    erlang::send(sink, {:jet_event_tag, tag, ev})
+  end
+
+  def self.emit_line(line)
+    if line == <<>>
+      :ok
+    else
+      io::format("~ts~n", [line])
+    end
+  end
+
+  # robust term -> binary (handles binary / charlist / atom / anything).
+  def self.txt(x)
+    if erlang::is_binary(x)
+      x
+    elsif erlang::is_atom(x)
+      erlang::atom_to_binary(x, :utf8)
+    elsif erlang::is_list(x)
+      erlang::iolist_to_binary(x)
+    else
+      erlang::iolist_to_binary(io_lib::format("~p", [x]))
+    end
+  end
+end

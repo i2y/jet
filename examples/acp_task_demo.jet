@@ -1,0 +1,11 @@
+# A `task` agent backed by the stub runner. It emits structured turn events --
+# a plan, a tool call, then a text result -- deterministically (no model needed),
+# so the ACP server's session/update mapping is demonstrable offline. Serve it:
+#   jet acp-serve acp_task_demo::Builder::build examples/acp_task_demo.jet
+# In an ACP client this renders as a plan checklist + a tool call + a message.
+module acp_task_demo
+  agent Builder
+    role "A demo agent that plans, runs a tool, and reports."
+    task build(spec)
+  end
+end

@@ -1,0 +1,20 @@
+# Native conversation MEMORY on the `Llm` runner: the SAME spawned agent across two
+# turns. The agent's memory is a per-agent ETS table owned by its gen_server (jet_memory),
+# get-or-created by jet_agent::ensure_mem and threaded into each prompt by the Llm runner,
+# so turn 2 recalls what turn 1 said. `memory :fresh` opts back out (stateless per turn).
+#   ./jet -r agent_memory_demo::run examples/agent_memory_demo.jet   (needs `ollama serve`)
+module agent_memory_demo
+  agent Assistant
+    model "ollama:qwen3.6:35b-a3b"
+    role "You are a helpful assistant with memory of the conversation. Answer in one short sentence."
+    ask chat(message) -> {reply: String}
+  end
+
+  def self.run()
+    a = agent_memory_demo::Assistant.spawn()
+    io::format("turn1 => ~p~n",
+               [a.chat("My name is Ada and my favorite number is 42. Just acknowledge briefly.").await()])
+    io::format("turn2 => ~p~n",
+               [a.chat("What is my name and my favorite number?").await()])   # recalls turn 1
+  end
+end

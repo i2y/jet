@@ -1,0 +1,1041 @@
+module jet_acp
+  # Real ACP (Agent Client Protocol) runner. Drives an external ACP agent
+  # (e.g. claude-code-acp, codex, gemini) over stdio using ndjson JSON-RPC 2.0.
+  #
+  # Synchronous single turn: open -> initialize -> session/new -> session/prompt
+  # -> accumulate streamed agent_message_chunk text -> return on the prompt
+  # response. Runs inside the agent's async worker, so the gen_server isn't
+  # blocked. (Session reuse, fs/terminal callbacks, and schema-parsing of the
+  # agent's output are follow-ups.)
+
+  def self.turn(config, method, args, schema)
+    erlang::put(:__acp_idle_ticks__, 0)   # fresh idle-heartbeat counter per turn
+    cmd = command_of(maps::get(:runner, config, nil))
+    match jet_port_ffi::open(cmd, [:separate_stderr])
+      case {:ok, port}
+        result = run_on_port(port, config, method, args)
+        jet_port_ffi::close(port)
+        result
+      case {:error, reason}
+        {:error, :acp_spawn_failed, reason}
+    end
+  end
+
+  # A turn whose only arg is the :jet_list_commands sentinel just does the handshake (no prompt)
+  # to capture the agent's available_commands_update (emitted as {:commands, …}) -- used to
+  # populate the slash-command menu BEFORE the user sends anything.
+  def self.run_on_port(port, config, method, args)
+    match args
+      case [:jet_list_commands]
+        erlang::put(:__acp_probe__, true)   # suppress all non-{:commands} events for this turn
+        probe_handshake(port, workspace_root(config))
+      case _
+        drive(port, build_prompt(config, method, args), workspace_root(config))
+    end
+  end
+
+  # one-shot, no-visible-output slash-command probe: open a THROWAWAY connection (so the user's
+  # real session isn't polluted), send a minimal prompt to trigger available_commands_update,
+  # capture it (forwarded as {:commands,…}) and close. Response text is suppressed (__acp_probe__).
+  def self.probe_commands_async(caller, ref, config)
+    erlang::put(:__acp_stream__, {caller, ref})
+    erlang::put(:__acp_probe__, true)
+    cmd = command_of(maps::get(:runner, config, nil))
+    match jet_port_ffi::open(cmd, [:separate_stderr])
+      case {:ok, port}
+        probe_handshake(port, workspace_root(config))
+        jet_port_ffi::close(port)
+      case {:error, _reason}
+        :ok
+    end
+    caller ! {ref, {:done, :ok}}
+  end
+
+  def self.probe_handshake(port, root)
+    erlang::put(:__acp_root__, root)
+    send_req(port, 1, "initialize", init_params())
+    match await(port, <<>>, 1, <<>>)
+      case {:response, _r1, buf1, _}
+        send_req(port, 2, "session/new", new_params(root))
+        match await(port, buf1, 2, <<>>)
+          case {:response, r2, buf2, _}
+            sid = maps::get(<<"sessionId">>, maps::get(<<"result">>, r2))
+            # claude-code-acp only advertises commands during a real turn -> run a hidden one on
+            # THIS throwaway connection (full await captures available_commands_update -> {:commands};
+            # the text answer is dropped by __acp_probe__) and discard it by closing the port.
+            send_req(port, 3, "session/prompt", prompt_params(sid, "hi"))
+            await(port, buf2, 3, <<>>)
+            {:ok, <<>>}
+          case _
+            {:ok, <<>>}
+        end
+      case _
+        {:ok, <<>>}
+    end
+  end
+
+  def self.command_of(runner)
+    if erlang::is_map(runner)
+      cmd_from_opts(maps::get(:opts, runner, nil))
+    else
+      "claude-code-acp"
+    end
+  end
+
+  def self.cmd_from_opts(opts)
+    if erlang::is_map(opts)
+      maps::get(:command, opts, "claude-code-acp")
+    else
+      "claude-code-acp"
+    end
+  end
+
+  def self.build_prompt(config, method, args)
+    role = maps::get(:role, config, "")
+    question = labeled_args(config, method, args)
+    if role == "" or role == nil
+      question
+    else
+      erlang::iolist_to_binary([role, "\n\n", question])
+    end
+  end
+
+  # Label each argument by its declared param name (from the agent's :params config) when the
+  # names line up with the args and there is more than one; otherwise fall back to args_to_text.
+  def self.labeled_args(config, method, args)
+    names = method_params(config, method)
+    n = erlang::length(args)
+    if (erlang::length(names) == n) and (n > 1)
+      pairs = lists::zip(names, args)
+      blocks = lists::map({|{nm, a}| erlang::iolist_to_binary([to_text(nm), ":\n", to_text(a)])}, pairs)
+      erlang::iolist_to_binary(lists::join("\n\n", blocks))
+    else
+      args_to_text(args)
+    end
+  end
+
+  def self.method_params(config, method)
+    maps::get(method, maps::get(:params, config, maps::new()), [])
+  end
+
+  def self.args_to_text(args)
+    match args
+      case [single]
+        to_text(single)
+      case _
+        # multiple args: label each positionally and separate them with a blank line,
+        # instead of dumping the raw list with ~p (which leaks Erlang term syntax to the model)
+        pairs = lists::zip(lists::seq(1, erlang::length(args)), args)
+        labeled = lists::map({|{i, a}| erlang::iolist_to_binary(["Argument ", erlang::integer_to_binary(i), ":\n", to_text(a)])}, pairs)
+        erlang::iolist_to_binary(lists::join("\n\n", labeled))
+    end
+  end
+
+  def self.to_text(x)
+    if erlang::is_binary(x)
+      x
+    elsif erlang::is_list(x)
+      erlang::iolist_to_binary(x)
+    else
+      erlang::iolist_to_binary(io_lib::format("~p", [x]))
+    end
+  end
+
+  # --- persistent connection: one subprocess + session reused across turns,
+  #     so the conversation continues (turn N sees turns 1..N-1). Owned by a
+  #     process that monitors the agent and exits when the agent dies. ---
+
+  def self.open_connection(config, agent_pid)
+    erlang::spawn(:jet_acp, :connection_init, [config, agent_pid])
+  end
+
+  def self.connection_init(config, agent_pid)
+    erlang::monitor(:process, agent_pid)
+    cmd = command_of(maps::get(:runner, config, nil))
+    match jet_port_ffi::open(cmd, [:separate_stderr])
+      case {:ok, port}
+        init_session(port, config, agent_pid)
+      case {:error, _reason}
+        :error
+    end
+  end
+
+  def self.init_session(port, config, agent_pid)
+    root = workspace_root(config)
+    erlang::put(:__acp_root__, root)   # fs sandbox root for this connection
+    erlang::put(:__acp_agent__, agent_pid)   # agent gen_server, for on_approval
+    send_req(port, 1, "initialize", init_params())
+    match await(port, <<>>, 1, <<>>)
+      case {:response, _r1, buf1, _}
+        send_req(port, 2, "session/new", new_params(root))
+        match await(port, buf1, 2, <<>>)
+          case {:response, r2, buf2, _}
+            sid = maps::get(<<"sessionId">>, maps::get(<<"result">>, r2))
+            connection_loop(port, sid, 3, buf2, agent_pid)
+          case _other
+            jet_port_ffi::close(port)
+        end
+      case _other
+        jet_port_ffi::close(port)
+    end
+  end
+
+  def self.connection_loop(port, sid, next_id, buf, agent_pid)
+    receive
+      case {:turn, caller, ref, prompt, schema, kind}
+        wire("TRC ", "conn:turn-received")
+        erlang::put(:__acp_stream__, {caller, ref})
+        {result, buf2} = run_prompt(port, sid, next_id, prompt, schema, kind, buf)
+        wire("TRC ", "conn:run_prompt-done")
+        caller ! {ref, {:done, result}}
+        wire("TRC ", "conn:sent-done")
+        connection_loop(port, sid, next_id + 1, buf2, agent_pid)
+      case :__close__
+        jet_port_ffi::close(port)
+      case {p, {:exit_status, _st}} if p == port
+        :closed
+      case {:DOWN, _mref, :process, dp, _reason} if dp == agent_pid
+        jet_port_ffi::close(port)
+    end
+  end
+
+  def self.run_prompt(port, sid, id, prompt, schema, kind, buf)
+    reset_collect()
+    send_req(port, id, "session/prompt", prompt_params(sid, prompt))
+    match await(port, buf, id, <<>>)
+      case {:response, r, rest, acc}
+        {turn_value(acc, schema, kind, r), rest}
+      case other
+        {{:error, :acp_prompt_failed, other}, buf}
+    end
+  end
+
+  # :ask -> typed value (schema-parsed); :task -> a TurnResult built from the
+  # turn (v1: accumulated text + end_turn ok; structured edits/commands/plan
+  # land via the event stream as a follow-up).
+  def self.turn_value(acc, schema, kind, response)
+    match kind
+      case :task
+        {:ok, jet_agent::TurnResult.new({text: acc,
+                                         ok: stop_ok?(response),
+                                         edits: collect_list(erlang::get({:__acp_collect__, :edits})),
+                                         commands: collect_list(erlang::get({:__acp_collect__, :commands})),
+                                         plan: collected_plan(),
+                                         tool_calls: collected_tool_calls(),
+                                         files: collect_list(erlang::get({:__acp_collect__, :files}))})}
+      case _
+        parse_result(acc, schema)
+    end
+  end
+
+  def self.stop_ok?(response)
+    result = maps::get(<<"result">>, response, nil)
+    if erlang::is_map(result)
+      maps::get(<<"stopReason">>, result, nil) == <<"end_turn">>
+    else
+      true
+    end
+  end
+
+  # per-turn collectors (process dict, reset each turn) so a `task` TurnResult
+  # carries the structured tool_calls/plan the agent streamed, not just text.
+  def self.reset_collect()
+    erlang::put({:__acp_collect__, :tool_calls}, [])
+    erlang::put({:__acp_collect__, :edits}, [])
+    erlang::put({:__acp_collect__, :commands}, [])
+    erlang::put({:__acp_collect__, :files}, [])
+    erlang::erase({:__acp_collect__, :plan})
+  end
+
+  def self.collect_into(key, value)
+    cur = collect_list(erlang::get({:__acp_collect__, key}))
+    erlang::put({:__acp_collect__, key}, lists::append(cur, [value]))
+  end
+
+  # from a tool_call's content/locations: diff -> edit, terminal -> command,
+  # locations -> files the tool touched.
+  def self.collect_artifacts(update)
+    content = maps::get(<<"content">>, update, [])
+    if erlang::is_list(content)
+      lists::foreach({|b| collect_block(b)}, content)
+    end
+    locs = maps::get(<<"locations">>, update, [])
+    if erlang::is_list(locs)
+      lists::foreach({|l| collect_loc(l)}, locs)
+    end
+  end
+
+  def self.collect_block(block)
+    if erlang::is_map(block)
+      match maps::get(<<"type">>, block, nil)
+        case <<"diff">>
+          emit_event({:edit, maps::get(<<"path">>, block, nil),
+                             maps::get(<<"oldText">>, block, nil),
+                             maps::get(<<"newText">>, block, nil)})   # surface the file edit (-> diff in the UI)
+          collect_into(:edits, {path: maps::get(<<"path">>, block, nil),
+                                old: maps::get(<<"oldText">>, block, nil),
+                                new: maps::get(<<"newText">>, block, nil)})
+        case <<"terminal">>
+          collect_into(:commands, {terminal: maps::get(<<"terminalId">>, block, nil)})
+        case _
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  def self.collect_loc(loc)
+    if erlang::is_map(loc)
+      collect_into(:files, maps::get(<<"path">>, loc, nil))
+    else
+      :ok
+    end
+  end
+
+  def self.collect_tool_call(info)
+    cur = collect_list(erlang::get({:__acp_collect__, :tool_calls}))
+    erlang::put({:__acp_collect__, :tool_calls}, upsert_tool_call(cur, info))
+  end
+
+  # tool_calls are unique by id; a tool_call_update replaces the prior entry
+  # (latest status wins) instead of duplicating it.
+  def self.upsert_tool_call(list, info)
+    id = maps::get(:id, info, nil)
+    if lists::any({|e| maps::get(:id, e, nil) == id}, list)
+      lists::map({|e| pick_tc(e, id, info)}, list)
+    else
+      lists::append(list, [info])
+    end
+  end
+
+  def self.pick_tc(e, id, info)
+    if maps::get(:id, e, nil) == id
+      info
+    else
+      e
+    end
+  end
+
+  def self.collect_list(cur)
+    if erlang::is_list(cur)
+      cur
+    else
+      []
+    end
+  end
+
+  def self.collected_tool_calls()
+    collect_list(erlang::get({:__acp_collect__, :tool_calls}))
+  end
+
+  def self.collected_plan()
+    collect_list(erlang::get({:__acp_collect__, :plan}))
+  end
+
+  # parse the agent's text against the declared schema: trivial schema -> raw
+  # text; otherwise decode JSON and validate, falling back to text on mismatch.
+  def self.parse_result(text, schema)
+    if schema == :any
+      {:ok, text}
+    else
+      match jet_json_ffi::decode(text)
+        case {:ok, value}
+          coerced = jet_agent::coerce(value, schema)
+          match jet_agent::validate(coerced, schema)
+            case {:ok, v}
+              {:ok, v}
+            case _
+              {:ok, text}
+          end
+        case _
+          {:ok, text}
+      end
+    end
+  end
+
+  # like build_prompt but appends a JSON instruction when a schema is declared
+  def self.build_prompt_schema(config, method, args, schema)
+    base = build_prompt(config, method, args)
+    if schema == :any
+      base
+    else
+      erlang::iolist_to_binary([base,
+        "\n\nRespond with ONLY a JSON value matching this shape (no markdown, no prose): ",
+        jet_json_ffi::encode(schema)])
+    end
+  end
+
+  # ask -> ask for JSON (schema instruction); task -> plain prompt (the result
+  # is the WORK the agent does, returned as a TurnResult, not a coerced value).
+  def self.build_turn_prompt(config, method, args, schema, kind)
+    match kind
+      case :task
+        build_prompt(config, method, args)
+      case _
+        build_prompt_schema(config, method, args, schema)
+    end
+  end
+
+  # --- JSON-RPC sequence (single-shot; persistent path above reuses helpers) ---
+
+  def self.drive(port, prompt, root)
+    send_req(port, 1, "initialize", init_params())
+    match await(port, <<>>, 1, <<>>)
+      case {:response, _r1, buf1, _a1}
+        send_req(port, 2, "session/new", new_params(root))   # root = the session cwd (per-member worktree)
+        match await(port, buf1, 2, <<>>)
+          case {:response, r2, buf2, _a2}
+            sid = maps::get(<<"sessionId">>, maps::get(<<"result">>, r2))
+            send_req(port, 3, "session/prompt", prompt_params(sid, prompt))
+            match await(port, buf2, 3, <<>>)
+              case {:response, _r3, _buf3, acc}
+                {:ok, acc}
+              case other
+                {:error, :acp_prompt_failed, other}
+            end
+          case other
+            {:error, :acp_session_new_failed, other}
+        end
+      case other
+        {:error, :acp_initialize_failed, other}
+    end
+  end
+
+  def self.init_params()
+    {protocolVersion: 1,
+     clientCapabilities: {fs: {readTextFile: false, writeTextFile: false}}}
+  end
+
+  def self.new_params()
+    new_params(cwd_bin())
+  end
+
+  def self.new_params(root)
+    {cwd: root, mcpServers: []}
+  end
+
+  def self.cwd_bin()
+    {:ok, dir} = file::get_cwd()
+    erlang::list_to_binary(dir)
+  end
+
+  # the agent's `workspace "..."` becomes the fs sandbox root; defaults to cwd.
+  def self.workspace_root(config)
+    ws = maps::get(:workspace, config, nil)
+    if ws == nil
+      cwd_bin()
+    else
+      to_bin(filename::absname(to_bin(ws)))
+    end
+  end
+
+  def self.to_bin(x)
+    if erlang::is_binary(x)
+      x
+    else
+      erlang::iolist_to_binary(x)
+    end
+  end
+
+  def self.prompt_params(sid, prompt)
+    {sessionId: sid, prompt: [{type: "text", text: prompt}]}
+  end
+
+  # --- read loop: pump ndjson lines until the response with await_id ---
+
+  def self.await(port, buf, await_id, acc)
+    match binary::split(buf, <<"\n">>)
+      case [line, rest]
+        handle_line(port, line, rest, await_id, acc)
+      case _
+        receive
+          case {p, {:data, data}} if p == port
+            erlang::put(:__acp_idle_ticks__, 0)   # progress -> reset the idle heartbeat counter
+            await(port, erlang::iolist_to_binary([buf, data]), await_id, acc)
+          case {p, {:exit_status, st}} if p == port
+            {:closed, st, acc}
+        after 60000     # 1-min heartbeat tick instead of one silent 5-min wait
+          idle_tick(port, buf, await_id, acc)
+        end
+    end
+  end
+
+  # the drive produced nothing for another minute. Surface a HEARTBEAT so a long-but-LIVE
+  # agent is visible (not a silent freeze the user reads as a cut-off), and keep waiting --
+  # up to idle_cap() minutes of UNBROKEN silence (reset on any data), after which we treat
+  # it as stalled and hand back {:timeout, partial}; jet_backend::acp_result then turns that
+  # into a recoverable failed attempt. This both reduces spurious give-ups (more patience for
+  # a slow agent) and makes the wait observable + cancellable.
+  def self.idle_tick(port, buf, await_id, acc)
+    ticks = idle_count() + 1
+    erlang::put(:__acp_idle_ticks__, ticks)
+    if idle_giveup?(ticks)
+      {:timeout, acc}
+    else
+      emit_event({:thought, erlang::iolist_to_binary(["(drive quiet for ", erlang::integer_to_binary(ticks), " min, still waiting…)"])})
+      await(port, buf, await_id, acc)
+    end
+  end
+
+  def self.idle_count()
+    match erlang::get(:__acp_idle_ticks__)
+      case :undefined
+        0
+      case n
+        n
+    end
+  end
+
+  def self.idle_cap()
+    10            # ~10 min of unbroken silence -> stalled (was a single silent 5-min wait)
+  end
+
+  def self.idle_giveup?(ticks)
+    ticks >= idle_cap()
+  end
+
+  def self.handle_line(port, line, rest, await_id, acc)
+    wire("IN  ", line)
+    match jet_json_ffi::decode(line)
+      case {:ok, msg}
+        dispatch(port, msg, rest, await_id, acc)
+      case _
+        await(port, rest, await_id, acc)
+    end
+  end
+
+  def self.dispatch(port, msg, rest, await_id, acc)
+    has_id = maps::is_key(<<"id">>, msg)
+    has_method = maps::is_key(<<"method">>, msg)
+    if has_id and has_method
+      handle_server_request(port, msg)
+      await(port, rest, await_id, acc)
+    elsif has_id
+      if maps::get(<<"id">>, msg) == await_id
+        {:response, msg, rest, acc}
+      else
+        await(port, rest, await_id, acc)
+      end
+    elsif has_method
+      await(port, rest, await_id, accumulate(msg, acc))
+    else
+      await(port, rest, await_id, acc)
+    end
+  end
+
+  def self.accumulate(msg, acc)
+    if maps::get(<<"method">>, msg, nil) == <<"session/update">>
+      maybe_update(maps::get(<<"params">>, msg, nil), acc)
+    else
+      acc
+    end
+  end
+
+  def self.maybe_update(params, acc)
+    if erlang::is_map(params)
+      extract_text(maps::get(<<"update">>, params, nil), acc)
+    else
+      acc
+    end
+  end
+
+  def self.extract_text(update, acc)
+    if erlang::is_map(update)
+      handle_update(maps::get(<<"sessionUpdate">>, update, nil), update, acc)
+    else
+      acc
+    end
+  end
+
+  # session/update -> structured stream events. Only message chunks are also
+  # accumulated into the final text; the rest are emitted for `.stream`.
+  def self.handle_update(kind, update, acc)
+    match kind
+      case <<"agent_message_chunk">>
+        append_content(maps::get(<<"content">>, update, nil), acc)
+      case <<"agent_thought_chunk">>
+        emit_event({:thought, content_text(maps::get(<<"content">>, update, nil))})
+        acc
+      case <<"tool_call">>
+        info = tool_call_info(update)
+        emit_event({:tool_call, info})
+        collect_tool_call(info)
+        collect_artifacts(update)
+        acc
+      case <<"tool_call_update">>
+        info = tool_call_info(update)
+        emit_event({:tool_call, info})
+        collect_tool_call(info)
+        collect_artifacts(update)
+        acc
+      case <<"plan">>
+        entries = maps::get(<<"entries">>, update, [])
+        emit_event({:plan, entries})
+        erlang::put({:__acp_collect__, :plan}, entries)
+        acc
+      case <<"available_commands_update">>
+        cmds = lists::map({|c| {name: maps::get(<<"name">>, c, <<>>), description: maps::get(<<"description">>, c, <<>>)}}, maps::get(<<"availableCommands">>, update, []))
+        erlang::put(:__acp_commands__, cmds)
+        emit_event({:commands, cmds})
+        acc
+      case _
+        acc
+    end
+  end
+
+  def self.content_text(content)
+    if erlang::is_map(content)
+      maps::get(<<"text">>, content, <<>>)
+    else
+      <<>>
+    end
+  end
+
+  def self.tool_call_info(update)
+    {id: maps::get(<<"toolCallId">>, update, nil),
+     title: maps::get(<<"title">>, update, <<>>),
+     kind: maps::get(<<"kind">>, update, <<>>),
+     status: maps::get(<<"status">>, update, <<>>)}
+  end
+
+  def self.append_content(content, acc)
+    if erlang::is_map(content)
+      chunk = maps::get(<<"text">>, content, <<>>)
+      emit_event({:text, chunk})
+      erlang::iolist_to_binary([acc, chunk])
+    else
+      acc
+    end
+  end
+
+  # forward a structured stream event to the subscriber stashed by run_turn /
+  # connection_loop. Events are tagged: {:text, b} {:thought, b}
+  # {:tool_call, m} {:plan, entries}.
+  def self.emit_event(ev)
+    if suppressed_by_probe?(ev)
+      :ok
+    else
+      match erlang::get(:__acp_stream__)
+        case {caller, ref}
+          caller ! {ref, {:item, ev}}
+        case _
+          :ok
+      end
+    end
+  end
+
+  # during a commands-probe (no prompt) the handshake can still trigger session notifications
+  # (e.g. claude-code-acp echoing project context). Forward ONLY {:commands,…}, drop the rest,
+  # so the probe never injects text/thought/edit blocks into the conversation.
+  def self.suppressed_by_probe?(ev)
+    if erlang::get(:__acp_probe__) == true
+      not commands_event?(ev)
+    else
+      false
+    end
+  end
+
+  def self.commands_event?(ev)
+    match ev
+      case {:commands, _}
+        true
+      case _
+        false
+    end
+  end
+
+  # surface which model an iterative round is using -- only when escalation is active
+  # (more than one in the pool) and a label is present. Shared by Goal/Refine.
+  def self.round_note(round, label, total)
+    if (total > 1) and (label != nil)
+      emit_event({:thought, erlang::iolist_to_binary(["Round ", erlang::integer_to_binary(round), ": ", label])})
+    else
+      :ok
+    end
+  end
+
+  # dynamic-trace span for the Console's execution visualizer: a shape runner reports a step
+  # (id is stable so status updates in place). status = "running" | "ok" | "fail" | a custom verb.
+  def self.emit_trace(id, label, status)
+    emit_event({:trace, {id: id, parent: cur_parent(), label: label, status: status}})
+  end
+
+  # the trace tree is built from PARENT links: a shape sets the current parent around a sub-run so
+  # its spans (an Architect team under a Goal round; each member's work under that member) nest
+  # correctly even when emit order interleaves (e.g. Refine's draft/critique loop).
+  def self.cur_parent()
+    match erlang::get(:__trace_parent__)
+      case :undefined
+        nil
+      case p
+        p
+    end
+  end
+
+  # point following spans at `id`; returns the OLD parent so the caller can restore it afterwards.
+  def self.trace_set_parent(id)
+    old = cur_parent()
+    erlang::put(:__trace_parent__, id)
+    old
+  end
+
+  def self.next_trace_id()
+    n = match erlang::get(:__trace_seq__)
+      case :undefined
+        0
+      case x
+        x
+    end
+    erlang::put(:__trace_seq__, n + 1)
+    erlang::iolist_to_binary(["s", erlang::integer_to_binary(n)])
+  end
+
+  # emit a span with a fresh unique id and RETURN the id, so the caller can nest children under it.
+  def self.trace_node(label, status)
+    id = next_trace_id()
+    emit_trace(id, label, status)
+    id
+  end
+
+  # a one-shot span with a fresh unique id (never updates; id not needed by the caller).
+  def self.emit_trace_once(label, status)
+    emit_trace(next_trace_id(), label, status)
+  end
+
+  # --- agent -> client requests ---
+
+  def self.handle_server_request(port, msg)
+    id = maps::get(<<"id">>, msg)
+    params = maps::get(<<"params">>, msg, nil)
+    match maps::get(<<"method">>, msg, nil)
+      case <<"session/request_permission">>
+        decision = ask_approval(build_approval_req(msg))
+        send_result(port, id, {outcome: permission_outcome(decision, msg)})
+      case <<"fs/read_text_file">>
+        handle_fs_read(port, id, params)
+      case <<"fs/write_text_file">>
+        handle_fs_write(port, id, params)
+      case <<"terminal/create">>
+        handle_terminal_create(port, id, params)
+      case <<"terminal/output">>
+        handle_terminal_output(port, id, params)
+      case <<"terminal/wait_for_exit">>
+        handle_terminal_wait(port, id, params)
+      case <<"terminal/kill">>
+        send_result(port, id, nil)
+      case <<"terminal/release">>
+        handle_terminal_release(port, id, params)
+      case _
+        send_error(port, id, -32601, "method not supported by jet_acp client")
+    end
+  end
+
+  # --- fs callbacks (sandboxed to the session root) ---
+
+  def self.handle_fs_read(port, id, params)
+    if erlang::is_map(params)
+      read_if_allowed(port, id, maps::get(<<"path">>, params, <<>>))
+    else
+      send_error(port, id, -32602, "invalid params")
+    end
+  end
+
+  def self.read_if_allowed(port, id, path)
+    if within_sandbox?(path)
+      match file::read_file(path)
+        case {:ok, content}
+          send_result(port, id, {content: content})
+        case {:error, reason}
+          send_error(port, id, -32603, io_lib::format("read failed: ~p", [reason]))
+      end
+    else
+      send_error(port, id, -32603, "path outside sandbox")
+    end
+  end
+
+  def self.handle_fs_write(port, id, params)
+    if erlang::is_map(params)
+      write_if_allowed(port, id, maps::get(<<"path">>, params, <<>>), maps::get(<<"content">>, params, <<>>))
+    else
+      send_error(port, id, -32602, "invalid params")
+    end
+  end
+
+  def self.write_if_allowed(port, id, path, content)
+    if within_sandbox?(path)
+      match file::write_file(path, content)
+        case :ok
+          send_result(port, id, nil)
+        case {:error, reason}
+          send_error(port, id, -32603, io_lib::format("write failed: ~p", [reason]))
+      end
+    else
+      send_error(port, id, -32603, "path outside sandbox")
+    end
+  end
+
+  # path must be ".."-free and resolve under the session root (basic sandbox;
+  # symlink-tight enforcement via orchestra PathSafety is a follow-up).
+  def self.within_sandbox?(path)
+    root = erlang::get(:__acp_root__)
+    if root == :undefined
+      false
+    elsif string::find(path, <<"..">>) != :nomatch
+      false
+    else
+      lists::prefix(erlang::binary_to_list(root),
+                    erlang::binary_to_list(filename::absname(path, root)))
+    end
+  end
+
+  # --- terminal callbacks (synchronous run; output/exit cached per terminalId) ---
+
+  def self.handle_terminal_create(port, id, params)
+    if erlang::is_map(params)
+      {status, output} = run_command(build_command(params))
+      tid = next_terminal_id()
+      erlang::put({:__acp_term__, tid}, {status, output})
+      send_result(port, id, {terminalId: tid})
+    else
+      send_error(port, id, -32602, "invalid params")
+    end
+  end
+
+  def self.handle_terminal_output(port, id, params)
+    match erlang::get({:__acp_term__, maps::get(<<"terminalId">>, params, nil)})
+      case {status, output}
+        send_result(port, id, {output: output, truncated: false, exitStatus: {exitCode: status, signal: nil}})
+      case _
+        send_error(port, id, -32602, "unknown terminalId")
+    end
+  end
+
+  def self.handle_terminal_wait(port, id, params)
+    match erlang::get({:__acp_term__, maps::get(<<"terminalId">>, params, nil)})
+      case {status, _output}
+        send_result(port, id, {exitCode: status, signal: nil})
+      case _
+        send_error(port, id, -32602, "unknown terminalId")
+    end
+  end
+
+  def self.handle_terminal_release(port, id, params)
+    erlang::erase({:__acp_term__, maps::get(<<"terminalId">>, params, nil)})
+    send_result(port, id, nil)
+  end
+
+  def self.build_command(params)
+    cmd = maps::get(<<"command">>, params, <<>>)
+    args = maps::get(<<"args">>, params, [])
+    erlang::iolist_to_binary([cmd, " ", lists::join(<<" ">>, args)])
+  end
+
+  def self.run_command(cmd_str)
+    match jet_port_ffi::open(cmd_str, [:exit_status, :stderr_to_stdout])
+      case {:ok, p}
+        collect_output(p, <<>>)
+      case {:error, reason}
+        {255, io_lib::format("spawn failed: ~p", [reason])}
+    end
+  end
+
+  def self.collect_output(p, acc)
+    receive
+      case {pp, {:data, data}} if pp == p
+        collect_output(p, erlang::iolist_to_binary([acc, data]))
+      case {pp, {:exit_status, status}} if pp == p
+        {status, acc}
+    after 120000
+      jet_port_ffi::close(p)
+      {124, acc}
+    end
+  end
+
+  def self.next_terminal_id()
+    erlang::iolist_to_binary(["term-", erlang::integer_to_list(erlang::unique_integer([:positive]))])
+  end
+
+  def self.first_option_id(msg)
+    params = maps::get(<<"params">>, msg, nil)
+    if erlang::is_map(params)
+      pick_option(maps::get(<<"options">>, params, []))
+    else
+      "allow"
+    end
+  end
+
+  def self.pick_option(options)
+    match options
+      case [first, *_]
+        maps::get(<<"optionId">>, first, "allow")
+      case _
+        "allow"
+    end
+  end
+
+  # --- permission policy (on_approval hook) ---
+
+  # Ask the agent to decide a permission request. Routes to its on_approval(req)
+  # via the gen_server; defaults to :allow when there is no agent (single-shot
+  # path) or the call fails.
+  def self.ask_approval(req)
+    match erlang::get(:__acp_stream__)
+      case {caller, _ref} if erlang::is_pid(caller)
+        ask_ui(req)            # a frontend is listening -> prompt the user interactively
+      case _
+        ask_agent_hook(req)    # headless -> the agent's on_approval policy (or :allow)
+    end
+  end
+
+  # Interactive approval: emit a permission request to the frontend and block until it answers
+  # (the agent's ACP turn is paused waiting for permission anyway). The frontend replies
+  # {:permission_response, ref, :allow | :deny} to this worker pid.
+  def self.ask_ui(req)
+    pref = erlang::make_ref()
+    emit_event({:permission, pref, erlang::self(), maps::get(:title, req, nil), maps::get(:kind, req, nil)})
+    receive
+      case {:permission_response, pr, decision} if pr == pref
+        decision
+    after 180000
+      :allow                   # no answer in 3 min -> don't block the agent forever
+    end
+  end
+
+  def self.ask_agent_hook(req)
+    match erlang::get(:__acp_agent__)
+      case pid if erlang::is_pid(pid)
+        try
+          gen_server::call(pid, {:__jet_approval__, req}, 30000)
+        catch _e
+          :allow
+        end
+      case _
+        :allow
+    end
+  end
+
+  # A Jet-friendly view of the request for on_approval: tool kind/title (as Jet
+  # strings, so `req.get(:kind) == "execute"` works) plus the raw params.
+  def self.build_approval_req(msg)
+    params = maps::get(<<"params">>, msg, nil)
+    if erlang::is_map(params)
+      tc = maps::get(<<"toolCall">>, params, nil)
+      {kind: bin_to_str(tc_get(tc, <<"kind">>)),
+       title: bin_to_str(tc_get(tc, <<"title">>)),
+       tool_call_id: tc_get(tc, <<"toolCallId">>),
+       options: maps::get(<<"options">>, params, []),
+       raw: params}
+    else
+      {kind: nil, title: nil, tool_call_id: nil, options: [], raw: nil}
+    end
+  end
+
+  def self.tc_get(tc, key)
+    if erlang::is_map(tc)
+      maps::get(key, tc, nil)
+    else
+      nil
+    end
+  end
+
+  def self.bin_to_str(b)
+    if erlang::is_binary(b)
+      erlang::binary_to_list(b)
+    else
+      b
+    end
+  end
+
+  # Map an on_approval decision to an ACP RequestPermissionOutcome:
+  #   :allow* -> an allow option ; :deny/:reject* -> a reject option (else
+  #   cancelled) ; a binary -> that optionId verbatim.
+  def self.permission_outcome(decision, msg)
+    options = options_of(msg)
+    match decision
+      case :deny
+        reject_outcome(options)
+      case :reject
+        reject_outcome(options)
+      case :reject_once
+        reject_outcome(options)
+      case :reject_always
+        reject_outcome(options)
+      case oid if erlang::is_binary(oid)
+        {outcome: "selected", optionId: oid}
+      case _
+        allow_outcome(options)
+    end
+  end
+
+  def self.options_of(msg)
+    params = maps::get(<<"params">>, msg, nil)
+    if erlang::is_map(params)
+      maps::get(<<"options">>, params, [])
+    else
+      []
+    end
+  end
+
+  def self.allow_outcome(options)
+    match pick_kind(options, [<<"allow_once">>, <<"allow_always">>])
+      case {:ok, oid}
+        {outcome: "selected", optionId: oid}
+      case _
+        {outcome: "selected", optionId: pick_option(options)}
+    end
+  end
+
+  def self.reject_outcome(options)
+    match pick_kind(options, [<<"reject_once">>, <<"reject_always">>])
+      case {:ok, oid}
+        {outcome: "selected", optionId: oid}
+      case _
+        {outcome: "cancelled"}
+    end
+  end
+
+  def self.pick_kind(options, kinds)
+    match options
+      case [opt, *rest]
+        if erlang::is_map(opt) and lists::member(maps::get(<<"kind">>, opt, nil), kinds)
+          {:ok, maps::get(<<"optionId">>, opt, nil)}
+        else
+          pick_kind(rest, kinds)
+        end
+      case _
+        :none
+    end
+  end
+
+  # --- send helpers ---
+
+  def self.send_req(port, id, method, params)
+    send_msg(port, {jsonrpc: "2.0", id: id, method: method, params: params})
+  end
+
+  def self.send_result(port, id, result)
+    send_msg(port, {jsonrpc: "2.0", id: id, result: result})
+  end
+
+  def self.send_error(port, id, code, message)
+    send_msg(port, {jsonrpc: "2.0", id: id, error: {code: code, message: message}})
+  end
+
+  def self.send_msg(port, msg)
+    enc = jet_json_ffi::encode(msg)
+    wire("OUT ", enc)
+    jet_port_ffi::send_input(port, erlang::iolist_to_binary([enc, "\n"]))
+  end
+
+  # optional wire log for debugging an external ACP agent (claude-code-acp): set
+  # JET_ACP_WIRE to a path and every line in/out is appended. Off by default.
+  def self.wire(tag, data)
+    match os::getenv("JET_ACP_WIRE")
+      case false
+        :ok
+      case path
+        file::write_file(path, erlang::iolist_to_binary([tag, data, "\n"]), [:append])
+    end
+  end
+end

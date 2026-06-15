@@ -1,0 +1,31 @@
+# Web-enabled agent: keyless web_search (DuckDuckGo instant-answer) + web_fetch (httpc),
+# both native `tool`s backed by jet_web. The same two lines work in ANY agent -- and because
+# they are plain local tools, they also reach shape coders' terminal nodes (node_tools).
+#   ./jet -r agent_web_demo::run examples/agent_web_demo.jet      (needs ollama + network)
+module agent_web_demo
+  agent Researcher
+    model "ollama:qwen3.6:35b-a3b"
+    tool_fuel 12
+    role "You are a research assistant. Use web_search(query) to look things up and web_fetch(url) to read a page, then answer concisely based on what you found."
+
+    tool web_search(query: String) do |q|
+      jet_web::search(q)
+    end
+
+    tool web_fetch(url: String) do |u|
+      jet_web::fetch(u)
+    end
+
+    ask research(task)
+  end
+
+  def self.run()
+    r = agent_web_demo::Researcher.spawn()
+    match r.research("Use web_search to find what the Erlang programming language is, then answer in ONE sentence.").await()
+      case {:ok, text}
+        io::format("=> ~ts~n", [text])
+      case other
+        io::format("=> ~p~n", [other])
+    end
+  end
+end

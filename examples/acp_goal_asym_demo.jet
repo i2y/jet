@@ -1,0 +1,25 @@
+module acp_goal_asym_demo
+  # Asymmetric backends: each ROLE in a shape can use its OWN backend. Here a Goal loop
+  # pairs a strong, expensive DOER with a cheap, fast CHECKER -- the big model does the hard
+  # work and a small model handles the yes/no acceptance check (don't burn the 35B on
+  # verification).
+  #
+  #   model:    the doer that ATTEMPTS the goal each round
+  #   checker:  the verifier that decides whether `accept:` is MET
+  #
+  # Both backends are the USER's choice -- swap in `drives: "claude-code-acp"` for either
+  # role, or different Ollama models. Nothing here is hardcoded into the shape itself.
+  #
+  #   ./jet acp-serve acp_goal_asym_demo::G::handle examples/acp_goal_asym_demo.jet
+  #
+  # Try: "Explain what functional programming is to a beginner."
+  # -> the 35B writes the answer; the small checker model judges it against the accept
+  #    condition (<=3 sentences, plain words), looping until met.
+  agent G
+    runner Goal(model:   "ollama:qwen3.6:35b-a3b",
+                checker: "ollama:hf.co/mmnga/Llama-3.1-Swallow-8B-Instruct-v0.5-gguf:Q4_K_M",
+                max_rounds: 2,
+                accept: "The answer is at most 3 sentences and written in plain words a beginner can understand.")
+    ask handle(goal)
+  end
+end

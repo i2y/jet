@@ -1,19 +1,19 @@
-# マルチエージェントLLMシステム
-# Jetの全機能を1ファイルで: needs / platform / peers / Actor / Supervisor
+# Multi-agent LLM system
+# All of Jet's features in one file: needs / platform / peers / Actor / Supervisor
 #
-# テスト:         ./jet -r Agents::test_run examples/llm_agents/Agents.jet
-# 本番:           ANTHROPIC_API_KEY=... ./jet -r Agents::run examples/llm_agents/Agents.jet
-# クラッシュ復旧: ./jet -r Agents::crash_demo examples/llm_agents/Agents.jet
-# 並列リサーチ:   ./jet -r Agents::parallel_demo examples/llm_agents/Agents.jet
-# モニタリング:   ./jet -r Agents::monitor_demo examples/llm_agents/Agents.jet
+# Test:              ./jet -r Agents::test_run examples/llm_agents/Agents.jet
+# Production:        ANTHROPIC_API_KEY=... ./jet -r Agents::run examples/llm_agents/Agents.jet
+# Crash recovery:    ./jet -r Agents::crash_demo examples/llm_agents/Agents.jet
+# Parallel research: ./jet -r Agents::parallel_demo examples/llm_agents/Agents.jet
+# Monitoring:        ./jet -r Agents::monitor_demo examples/llm_agents/Agents.jet
 
 module Agents
   behavior supervisor
 
-  # --- needs: 副作用の抽象宣言 ---
+  # --- needs: abstract declaration of side effects ---
   needs LlmProvider
 
-  # --- platform: 実装の注入 ---
+  # --- platform: injecting an implementation ---
   platform Production
     provide LlmProvider with ClaudeLlmProvider
   end
@@ -48,7 +48,7 @@ module Agents
     end
   end
 
-  # --- peers: Actor間依存の宣言 ---
+  # --- peers: declaring dependencies between Actors ---
   actor Writer
     peers researcher: Researcher
     expose write(topic)
@@ -78,7 +78,7 @@ module Agents
     end
   end
 
-  # --- 監視付き Writer（monitor + on_message デモ用）---
+  # --- Monitored Writer (for the monitor + on_message demo) ---
   actor MonitoredWriter
     expose write(topic), crash_count()
 
@@ -86,7 +86,7 @@ module Agents
       @system = "You are a skilled writer. Write a short paragraph (3-4 sentences)."
       @researcher = researcher_pid
       @crash_count = 0
-      # Researcher を監視 — クラッシュしたら {:DOWN, ...} が飛んでくる
+      # Monitor the Researcher — a {:DOWN, ...} message arrives if it crashes
       monitor(@researcher)
       Agents::activate(activate)
     end
@@ -94,7 +94,7 @@ module Agents
     def on_message({:DOWN, _ref, :process, _pid, reason})
       @crash_count = @crash_count + 1
       puts("[MonitoredWriter] Researcher crashed! (reason: ~p, crash #~p)", [reason, @crash_count])
-      # Supervisor が再起動するのを待って再監視
+      # Wait for the Supervisor to restart it, then re-monitor
       timer::sleep(50)
       new_pid = pid(:researcher)
       @researcher = new_pid
@@ -132,7 +132,7 @@ module Agents
     {:ok, {{:one_for_one, 3, 60}, children}}
   end
 
-  # --- 本番実行（Claude API使用）---
+  # --- Production run (uses the Claude API) ---
 
   def self.run()
     Agents::start_link(:Production)
@@ -143,7 +143,7 @@ module Agents
     puts(article)
   end
 
-  # --- テスト実行（モック、APIキー不要）---
+  # --- Test run (mock, no API key needed) ---
 
   def self.test_run()
     Agents::start_link(:Test)
@@ -154,7 +154,7 @@ module Agents
     puts(article)
   end
 
-  # --- クラッシュ復旧デモ（Supervisor による自動復旧）---
+  # --- Crash recovery demo (automatic recovery by the Supervisor) ---
 
   def self.crash_demo()
     Agents::start_link(:Test)
@@ -182,7 +182,7 @@ module Agents
     timer::sleep(50)
   end
 
-  # --- 並列リサーチデモ（async/await）---
+  # --- Parallel research demo (async/await) ---
 
   def self.parallel_demo()
     Agents::start_link(:Test)
@@ -194,14 +194,14 @@ module Agents
     topics = ["Erlang", "BEAM VM", "OTP framework"]
     puts("Researching ~p topics in parallel...\n", [topics.length()])
 
-    # map で全トピックを同時に非同期発行 → map で全結果を収集
+    # map fires all topics asynchronously at once -> map gathers all the results
     results = topics.map {|t| researcher.async().research(t)}
                     .map {|f| f.await()}
 
     puts("--- Results ---")
     results.each {|r| puts("  ~s", [r])}
 
-    # Writer に全リサーチ結果をまとめて渡す
+    # Hand all the research findings to the Writer at once
     combined = results.reduce("") {|acc, r| acc ++ r ++ "\n"}
     puts("\n--- Writer combines all research ---")
     article = writer.write_from_facts(combined)
@@ -213,7 +213,7 @@ module Agents
     timer::sleep(50)
   end
 
-  # --- モニタリングデモ（monitor + on_message でクラッシュ検知）---
+  # --- Monitoring demo (crash detection via monitor + on_message) ---
 
   def self.monitor_demo()
     Agents::start_link(:Test)
@@ -222,7 +222,7 @@ module Agents
     puts("=== Monitor Demo ===\n")
     puts("Researcher pid: ~p", [researcher_pid])
 
-    # MonitoredWriter は Researcher を monitor する
+    # MonitoredWriter monitors the Researcher
     mw = Agents::MonitoredWriter.spawn(:Test, researcher_pid)
 
     puts("\n--- 1. Normal write ---")
@@ -231,7 +231,7 @@ module Agents
 
     puts("\n--- 2. Crash the researcher ---")
     kill(:researcher)
-    # on_message が {:DOWN, ...} を受け取り、再監視するのを待つ
+    # Wait for on_message to receive {:DOWN, ...} and re-monitor
     timer::sleep(200)
 
     puts("\n--- 3. Write again (auto-reconnected) ---")

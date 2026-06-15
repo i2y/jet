@@ -1,0 +1,91 @@
+module jet_plan
+  # Planning primitives for the shape runners. The headline use is jet_flow: a node that
+  # fails or returns nothing is now RETRIED -- and re-attempts REPLAN (the caller reframes
+  # the approach via the attempt number) -- instead of being recorded as a bare failure and
+  # skipped. Also a small revisable plan-state struct that shapes can track steps with.
+
+  # Run `run.(attempt_no)` up to `max` times until `accept.(result)` holds. A crash counts
+  # as a failure (caught, so one bad attempt never kills the turn). attempt_no is 1-based so
+  # the caller can vary the approach on a retry (a lightweight replan).
+  #   -> {:ok, result, attempts} | {:failed, last, attempts}
+  def self.attempt(run, accept, max)
+    attempt_loop(run, accept, max, 1)
+  end
+
+  def self.attempt_loop(run, accept, max, n)
+    outcome = try
+      {:ran, run.(n)}
+    catch e
+      {:crashed, e.get(:reason)}
+    end
+    match outcome
+      case {:ran, out}
+        if accept.(out)
+          {:ok, out, n}
+        else
+          retry_or_fail(run, accept, max, n, out)
+        end
+      case {:crashed, reason}
+        retry_or_fail(run, accept, max, n, {:error, reason})
+    end
+  end
+
+  def self.retry_or_fail(run, accept, max, n, last)
+    if n >= max
+      {:failed, last, n}
+    else
+      attempt_loop(run, accept, max, n + 1)
+    end
+  end
+
+  # --- revisable plan-state: an ordered list of steps, each {id, status, attempts}.
+  # status flows pending -> in_progress -> completed | failed; a failed step can be
+  # re-marked and retried in place (the "revisable" part). ---
+
+  def self.new(ids)
+    lists::map(do |id|
+      {id: id, status: :pending, attempts: 0}
+    end, ids)
+  end
+
+  def self.mark(plan, id, status)
+    lists::map(do |s|
+      if maps::get(:id, s) == id
+        maps::put(:status, status, s)
+      else
+        s
+      end
+    end, plan)
+  end
+
+  def self.bump(plan, id)
+    lists::map(do |s|
+      if maps::get(:id, s) == id
+        maps::put(:attempts, maps::get(:attempts, s) + 1, s)
+      else
+        s
+      end
+    end, plan)
+  end
+
+  def self.status_of(plan, id)
+    match lists::filter(do |s| maps::get(:id, s) == id end, plan)
+      case [s, *_]
+        maps::get(:status, s)
+      case _
+        :unknown
+    end
+  end
+
+  def self.done?(plan)
+    lists::all(do |s| maps::get(:status, s) == :completed end, plan)
+  end
+
+  # {status => count} over the plan (e.g. for a progress line).
+  def self.counts(plan)
+    lists::foldl(do |s, acc|
+      st = maps::get(:status, s)
+      maps::put(st, maps::get(st, acc, 0) + 1, acc)
+    end, maps::new(), plan)
+  end
+end

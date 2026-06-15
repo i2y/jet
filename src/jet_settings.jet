@@ -1,0 +1,40 @@
+module jet_settings
+  # Backend settings the Jet Console overrides (via env vars it sets from its Settings UI).
+  # Each getter falls back to a DEFAULT, so with NOTHING configured the built-in agents behave
+  # exactly as before. This is what makes the built-ins portable: another user points these at
+  # THEIR local models / coding agent / Ollama endpoint without editing the agent definitions.
+
+  # os::getenv returns a charlist, or `false` when unset -> use the default (also for "").
+  def self.get(env, default)
+    match os::getenv(env)
+      case false
+        default
+      case []
+        default
+      case v
+        erlang::list_to_binary(v)
+    end
+  end
+
+  # the strong/general local model (coding, reasoning). Empty by default -- set JET_MODEL_STRONG
+  # (or pick it in the Console's Settings) to a local Ollama model you have installed.
+  def self.strong()
+    get("JET_MODEL_STRONG", <<>>)
+  end
+
+  # a cheap/fast local model for simple or quick tasks (capability-based, not language-specific).
+  # Empty by default -- set JET_MODEL_CHEAP (or pick it in Settings) to any small local model.
+  def self.cheap()
+    get("JET_MODEL_CHEAP", <<>>)
+  end
+
+  # the coding agent driven over ACP (an external command).
+  def self.coding_drive()
+    get("JET_CODING_DRIVE", <<"claude-code-acp">>)
+  end
+
+  # the Ollama HTTP endpoint.
+  def self.ollama_url()
+    get("JET_OLLAMA_URL", <<"http://localhost:11434">>)
+  end
+end

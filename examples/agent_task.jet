@@ -1,0 +1,21 @@
+# `task` -> TurnResult populated from the ACP stream (tool_calls/plan/edits/...).
+#   ./jet -r agent_task::run examples/agent_task.jet
+module agent_task
+  agent Worker
+    runner Acp(command: "node examples/mock_acp_task.js")
+    role "worker"
+    task do_work(instruction)
+  end
+
+  def self.run()
+    w = agent_task::Worker.spawn()
+    {:ok, tr} = w.do_work("fix tests").await()
+    io::format("text       => ~ts~n", [tr.text()])
+    io::format("ok?        => ~p~n", [tr.ok?()])
+    io::format("tool_calls => ~p~n", [tr.tool_calls()])
+    io::format("plan       => ~p~n", [tr.plan()])
+    io::format("edits      => ~p~n", [tr.edits()])
+    io::format("commands   => ~p~n", [tr.commands()])
+    io::format("files      => ~p~n", [tr.files()])
+  end
+end

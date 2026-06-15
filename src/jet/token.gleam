@@ -53,6 +53,7 @@ pub type Token {
   Expose
   Peers
   Actor
+  Agent
 
   // Operators
   Plus
@@ -163,6 +164,7 @@ pub fn token_name(tok: Token) -> String {
     Expose -> "expose"
     Peers -> "peers"
     Actor -> "actor"
+    Agent -> "agent"
     Plus -> "+"
     Minus -> "-"
     Star -> "*"

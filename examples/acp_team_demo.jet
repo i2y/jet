@@ -1,0 +1,17 @@
+# An ALL-CLAUDE fleet: every member AND the lead is a real Claude Code agent
+# (drives at the fleet level), running in parallel, supervised and crash-isolated
+# behind one ACP face. No Wikipedia grounding -- each Claude member researches
+# CURRENT facts with its own web tools (the roles ask it to). The lead (also
+# Claude) synthesizes per `reduce`. object = actor = agent, at full power.
+#   jet acp-serve acp_team_demo::Team::review examples/acp_team_demo.jet
+module acp_team_demo
+  agent Team
+    runner Fleet(drives: "claude-code-acp",
+                 reduce: "Weigh the team's findings and give one clear, specific recommendation backed by concrete, current data.",
+                 members: [
+      {name: "Risks",   role: "You are a risk analyst. Use your tools to research current facts, then name the biggest risks in 2-3 specific sentences with concrete data."},
+      {name: "Upside",  role: "You are an optimist. Use your tools to research current facts, then name the biggest benefits in 2-3 specific sentences."},
+      {name: "Skeptic", role: "You are a hard skeptic. Use your tools to research current facts, then say why it might fail in 2-3 specific sentences."}])
+    ask review(topic)
+  end
+end

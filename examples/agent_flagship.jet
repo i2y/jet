@@ -1,0 +1,34 @@
+# The flagship `agent` surface (compile check; model/drives need a live backend
+# + auth to actually run — the offline-runnable demos are agent_v2 / agent_compose).
+module agent_flagship
+  # a thinking machine: answers, typed via structured output
+  agent Researcher
+    model "claude-opus-4-8"                # => runner Llm
+    role "Research rigorously; cite sources."
+
+    ask research(question) -> {answer: String, sources: [String]}
+    ask classify(text)     -> {label: String}
+
+    tool web_search
+  end
+
+  # an external coding agent: does work, returns a TurnResult
+  agent Coder
+    drives "claude-code-acp"               # => runner Acp
+    role "Test-driven. Minimal diffs."
+    workspace "./src"                      # fs sandbox root
+    memory :session
+
+    task fix(description)
+    task refactor(target, goal)
+
+    def on_approval(req)                   # permission policy
+      match req.get(:kind)
+        case "execute"
+          :deny
+        case _
+          :allow
+      end
+    end
+  end
+end

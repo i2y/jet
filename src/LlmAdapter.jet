@@ -12,14 +12,17 @@ module LlmAdapter
     "https://api.openai.com/v1/chat/completions"
   end
 
-  # --- Default Models ---
-
-  def self.default_model(:claude)
-    "claude-sonnet-4-20250514"
-  end
-
-  def self.default_model(:openai)
-    "gpt-4o"
+  # --- Model is REQUIRED (no vendor default) ---
+  # The model id is the user's choice; we don't ship a default (a hardcoded snapshot
+  # goes stale and assumes a provider). Fail clearly instead.
+  def self.require_model(opts)
+    match maps::find(:model, opts)
+      case {:ok, m}
+        m
+      case :error
+        erlang::error({:jet_no_model,
+          <<"no model configured: set model: in the Llm opts (a provider model id, e.g. an Anthropic or OpenAI model)">>})
+    end
   end
 
   # --- Headers ---

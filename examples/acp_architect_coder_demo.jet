@@ -1,0 +1,24 @@
+# Goal + Architect GENERAL-PURPOSE coding agent (drives = REAL tools). For each Goal
+# attempt, ARCHITECT designs a team for THIS task -- it picks the best shape (Codegen for
+# trying parallel implementations, or Pipeline implement -> test -> review) AND writes the
+# member roles -- staffs it with CLAUDE CODE agents (full file/shell tools), and runs it.
+# Goal's checker (also Claude Code) VERIFIES the acceptance condition by ACTUALLY running
+# it, and re-attempts (Architect re-designs) until met.
+#
+# vs Jet Verified Coder (Goal+Flow): there YOU get a dataflow DAG; here the team SHAPE is
+# chosen per task -- good when you don't know the best structure up front. Both genuinely
+# write + run code on drives.
+#
+# SLOW + uses your Claude Code (many calls/round). Needs claude-code-acp.
+#   jet acp-serve acp_architect_coder_demo::ArchitectCoder::handle examples/acp_architect_coder_demo.jet
+# Try: "Add an is_prime(n) function to primes.py and prove it works on the first 10 primes."
+module acp_architect_coder_demo
+  agent ArchitectCoder
+    runner Goal(accept: "the requested code or change is implemented in real files AND a SHOWN real command or test run confirms it works -- the expected behavior must appear in actual terminal output, not a described or simulated result",
+                via: {name: :Architect},
+                surface: true,
+                max_rounds: 3,
+                drives: "claude-code-acp")
+    ask handle(task)
+  end
+end

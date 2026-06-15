@@ -61,20 +61,23 @@ fn rename_toplevel(stmt: ast.TopLevel) -> ast.TopLevel {
     ast.FuncDef(name, line, args, guards, body, context) -> {
       // Initialize env with variables from function args
       let env = collect_pattern_vars_list(args, dict.new())
-      // Mark actor context so @attr uses erlang:put/get
-      let env = case context {
-        ast.ActorInstanceMethod -> dict.insert(env, "__actor__", -1)
-        _ -> env
-      }
-      // Rename body sequentially
+      // Rename body sequentially. Actor instance state now lives in the
+      // gen_server state object (a jet_object passed as `self`), so @attr uses
+      // the same self-tuple threading as classes — no actor env marker needed.
       let #(new_body, final_env) = rename_body(body, env)
-      // Auto-append self return for initialize methods
-      let new_body = case string.ends_with(name, "_instance_method_initialize") {
-        True -> {
-          let self_name = versioned_name("self", final_env)
-          list.append(new_body, [ast.Var(self_name, line)])
-        }
-        False -> new_body
+      let self_name = versioned_name("self", final_env)
+      let is_initialize =
+        string.ends_with(name, "_instance_method_initialize")
+      let new_body = case is_initialize, context {
+        // initialize returns the threaded self object directly (class & actor)
+        True, _ -> list.append(new_body, [ast.Var(self_name, line)])
+        // other actor methods return {:__jet_actor_return__, Reply, NewSelf}
+        // so the gen_server callbacks can thread state functionally while
+        // still replying with the method's value
+        False, ast.ActorInstanceMethod ->
+          wrap_actor_return(new_body, self_name, line)
+        // ordinary class / module methods are unchanged
+        False, _ -> new_body
       }
       ast.FuncDef(name, line, args, guards, new_body, context)
     }
@@ -91,6 +94,29 @@ fn rename_toplevel(stmt: ast.TopLevel) -> ast.TopLevel {
     ast.UsingFunc(func, overrides) ->
       ast.UsingFunc(rename_toplevel(func), overrides)
     _ -> stmt
+  }
+}
+
+/// Wrap an actor method body so it returns {:__jet_actor_return__, Reply, Self}.
+/// The gen_server callbacks pattern-match this tag to thread the new self as
+/// state while replying with Reply. Untagged returns (e.g. mixin/Kernel
+/// methods) are treated as plain replies that leave actor state unchanged.
+fn wrap_actor_return(
+  body: List(ast.Expr),
+  self_name: String,
+  line: Int,
+) -> List(ast.Expr) {
+  let tag = ast.AtomLit("__jet_actor_return__", line)
+  let self_var = ast.Var(self_name, line)
+  case list.reverse(body) {
+    [] -> [ast.TupleLit([tag, ast.AtomLit("ok", line), self_var], line)]
+    [last, ..rest_rev] -> {
+      let rest = list.reverse(rest_rev)
+      let reply_bind = ast.Assign(ast.Var("_jet_reply", line), last, line)
+      let ret =
+        ast.TupleLit([tag, ast.Var("_jet_reply", line), self_var], line)
+      list.append(rest, [reply_bind, ret])
+    }
   }
 }
 
@@ -443,6 +469,22 @@ fn rename_expr(expr: ast.Expr, env: VarEnv) -> ast.Expr {
     // Catch
     ast.CatchExpr(inner, line) ->
       ast.CatchExpr(rename_expr(inner, env), line)
+
+    // try/catch/finally — each block is its own scope; bindings do not escape
+    // (a try body may have aborted, so its assignments can't be relied on after).
+    // The catch var is forced to base version 0 so references render unchanged.
+    ast.TryExpr(body, has_catch, catch_var, catch_body, finally, line) -> {
+      let #(new_body, _) = rename_body(body, env)
+      let catch_env = case has_catch {
+        True -> dict.insert(env, catch_var, 0)
+        False -> env
+      }
+      let #(new_catch, _) = rename_body(catch_body, catch_env)
+      let #(new_finally, _) = rename_body(finally, env)
+      ast.TryExpr(new_body, has_catch, catch_var, new_catch, new_finally, line)
+    }
+
+    ast.RaiseExpr(value, line) -> ast.RaiseExpr(rename_expr(value, env), line)
 
     // Record expressions
     ast.RecordExpr(name, fields, line) ->

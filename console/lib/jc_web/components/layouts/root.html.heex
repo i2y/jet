@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="csrf-token" content={get_csrf_token()} />
+    <.live_title default="Jc" suffix=" · Phoenix Framework" phx-no-format>{assigns[:page_title]}</.live_title>
+    <link rel="stylesheet" href={~p"/assets/css/app.css"} />
+    <%!-- CodeMirror 5 (vendored, self-contained) for the file viewer/editor; modes load after core --%>
+    <link rel="stylesheet" href={~p"/assets/vendor/cm/codemirror.css"} />
+    <script defer src={~p"/assets/vendor/cm/codemirror.js"}></script>
+    <script defer src={~p"/assets/vendor/cm/mode/javascript.js"}></script>
+    <script defer src={~p"/assets/vendor/cm/mode/python.js"}></script>
+    <script defer src={~p"/assets/vendor/cm/mode/ruby.js"}></script>
+    <script defer src={~p"/assets/vendor/cm/mode/markdown.js"}></script>
+    <script defer src={~p"/assets/vendor/cm/mode/clike.js"}></script>
+    <script defer src={~p"/assets/vendor/cm/mode/xml.js"}></script>
+    <%!-- xterm.js (vendored) for the in-console terminal --%>
+    <link rel="stylesheet" href={~p"/assets/vendor/xterm/xterm.css"} />
+    <script defer src={~p"/assets/vendor/xterm/xterm.js"}></script>
+    <script defer src={~p"/assets/vendor/xterm/addon-fit.js"}></script>
+    <%!-- highlight.js (code blocks) + mermaid (diagrams) + a dark CodeMirror theme --%>
+    <link rel="stylesheet" href={~p"/assets/vendor/hl/github-dark.min.css"} />
+    <script defer src={~p"/assets/vendor/hl/highlight.min.js"}></script>
+    <script defer src={~p"/assets/vendor/mermaid.min.js"}></script>
+    <link rel="stylesheet" href={~p"/assets/vendor/cm/theme-material-darker.css"} />
+    <script defer type="text/javascript" src={~p"/assets/js/app.js"}>
+    </script>
+    <script>
+      (() => {
+        const systemTheme = () => matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+
+        const setTheme = (theme) => {
+          if (theme === "system") {
+            localStorage.removeItem("phx:theme");
+            document.documentElement.setAttribute("data-theme", systemTheme());
+            document.documentElement.setAttribute("data-theme-source", "system");
+          } else {
+            localStorage.setItem("phx:theme", theme);
+            document.documentElement.setAttribute("data-theme", theme);
+            document.documentElement.setAttribute("data-theme-source", "user");
+          }
+        };
+        if (!document.documentElement.hasAttribute("data-theme")) {
+          setTheme(localStorage.getItem("phx:theme") || "system");
+        }
+        window.addEventListener("storage", (e) => e.key === "phx:theme" && setTheme(e.newValue || "system"));
+        
+        window.addEventListener("phx:set-theme", (e) => setTheme(e.target.dataset.phxTheme));
+
+        matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
+          if (document.documentElement.getAttribute("data-theme-source") === "system") {
+            document.documentElement.setAttribute("data-theme", systemTheme());
+          }
+        });
+      })();
+    </script>
+  </head>
+  <body>
+    {@inner_content}
+  </body>
+</html>

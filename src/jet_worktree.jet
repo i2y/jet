@@ -1,0 +1,56 @@
+module jet_worktree
+  # Per-member git worktrees, so N coding agents can edit IN PARALLEL without
+  # clobbering each other's files. Each member works in its own checkout at HEAD;
+  # we capture its changes as a diff, then remove the worktree. (Same idea as the
+  # Claude Code Workflow's isolation:'worktree'.) Runs `git` from the BEAM cwd,
+  # which is the served project's root.
+
+  # create a fresh detached worktree at HEAD -> {:ok, path_binary} | {:error, _}.
+  # The label is a member NAME (e.g. "Implementer A") -> SLUGIFY it so spaces/shell
+  # metacharacters can't break or inject into the `git` command, and quote the path.
+  def self.create(label)
+    path = "/tmp/jet_wt_" ++ slugify(to_list(label)) ++ "_" ++ erlang::integer_to_list(erlang::unique_integer([:positive]))
+    os::cmd("git worktree add --detach '" ++ path ++ "' HEAD 2>&1")
+    if filelib::is_dir(path)
+      {:ok, erlang::list_to_binary(path)}
+    else
+      {:error, :worktree_create_failed}
+    end
+  end
+
+  # the changes a member made in its worktree (incl. new files), as a unified diff.
+  def self.diff(path)
+    p = to_list(path)
+    os::cmd("git -C '" ++ p ++ "' add -A 2>&1")
+    erlang::iolist_to_binary(os::cmd("git -C '" ++ p ++ "' --no-pager diff --cached 2>&1"))
+  end
+
+  def self.remove(path)
+    os::cmd("git worktree remove --force '" ++ to_list(path) ++ "' 2>&1")
+    :ok
+  end
+
+  # keep only [A-Za-z0-9_]; everything else (spaces, quotes, slashes, multibyte)
+  # becomes '_'. The unique_integer keeps the path collision-free regardless.
+  def self.slugify(chars)
+    lists::map({|c| safe_char(c)}, chars)
+  end
+
+  def self.safe_char(c)
+    if (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122)
+      c
+    else
+      95
+    end
+  end
+
+  def self.to_list(x)
+    if erlang::is_binary(x)
+      erlang::binary_to_list(x)
+    elsif erlang::is_atom(x)
+      erlang::atom_to_list(x)
+    else
+      x
+    end
+  end
+end

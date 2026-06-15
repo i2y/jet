@@ -1,0 +1,81 @@
+module jet_debate
+  # Debate shape (mesh): several agents argue over R rounds; each round every agent
+  # sees the debate so far and states/refines its position; a judge then concludes.
+  # (multi-agent debate -- improves factuality/reasoning by cross-examination.)
+  # Structurally a mesh, unlike Fleet (star), Pipeline (chain), or Refine (loop).
+  #   runner Debate(agents: [{name,role}...], rounds: 2, judge: {role:"..."})
+  # NOTE: `agent` is a reserved keyword in Jet -- members are bound as `member`/`a`.
+
+  def self.turn(config, method, args, schema)
+    jet_http_ffi::ensure_started()
+    opts = jet_backend::opts(config)
+    model = maps::get(:model, opts, nil)
+    drives = maps::get(:drives, opts, nil)
+    members = lists::map({|m| add_node(m, model, drives)}, maps::get(:agents, opts, []))   # one trace node per debater
+    rounds = maps::get(:rounds, opts, 2)
+    judge_spec = maps::get(:judge, opts, maps::new())
+    topic = jet_backend::to_bin(jet_acp::build_prompt(config, method, args))
+    transcript = run_rounds(members, topic, <<>>, rounds, 1, model, drives)
+    verdict = judge(judge_spec, topic, transcript, model, drives)   # judge emits the verdict once
+    if verdict == <<>>
+      jet_acp::emit_event({:text, <<"(no verdict)">>})
+    end
+    jet_backend::coerce(verdict, schema)
+  end
+
+  def self.run_rounds(members, topic, transcript, rounds, round, model, drives)
+    if round > rounds
+      transcript
+    else
+      t2 = lists::foldl({|a, tr| speak(a, topic, tr, round, model, drives)}, transcript, members)
+      run_rounds(members, topic, t2, rounds, round + 1, model, drives)
+    end
+  end
+
+  # a trace node per debater, so each agent's per-round arguments nest UNDER that agent.
+  def self.add_node(m, model, drives)
+    name = jet_backend::to_bin(maps::get(:name, m, <<"agent">>))
+    bk = jet_backend::bk_label(maps::get(:model, m, model), maps::get(:drives, m, drives))
+    maps::put(:node, jet_acp::trace_node(erlang::iolist_to_binary(["💬 ", name, " · ", bk]), "ok"), m)
+  end
+
+  # one member's turn: argue seeing the whole debate so far, append to the transcript.
+  def self.speak(member, topic, transcript, round, model, drives)
+    name = jet_backend::to_bin(maps::get(:name, member, <<"agent">>))
+    role = jet_backend::to_bin(maps::get(:role, member, <<"You argue your position.">>))
+    backend = jet_backend::resolve(maps::get(:drives, member, nil), maps::get(:model, member, nil), drives, model)
+    rn = erlang::integer_to_binary(round)
+    input = erlang::iolist_to_binary(["Debate topic: ", topic, "\n\nDebate so far:\n", so_far(transcript),
+      "\n\nRound ", rn, ": as ", name, ", state or refine YOUR position, responding to the others. Be concise (2-3 sentences)."])
+    old = jet_acp::trace_set_parent(maps::get(:node, member, nil))
+    rid = jet_acp::next_trace_id()
+    lbl = erlang::iolist_to_binary(["💬 round ", rn])
+    jet_acp::emit_trace(rid, lbl, "running")
+    arg = jet_backend::run_silent(backend, role, input)
+    jet_acp::emit_trace(rid, lbl, "ok")
+    jet_acp::trace_set_parent(old)
+    erlang::iolist_to_binary([transcript, "\n", name, " (round ", rn, "): ", arg, "\n"])
+  end
+
+  def self.so_far(transcript)
+    if transcript == <<>>
+      <<"(you speak first)">>
+    else
+      transcript
+    end
+  end
+
+  def self.judge(spec, topic, transcript, model, drives)
+    jet_acp::emit_event({:thought, <<"Judging the debate...">>})
+    role = jet_backend::to_bin(maps::get(:role, spec,
+      <<"You are the judge. Read the debate and give the final, reasoned conclusion. Reply in the user's language.">>))
+    backend = jet_backend::resolve(maps::get(:drives, spec, nil), maps::get(:model, spec, nil), drives, model)
+    input = erlang::iolist_to_binary(["Topic: ", topic, "\n\nFull debate:\n", transcript, "\n\nGive your final verdict."])
+    id = jet_acp::next_trace_id()
+    lbl = erlang::iolist_to_binary(["⚖️ Judge · ", jet_backend::bk_label(maps::get(:model, spec, model), maps::get(:drives, spec, drives))])
+    jet_acp::emit_trace(id, lbl, "running")
+    out = jet_backend::run_streaming(backend, role, input)   # the verdict is the answer -> emit once
+    jet_acp::emit_trace(id, lbl, "ok")
+    out
+  end
+end

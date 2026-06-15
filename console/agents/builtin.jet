@@ -1,0 +1,163 @@
+# An editable agent-definition file for the Jet Console.
+#
+# Every .jet file in this directory is a Jet module that exports:
+#   catalog/0   -> [{key_atom, "Label shown in the picker"}, ...]
+#   spawn_for/1 -> key_atom -> a spawned agent pid (driveable via :chat)
+# The console lists every file's catalog in its backend picker, hot-reloads a file when you save
+# it from the UI, and re-reads the catalog. Add an agent: add an `agent X ... ask chat(message)
+# end` block + a catalog entry + a spawn_for clause. Add a backend set: add a new .jet file.
+module builtin
+  # 1. Local assistant -- fast, Node-free, read-only file tools.
+  agent Assistant
+    model jet_settings::strong()
+    tool_fuel 12
+    role "You are a coding assistant working IN the current project directory. Use your tools (list_dir, read_file, grep) to inspect real files before answering -- never guess. Use grep(pattern, \".\") to find where something is defined or used."
+    tool list_dir(path: String) do |p| jet_fs::list(p) end
+    tool read_file(path: String) do |p| jet_fs::read(p) end
+    tool grep(pattern: String, path: String) do |pat, p| jet_fs::grep(pat, p) end
+    ask chat(message)
+  end
+
+  # 2. Local coder -- full file + shell tools, works in the project dir.
+  agent Coder
+    model jet_settings::strong()
+    tool_fuel 25
+    role "You are a coding assistant working IN the current project directory. Use read_file/write_file/edit_file/list_dir/grep and run (shell, in the project dir). Use grep(pattern, \".\") to locate code. Verify by reading/running. Be concise."
+    tool read_file(path: String) do |p| jet_fs::read(p) end
+    tool write_file(path: String, content: String) do |p, c| jet_fs::write(p, c) end
+    tool edit_file(path: String, old: String, new: String) do |p, o, n| jet_fs::edit(p, o, n) end
+    tool list_dir(path: String) do |p| jet_fs::list(p) end
+    tool grep(pattern: String, path: String) do |pat, p| jet_fs::grep(pat, p) end
+    tool run(command: String) do |c| os::cmd(erlang::binary_to_list(erlang::iolist_to_binary(c))) end
+    approve do |req|
+      jet_policy::gate(req, <<"run">>, {|r| jet_policy::deny_tokens(r, jet_policy::default_deny())})
+    end
+    ask chat(message)
+  end
+
+  # 3. Local researcher -- web search + fetch.
+  agent Researcher
+    model jet_settings::strong()
+    tool_fuel 12
+    role "You are a research assistant. Use web_search(query) and web_fetch(url), then answer concisely based on what you found."
+    tool web_search(query: String) do |q| jet_web::search(q) end
+    tool web_fetch(url: String) do |u| jet_web::fetch(u) end
+    ask chat(message)
+  end
+
+  # 4. Claude Code over ACP.
+  agent ClaudeThread
+    drives jet_settings::coding_drive()
+    ask chat(message)
+  end
+
+  # 4b. Claude Code NATIVE -- drives the `claude` CLI directly (headless streaming-JSON), with no
+  #     external ACP adapter in between. `drives "claude"` is the native marker (see
+  #     jet_claude::native?). Same UX (streamed text / tool calls / slash menu), one fewer dependency.
+  agent ClaudeNative
+    drives "claude"
+    ask chat(message)
+  end
+
+  # 5. Jet Forge -- Goal + Architect on Claude Code (verify-until-PROVEN).
+  agent Forge
+    runner Goal(
+      via: {name: :Architect},
+      drives: jet_settings::coding_drive(),
+      accept: "The task is FULLY implemented in real files (code actually written or edited, not merely described), AND proven to work by an ACTUAL execution whose REAL terminal output is included in the answer. Pre-existing tests and the build must still pass (no regressions). The goal is NOT met if any required check fails, the proving output is absent, or results are only described.",
+      surface: true,
+      max_rounds: 4)
+    ask chat(message)
+  end
+
+  # 6. Jet Verified Coder -- Goal + Flow on Claude Code.
+  agent VerifiedCoder
+    runner Goal(
+      accept: "the requested code or change is implemented in real files AND a SHOWN real command or test run confirms it works -- the expected behavior must appear in actual terminal output, not described or simulated",
+      via: {name: :Flow},
+      surface: true,
+      max_rounds: 3,
+      drives: jet_settings::coding_drive())
+    ask chat(message)
+  end
+
+  # 5b/6b. Native-Claude variants of Forge / Verified Coder -- identical, but drive the `claude` CLI
+  #        DIRECTLY (`drives "claude"`) with no ACP adapter. Autonomous, so they run headless with
+  #        the configured permission mode (set JET_CLAUDE_PERMISSION=bypassPermissions to let them
+  #        run tests, in an isolated worktree).
+  agent ForgeNative
+    runner Goal(
+      via: {name: :Architect},
+      drives: "claude",
+      accept: "The task is FULLY implemented in real files (code actually written or edited, not merely described), AND proven to work by an ACTUAL execution whose REAL terminal output is included in the answer. Pre-existing tests and the build must still pass (no regressions). The goal is NOT met if any required check fails, the proving output is absent, or results are only described.",
+      surface: true,
+      max_rounds: 4)
+    ask chat(message)
+  end
+
+  agent VerifiedCoderNative
+    runner Goal(
+      accept: "the requested code or change is implemented in real files AND a SHOWN real command or test run confirms it works -- the expected behavior must appear in actual terminal output, not described or simulated",
+      via: {name: :Flow},
+      surface: true,
+      max_rounds: 3,
+      drives: "claude")
+    ask chat(message)
+  end
+
+  # 7. Routed (local pool) -- a cheap router reads each model's PROFILE and picks the best-fit
+  #    LOCAL model ONCE per message (vs :escalate, which cycles on failure). A simple/short task ->
+  #    the cheap model; a hard coding/reasoning task -> the strong model. The pool + routing are
+  #    just runner args (models:/select:/router:) -- whatever metadata you put on an entry
+  #    (tier/lang/good_at/...) is shown to the router; nothing is hardcoded. Add `lang` per entry
+  #    if you want language-specific routing (the cheap model is NOT assumed to be any language).
+  agent Routed
+    runner Goal(
+      models: [{name: jet_settings::cheap(), tier: :cheap, good_at: "short, simple, or quick tasks; drafts; summaries; translation"},
+               {name: jet_settings::strong(), tier: :strong, good_at: "coding, math, logical reasoning, long or hard tasks"}],
+      select:  :route,
+      router:  jet_settings::strong(),
+      checker: jet_settings::strong(),
+      max_rounds: 1,
+      accept: "The reply directly and correctly answers the question.")
+    ask chat(message)
+  end
+
+  def self.catalog()
+    [{:local, "Local Assistant (ollama)"},
+     {:coder, "Jet Coder (local, edits files)"},
+     {:researcher, "Jet Researcher (local, web)"},
+     {:claude, "Claude Code (ACP)"},
+     {:claude_native, "Claude Code (native CLI)"},
+     {:forge, "Jet Forge (Goal+Architect, Claude ACP)"},
+     {:forge_native, "Jet Forge (Goal+Architect, native Claude)"},
+     {:verified, "Jet Verified Coder (Goal+Flow, Claude ACP)"},
+     {:verified_native, "Jet Verified Coder (Goal+Flow, native Claude)"},
+     {:routed, "Routed (local: cheap / strong, by task)"}]
+  end
+
+  def self.spawn_for(key)
+    match key
+      case :coder
+        builtin::Coder.spawn()
+      case :researcher
+        builtin::Researcher.spawn()
+      case :claude
+        builtin::ClaudeThread.spawn()
+      case :claude_native
+        builtin::ClaudeNative.spawn()
+      case :forge
+        builtin::Forge.spawn()
+      case :forge_native
+        builtin::ForgeNative.spawn()
+      case :verified
+        builtin::VerifiedCoder.spawn()
+      case :verified_native
+        builtin::VerifiedCoderNative.spawn()
+      case :routed
+        builtin::Routed.spawn()
+      case _
+        builtin::Assistant.spawn()
+    end
+  end
+end

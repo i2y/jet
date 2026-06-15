@@ -1,0 +1,22 @@
+# `approve do |req| ... end` desugars to an on_approval(req) method.
+#   ./jet -r agent_approve_sugar::run examples/agent_approve_sugar.jet
+module agent_approve_sugar
+  agent Guard
+    approve do |req|
+      match req.get(:kind)
+        case "execute"
+          :deny
+        case _
+          :allow
+      end
+    end
+
+    task run(instruction)
+  end
+
+  def self.run()
+    g = agent_approve_sugar::Guard.spawn()
+    io::format("approve execute => ~p~n", [gen_server::call(g, {:__jet_approval__, {kind: "execute"}})])
+    io::format("approve read    => ~p~n", [gen_server::call(g, {:__jet_approval__, {kind: "read"}})])
+  end
+end

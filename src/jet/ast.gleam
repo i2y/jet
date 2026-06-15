@@ -198,6 +198,22 @@ pub type Expr {
   // Catch
   CatchExpr(expr: Expr, line: Int)
 
+  // try / catch / finally
+  //   has_catch = False represents the `try ... finally ... end` form
+  //   catch_var is the variable bound to the caught exception in catch_body
+  //   finally is [] when there is no finally clause
+  TryExpr(
+    body: List(Expr),
+    has_catch: Bool,
+    catch_var: String,
+    catch_body: List(Expr),
+    finally: List(Expr),
+    line: Int,
+  )
+
+  // raise expr  →  erlang:error(expr)
+  RaiseExpr(value: Expr, line: Int)
+
   // Fun name/arity for exports
   FunName(name: String, arity: Int, line: Int)
 }

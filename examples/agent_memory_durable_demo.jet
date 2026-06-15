@@ -1,0 +1,27 @@
+# DURABLE native memory: `memory "<id>"` snapshots the conversation + facts to disk
+# (.jet/memory/<id>.json), so memory survives a full restart -- not just a turn. Run
+# `seed` in one process, then `recall` in a SEPARATE process: the second VM shares
+# nothing but the on-disk snapshot, yet recalls what was said in the first.
+#   ./jet -r agent_memory_durable_demo::seed   examples/agent_memory_durable_demo.jet
+#   ./jet -r agent_memory_durable_demo::recall examples/agent_memory_durable_demo.jet
+# (`memory :session` is ephemeral in-RAM; `memory :fresh` is stateless.)  needs `ollama serve`
+module agent_memory_durable_demo
+  agent Assistant
+    model "ollama:qwen3.6:35b-a3b"
+    role "You are a helpful assistant with memory. Answer in one short sentence."
+    memory "demo-durable-ada"
+    ask chat(message) -> {reply: String}
+  end
+
+  def self.seed()
+    a = agent_memory_durable_demo::Assistant.spawn()
+    io::format("seed => ~p~n",
+               [a.chat("My name is Ada and my favorite number is 42. Acknowledge briefly.").await()])
+  end
+
+  def self.recall()
+    a = agent_memory_durable_demo::Assistant.spawn()
+    io::format("recall (fresh VM, memory from disk) => ~p~n",
+               [a.chat("What is my name and my favorite number?").await()])
+  end
+end

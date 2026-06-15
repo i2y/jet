@@ -1,5 +1,7 @@
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/string
 import jet/ast.{
   type BinOperator, type Expr, type FuncContext, type Module, type TopLevel,
 }
@@ -45,6 +47,14 @@ fn peek_token(parser: Parser) -> Option(Token) {
   case parser.tokens {
     [#(tok, _), ..] -> Some(tok)
     [] -> None
+  }
+}
+
+/// the token AFTER the current one (one-token lookahead beyond peek).
+fn peek2_token(parser: Parser) -> Option(Token) {
+  case parser.tokens {
+    [_, #(tok, _), ..] -> Some(tok)
+    _ -> None
   }
 }
 
@@ -235,6 +245,7 @@ fn parse_toplevel_stmt(parser: Parser) -> ParseResult(TopLevel) {
     Some(token.At) -> parse_generic_attr(parser)
     Some(token.Class) -> parse_class_def(parser, False)
     Some(token.Actor) -> parse_class_def(parser, True)
+    Some(token.Agent) -> parse_agent_def(parser)
     Some(token.Def) -> parse_method_or_module_method(parser)
     Some(token.Needs) -> parse_needs_decl(parser)
     Some(token.Platform) -> parse_platform_def(parser)
@@ -805,6 +816,832 @@ fn parse_class_def(parser: Parser, is_actor: Bool) -> ParseResult(TopLevel) {
       }
     }
     Error(e) -> Error(e)
+  }
+}
+
+// --- Agent (desugars to an actor whose exposed methods dispatch to a runner) ---
+
+type AgentParts {
+  AgentParts(
+    runner: Expr,
+    role: Expr,
+    tools: Expr,
+    workspace: Expr,
+    memory: Expr,
+    mcp: Expr,
+    skills: Expr,
+    memory_budget: Expr,
+    tool_fuel: Expr,
+    exposed: List(#(String, List(String), Expr, String)),
+    stmts: List(TopLevel),
+  )
+}
+
+fn parse_agent_def(parser: Parser) -> ParseResult(TopLevel) {
+  let #(#(_, Position(line)), parser) = advance(parser)
+  let parser = skip_newlines(parser)
+  case expect_name(parser) {
+    Ok(#(#(name, _), parser)) -> {
+      let parser = skip_newlines(parser)
+      let init =
+        AgentParts(
+          runner: ast.NilLit(line),
+          role: ast.NilLit(line),
+          tools: ast.ListLit([], line),
+          workspace: ast.NilLit(line),
+          memory: ast.NilLit(line),
+          mcp: ast.NilLit(line),
+          skills: ast.NilLit(line),
+          memory_budget: ast.NilLit(line),
+          tool_fuel: ast.NilLit(line),
+          exposed: [],
+          stmts: [],
+        )
+      case parse_agent_body(parser, name, init) {
+        Ok(#(parts, parser)) -> {
+          let parser = skip_newlines(parser)
+          case expect(parser, token.End) {
+            Ok(#(_, parser)) -> {
+              // per-method param names → the runner labels multi-arg prompts by name
+              let params_map =
+                ast.MapExpr(
+                  list.map(parts.exposed, fn(e) {
+                    let #(mname, mparams, _schema, _kind) = e
+                    ast.MapFieldAtom(
+                      mname,
+                      ast.ListLit(
+                        list.map(mparams, fn(p) { ast.StrLit(p, line) }),
+                        line,
+                      ),
+                      line,
+                    )
+                  }),
+                  line,
+                )
+              // static config map threaded into every dispatch call
+              let config =
+                ast.MapExpr(
+                  [
+                    ast.MapFieldAtom("runner", parts.runner, line),
+                    ast.MapFieldAtom("role", parts.role, line),
+                    ast.MapFieldAtom("tools", parts.tools, line),
+                    ast.MapFieldAtom("workspace", parts.workspace, line),
+                    ast.MapFieldAtom("memory", parts.memory, line),
+                    ast.MapFieldAtom("mcp", parts.mcp, line),
+                    ast.MapFieldAtom("skills", parts.skills, line),
+                    ast.MapFieldAtom("memory_budget", parts.memory_budget, line),
+                    ast.MapFieldAtom("tool_fuel", parts.tool_fuel, line),
+                    ast.MapFieldAtom("params", params_map, line),
+                  ],
+                  line,
+                )
+              let generated = generate_agent_methods(name, parts, config, line)
+              Ok(#(
+                ast.ClassDef(
+                  name: name,
+                  line: line,
+                  methods: list.append(generated, parts.stmts),
+                  is_actor: True,
+                ),
+                parser,
+              ))
+            }
+            Error(e) -> Error(e)
+          }
+        }
+        Error(e) -> Error(e)
+      }
+    }
+    Error(e) -> Error(e)
+  }
+}
+
+/// Synthesize an actor method for each `expose`d method; its body dispatches
+/// (config, method, args, return-schema) to the agent runner. An exposed
+/// method that already has an explicit `def` body is left as-is.
+fn generate_agent_methods(
+  agent_name: String,
+  parts: AgentParts,
+  config: Expr,
+  line: Int,
+) -> List(TopLevel) {
+  // Synthesize a default empty initialize if the agent didn't define one
+  // (rebind appends `self`, so an empty body returns the fresh state object).
+  let init_name = "_" <> agent_name <> "_instance_method_initialize"
+  let default_init = case has_method_named(parts.stmts, init_name) {
+    True -> []
+    False -> [
+      ast.FuncDef(
+        name: init_name,
+        line: line,
+        args: [ast.Var("self", line)],
+        guards: [],
+        body: [],
+        context: ast.InstanceMethod,
+      ),
+    ]
+  }
+  let methods =
+    list.filter_map(parts.exposed, fn(e) {
+      let #(mname, params, schema, kind) = e
+      let prefixed = "_" <> agent_name <> "_instance_method_" <> mname
+      case has_method_named(parts.stmts, prefixed) {
+        True -> Error(Nil)
+        False ->
+          Ok(make_agent_method(
+            prefixed,
+            mname,
+            list.length(params),
+            schema,
+            kind,
+            config,
+            line,
+          ))
+      }
+    })
+  list.append(default_init, methods)
+}
+
+fn parse_agent_body(
+  parser: Parser,
+  name: String,
+  parts: AgentParts,
+) -> ParseResult(AgentParts) {
+  let parser = skip_delims(parser)
+  case peek_token(parser) {
+    Some(token.End) ->
+      Ok(#(AgentParts(..parts, stmts: list.reverse(parts.stmts)), parser))
+    Some(token.Name("runner")) ->
+      case parse_runner_decl(parser) {
+        Ok(#(r, parser)) ->
+          parse_agent_body(parser, name, AgentParts(..parts, runner: r))
+        Error(e) -> Error(e)
+      }
+    Some(token.Name("role")) -> {
+      let #(_, parser) = advance(parser)
+      case parse_binop_expr(parser, 0) {
+        Ok(#(r, parser)) ->
+          parse_agent_body(parser, name, AgentParts(..parts, role: r))
+        Error(e) -> Error(e)
+      }
+    }
+    Some(token.Name("tools")) | Some(token.Name("tool")) ->
+      case parse_tools_decl(parser) {
+        Ok(#(t, parser)) ->
+          parse_agent_body(
+            parser,
+            name,
+            AgentParts(..parts, tools: merge_tools(parts.tools, t)),
+          )
+        Error(e) -> Error(e)
+      }
+    Some(token.Name("model")) -> parse_backend(parser, name, parts, "Llm", "model")
+    Some(token.Name("drives")) ->
+      parse_backend(parser, name, parts, "Acp", "command")
+    Some(token.Name("workspace")) -> {
+      let #(_, parser) = advance(parser)
+      case parse_binop_expr(parser, 0) {
+        Ok(#(e, parser)) ->
+          parse_agent_body(parser, name, AgentParts(..parts, workspace: e))
+        Error(er) -> Error(er)
+      }
+    }
+    Some(token.Name("memory")) -> {
+      let #(_, parser) = advance(parser)
+      case parse_binop_expr(parser, 0) {
+        Ok(#(e, parser)) ->
+          parse_agent_body(parser, name, AgentParts(..parts, memory: e))
+        Error(er) -> Error(er)
+      }
+    }
+    // `mcp "cmd"` (or `mcp ["cmd1", "cmd2"]`) -> external MCP tool servers the in-process
+    // Llm runner connects to and exposes the tools of (see jet_mcp_client / jet_llm).
+    Some(token.Name("mcp")) -> {
+      let #(_, parser) = advance(parser)
+      case parse_binop_expr(parser, 0) {
+        Ok(#(e, parser)) ->
+          parse_agent_body(parser, name, AgentParts(..parts, mcp: e))
+        Error(er) -> Error(er)
+      }
+    }
+    // `skills "<dir>"` -> an Agent Skills directory; the runner injects a catalog into
+    // the prompt and offers a `skill` tool to load one on demand (see jet_skills).
+    Some(token.Name("skills")) -> {
+      let #(_, parser) = advance(parser)
+      case parse_binop_expr(parser, 0) {
+        Ok(#(e, parser)) ->
+          parse_agent_body(parser, name, AgentParts(..parts, skills: e))
+        Error(er) -> Error(er)
+      }
+    }
+    // `memory_budget N` -> the recent-window byte budget for native memory before older
+    // turns are summarized (see jet_llm mem_budget); default 24000 when unset.
+    Some(token.Name("memory_budget")) -> {
+      let #(_, parser) = advance(parser)
+      case parse_binop_expr(parser, 0) {
+        Ok(#(e, parser)) ->
+          parse_agent_body(parser, name, AgentParts(..parts, memory_budget: e))
+        Error(er) -> Error(er)
+      }
+    }
+    // `tool_fuel N` -> max tool-call rounds per turn for the Llm runner (default 6); raise
+    // it for agentic coding (read -> edit -> re-read -> ... needs many rounds).
+    Some(token.Name("tool_fuel")) -> {
+      let #(_, parser) = advance(parser)
+      case parse_binop_expr(parser, 0) {
+        Ok(#(e, parser)) ->
+          parse_agent_body(parser, name, AgentParts(..parts, tool_fuel: e))
+        Error(er) -> Error(er)
+      }
+    }
+    // `approve do |req| ... end` desugars to an on_approval(req) method (the
+    // permission policy; see the on_approval hook in jet_runtime).
+    Some(token.Name("approve")) -> {
+      let #(_, parser) = advance(parser)
+      case parse_block_lambda(parser) {
+        Ok(#(ast.Lambda(largs, _g, lbody, lline), parser)) -> {
+          let method =
+            ast.FuncDef(
+              name: "_" <> name <> "_instance_method_on_approval",
+              line: lline,
+              args: [ast.Var("self", lline), ..largs],
+              guards: [],
+              body: lbody,
+              context: ast.InstanceMethod,
+            )
+          parse_agent_body(
+            parser,
+            name,
+            AgentParts(..parts, stmts: [method, ..parts.stmts]),
+          )
+        }
+        Ok(#(_, parser)) ->
+          Error(error.ParseError(
+            current_line(parser),
+            "approve do |req| ... end",
+            "other",
+          ))
+        Error(e) -> Error(e)
+      }
+    }
+    Some(token.Expose) -> parse_exposed_into(parser, name, parts, "ask")
+    Some(token.Name("ask")) -> parse_exposed_into(parser, name, parts, "ask")
+    Some(token.Name("task")) -> parse_exposed_into(parser, name, parts, "task")
+    Some(token.Def) ->
+      case parse_class_method_def(parser, name) {
+        Ok(#(s, parser)) ->
+          parse_agent_body(
+            parser,
+            name,
+            AgentParts(..parts, stmts: [s, ..parts.stmts]),
+          )
+        Error(e) -> Error(e)
+      }
+    Some(token.Meta) ->
+      case parse_meta_stmt(parser, name) {
+        Ok(#(s, parser)) ->
+          parse_agent_body(
+            parser,
+            name,
+            AgentParts(..parts, stmts: [s, ..parts.stmts]),
+          )
+        Error(e) -> Error(e)
+      }
+    Some(token.Include) ->
+      case parse_class_include(parser, name) {
+        Ok(#(s, parser)) ->
+          parse_agent_body(
+            parser,
+            name,
+            AgentParts(..parts, stmts: [s, ..parts.stmts]),
+          )
+        Error(e) -> Error(e)
+      }
+    Some(token.Peers) ->
+      case parse_peers_decl(parser) {
+        Ok(#(s, parser)) ->
+          parse_agent_body(
+            parser,
+            name,
+            AgentParts(..parts, stmts: [s, ..parts.stmts]),
+          )
+        Error(e) -> Error(e)
+      }
+    _ ->
+      Error(error.ParseError(
+        current_line(parser),
+        "agent body (runner/role/tools/expose/def)",
+        case peek(parser) {
+          Some(#(tok, _)) -> token.token_name(tok)
+          None -> "end of file"
+        },
+      ))
+  }
+}
+
+/// `model X` / `drives "cmd"` desugar to a runner config (Llm / Acp), the
+/// readable backend-by-form sugar over `runner Llm(...)` / `runner Acp(...)`.
+fn parse_backend(
+  parser: Parser,
+  name: String,
+  parts: AgentParts,
+  runner_name: String,
+  opt_key: String,
+) -> ParseResult(AgentParts) {
+  let #(#(_, Position(line)), parser) = advance(parser)
+  case parse_binop_expr(parser, 0) {
+    Ok(#(e, parser)) -> {
+      let runner =
+        ast.MapExpr(
+          [
+            ast.MapFieldAtom("name", ast.AtomLit(runner_name, line), line),
+            ast.MapFieldAtom(
+              "opts",
+              ast.MapExpr([ast.MapFieldAtom(opt_key, e, line)], line),
+              line,
+            ),
+          ],
+          line,
+        )
+      parse_agent_body(parser, name, AgentParts(..parts, runner: runner))
+    }
+    Error(er) -> Error(er)
+  }
+}
+
+/// `expose`/`ask`/`task` all parse a comma-separated method-signature list;
+/// `kind` ("ask" | "task") tags how the result is delivered.
+fn parse_exposed_into(
+  parser: Parser,
+  name: String,
+  parts: AgentParts,
+  kind: String,
+) -> ParseResult(AgentParts) {
+  let #(_, parser) = advance(parser)
+  case parse_agent_exposed(parser, kind, []) {
+    Ok(#(ms, parser)) ->
+      parse_agent_body(
+        parser,
+        name,
+        AgentParts(..parts, exposed: list.append(parts.exposed, ms)),
+      )
+    Error(e) -> Error(e)
+  }
+}
+
+fn parse_runner_decl(parser: Parser) -> ParseResult(Expr) {
+  let #(#(_, Position(line)), parser) = advance(parser)
+  case expect_name(parser) {
+    Ok(#(#(rname, _), parser)) -> {
+      let #(opts, parser) = case peek_token(parser) {
+        Some(token.LParen) -> parse_kwargs(parser, line)
+        _ -> #(ast.MapExpr([], line), parser)
+      }
+      Ok(#(
+        ast.MapExpr(
+          [
+            ast.MapFieldAtom("name", ast.AtomLit(rname, line), line),
+            ast.MapFieldAtom("opts", opts, line),
+          ],
+          line,
+        ),
+        parser,
+      ))
+    }
+    Error(e) -> Error(e)
+  }
+}
+
+fn parse_kwargs(parser: Parser, line: Int) -> #(Expr, Parser) {
+  let #(_, parser) = advance(parser)
+  let #(fields, parser) = parse_kwargs_acc(parser, [])
+  #(ast.MapExpr(fields, line), parser)
+}
+
+fn parse_kwargs_acc(parser: Parser, acc: List(Expr)) -> #(List(Expr), Parser) {
+  let parser = skip_newlines(parser)
+  case peek(parser) {
+    Some(#(token.Name(key), Position(kline))) -> {
+      let #(_, parser) = advance(parser)
+      case peek_token(parser) {
+        Some(token.Colon) -> {
+          let #(_, parser) = advance(parser)
+          case parse_binop_expr(parser, 0) {
+            Ok(#(val, parser)) -> {
+              let field = ast.MapFieldAtom(key, val, kline)
+              let parser = skip_newlines(parser)
+              case peek_token(parser) {
+                Some(token.Comma) -> {
+                  let #(_, parser) = advance(parser)
+                  parse_kwargs_acc(parser, [field, ..acc])
+                }
+                _ -> {
+                  let parser = case peek_token(parser) {
+                    Some(token.RParen) -> {
+                      let #(_, p) = advance(parser)
+                      p
+                    }
+                    _ -> parser
+                  }
+                  #(list.reverse([field, ..acc]), parser)
+                }
+              }
+            }
+            Error(_) -> #(list.reverse(acc), parser)
+          }
+        }
+        _ -> #(list.reverse(acc), parser)
+      }
+    }
+    Some(#(token.RParen, _)) -> {
+      let #(_, parser) = advance(parser)
+      #(list.reverse(acc), parser)
+    }
+    _ -> #(list.reverse(acc), parser)
+  }
+}
+
+fn parse_tools_decl(parser: Parser) -> ParseResult(Expr) {
+  let #(#(_, Position(line)), parser) = advance(parser)
+  let #(atoms, parser) = parse_tool_names(parser, [])
+  Ok(#(ast.ListLit(atoms, line), parser))
+}
+
+/// Multiple `tool ...` lines ACCUMULATE (each decl appends to the agent's tool list)
+/// instead of the last one replacing the earlier ones.
+fn merge_tools(existing: Expr, added: Expr) -> Expr {
+  case existing, added {
+    ast.ListLit(a, line), ast.ListLit(b, _) -> ast.ListLit(list.append(a, b), line)
+    _, _ -> added
+  }
+}
+
+fn parse_tool_names(parser: Parser, acc: List(Expr)) -> #(List(Expr), Parser) {
+  case peek(parser) {
+    Some(#(token.Name(n), Position(line))) -> {
+      let #(_, parser) = advance(parser)
+      // `name(p: Type), "desc" do |p| ... end` -> a descriptor; bare `name` (+ optional
+      // `, "desc"`) -> an atom or a {name, desc} map.
+      let #(tool, parser) = case peek_token(parser) {
+        Some(token.LParen) -> parse_tool_sig(parser, n, line)
+        _ -> parse_bare_tool(parser, n, line)
+      }
+      // the tool-list separator: `, <next name>` -> another tool.
+      case peek_token(parser) {
+        Some(token.Comma) -> {
+          let #(_, parser) = advance(parser)
+          let parser = skip_newlines(parser)
+          parse_tool_names(parser, [tool, ..acc])
+        }
+        _ -> #(list.reverse([tool, ..acc]), parser)
+      }
+    }
+    _ -> #(list.reverse(acc), parser)
+  }
+}
+
+/// An optional `, "description"` after a tool's name/params. Consumes the comma ONLY
+/// when a string follows it (2-token lookahead) -- a `, <name>` is the tool-list
+/// separator and is left for parse_tool_names.
+fn parse_opt_desc(parser: Parser) -> #(Option(#(String, Int)), Parser) {
+  case peek_token(parser), peek2_token(parser) {
+    Some(token.Comma), Some(token.Str(_)) -> {
+      let #(_, parser) = advance(parser)
+      case peek(parser) {
+        Some(#(token.Str(s), Position(sline))) -> {
+          let #(_, parser) = advance(parser)
+          #(Some(#(s, sline)), parser)
+        }
+        _ -> #(None, parser)
+      }
+    }
+    _, _ -> #(None, parser)
+  }
+}
+
+/// A bare `name` tool with an optional `, "desc"`. Without a desc it stays a plain atom
+/// (back-compat); with one it becomes a {name, desc} descriptor.
+fn parse_bare_tool(parser: Parser, name: String, line: Int) -> #(Expr, Parser) {
+  let #(desc_opt, parser) = parse_opt_desc(parser)
+  case desc_opt {
+    Some(#(s, sline)) -> #(
+      ast.MapExpr(
+        [
+          ast.MapFieldAtom("name", ast.AtomLit(name, line), line),
+          ast.MapFieldAtom("desc", ast.StrLit(value: s, line: sline), sline),
+        ],
+        line,
+      ),
+      parser,
+    )
+    None -> #(ast.AtomLit(name, line), parser)
+  }
+}
+
+/// `name(p: Type, ...), "desc" do |args| ... end` -> a tool descriptor map
+/// {name, params, param_names, impl, desc?}. The `, "desc"` and the do-block are both
+/// optional; without a do-block, impl is nil (declaration only).
+fn parse_tool_sig(parser: Parser, name: String, line: Int) -> #(Expr, Parser) {
+  let #(params, parser) = parse_tool_params(advance(parser).1, [])
+  let #(desc_opt, parser) = parse_opt_desc(parser)
+  let #(impl, parser) = case peek_token(parser) {
+    Some(token.Do) ->
+      case parse_block_lambda(parser) {
+        Ok(#(lam, parser)) -> #(lam, parser)
+        Error(_) -> #(ast.NilLit(line), parser)
+      }
+    _ -> #(ast.NilLit(line), parser)
+  }
+  let base = [
+    ast.MapFieldAtom("name", ast.AtomLit(name, line), line),
+    ast.MapFieldAtom("params", ast.MapExpr(params, line), line),
+    ast.MapFieldAtom("param_names", param_names_list(params, line), line),
+    ast.MapFieldAtom("impl", impl, line),
+  ]
+  let fields = case desc_opt {
+    Some(#(s, sline)) ->
+      list.append(base, [
+        ast.MapFieldAtom("desc", ast.StrLit(value: s, line: sline), sline),
+      ])
+    None -> base
+  }
+  #(ast.MapExpr(fields, line), parser)
+}
+
+/// The param NAMES in DECLARATION order (params is [MapFieldAtom(name, type), ...]).
+/// The runtime binds tool-call args positionally by this list -- NOT maps:keys, which
+/// returns sorted order and would misbind a non-alphabetical multi-arg tool.
+fn param_names_list(params: List(Expr), line: Int) -> Expr {
+  ast.ListLit(
+    list.map(params, fn(p) {
+      case p {
+        ast.MapFieldAtom(key, _value, kline) -> ast.AtomLit(key, kline)
+        _ -> ast.NilLit(line)
+      }
+    }),
+    line,
+  )
+}
+
+/// `(p: Type, q: Type)` body -> [MapFieldAtom(p, :type), ...] (the '(' is
+/// already consumed by the caller).
+fn parse_tool_params(parser: Parser, acc: List(Expr)) -> #(List(Expr), Parser) {
+  case peek(parser) {
+    Some(#(token.RParen, _)) -> {
+      let #(_, parser) = advance(parser)
+      #(list.reverse(acc), parser)
+    }
+    Some(#(token.Name(pname), Position(pline))) -> {
+      let #(_, parser) = advance(parser)
+      let parser = case peek_token(parser) {
+        Some(token.Colon) -> advance(parser).1
+        _ -> parser
+      }
+      case parse_schema(parser) {
+        Ok(#(ty, parser)) -> {
+          let field = ast.MapFieldAtom(pname, ty, pline)
+          let parser = case peek_token(parser) {
+            Some(token.Comma) -> advance(parser).1
+            _ -> parser
+          }
+          parse_tool_params(parser, [field, ..acc])
+        }
+        Error(_) -> #(list.reverse(acc), parser)
+      }
+    }
+    _ -> #(list.reverse(acc), parser)
+  }
+}
+
+fn parse_agent_exposed(
+  parser: Parser,
+  kind: String,
+  acc: List(#(String, List(String), Expr, String)),
+) -> ParseResult(List(#(String, List(String), Expr, String))) {
+  case peek(parser) {
+    Some(#(token.Name(mname), Position(line))) -> {
+      let #(_, parser) = advance(parser)
+      let #(params, parser) = parse_param_names(parser)
+      case peek_token(parser) {
+        Some(token.ThinArrow) -> {
+          let #(_, parser) = advance(parser)
+          case parse_schema(parser) {
+            Ok(#(schema, parser)) ->
+              continue_exposed(parser, kind, #(mname, params, schema, kind), acc)
+            Error(e) -> Error(e)
+          }
+        }
+        _ ->
+          continue_exposed(
+            parser,
+            kind,
+            #(mname, params, ast.AtomLit("any", line), kind),
+            acc,
+          )
+      }
+    }
+    _ -> Ok(#(list.reverse(acc), parser))
+  }
+}
+
+fn continue_exposed(
+  parser: Parser,
+  kind: String,
+  entry: #(String, List(String), Expr, String),
+  acc: List(#(String, List(String), Expr, String)),
+) -> ParseResult(List(#(String, List(String), Expr, String))) {
+  case peek_token(parser) {
+    Some(token.Comma) -> {
+      let #(_, parser) = advance(parser)
+      let parser = skip_newlines(parser)
+      parse_agent_exposed(parser, kind, [entry, ..acc])
+    }
+    _ -> Ok(#(list.reverse([entry, ..acc]), parser))
+  }
+}
+
+// Parse a parenthesized param list of an exposed (`ask`/`task`) method, capturing each
+// param's NAME (the leading identifier; any `: Type` annotation is skipped). The names let
+// the runner label multi-arg prompts by name instead of positionally; the count is the arity.
+fn parse_param_names(parser: Parser) -> #(List(String), Parser) {
+  case peek_token(parser) {
+    Some(token.LParen) -> {
+      let #(_, parser) = advance(parser)
+      case peek_token(parser) {
+        Some(token.RParen) -> {
+          let #(_, parser) = advance(parser)
+          #([], parser)
+        }
+        _ -> collect_param_names(parser, 1, [])
+      }
+    }
+    _ -> #([], parser)
+  }
+}
+
+// One entry per param (comma-separated) so the count always equals the arity, even if a
+// param isn't a bare identifier (then a positional fallback name `argN` is used).
+fn collect_param_names(
+  parser: Parser,
+  idx: Int,
+  acc: List(String),
+) -> #(List(String), Parser) {
+  let #(nm, parser) = case peek_token(parser) {
+    Some(token.Name(n)) -> {
+      let #(_, parser) = advance(parser)
+      #(n, parser)
+    }
+    _ -> #("arg" <> int.to_string(idx), parser)
+  }
+  skip_to_param_boundary(parser, idx, [nm, ..acc])
+}
+
+fn skip_to_param_boundary(
+  parser: Parser,
+  idx: Int,
+  acc: List(String),
+) -> #(List(String), Parser) {
+  case peek_token(parser) {
+    Some(token.RParen) -> {
+      let #(_, parser) = advance(parser)
+      #(list.reverse(acc), parser)
+    }
+    Some(token.Comma) -> {
+      let #(_, parser) = advance(parser)
+      collect_param_names(parser, idx + 1, acc)
+    }
+    Some(_) -> {
+      let #(_, parser) = advance(parser)
+      skip_to_param_boundary(parser, idx, acc)
+    }
+    None -> #(list.reverse(acc), parser)
+  }
+}
+
+fn parse_schema(parser: Parser) -> ParseResult(Expr) {
+  case peek(parser) {
+    Some(#(token.Name(tname), Position(line))) -> {
+      let #(_, parser) = advance(parser)
+      Ok(#(ast.AtomLit(string.lowercase(tname), line), parser))
+    }
+    Some(#(token.LBrack, Position(line))) -> {
+      let #(_, parser) = advance(parser)
+      case parse_schema(parser) {
+        Ok(#(inner, parser)) ->
+          case expect(parser, token.RBrack) {
+            Ok(#(_, parser)) ->
+              Ok(#(ast.TupleLit([ast.AtomLit("list", line), inner], line), parser))
+            Error(e) -> Error(e)
+          }
+        Error(e) -> Error(e)
+      }
+    }
+    Some(#(token.LBrace, Position(line))) -> {
+      let #(_, parser) = advance(parser)
+      case parse_schema_fields(parser, []) {
+        Ok(#(fields, parser)) -> Ok(#(ast.MapExpr(fields, line), parser))
+        Error(e) -> Error(e)
+      }
+    }
+    _ ->
+      Error(error.ParseError(
+        current_line(parser),
+        "schema (Type, [Type], or {key: Type})",
+        "other",
+      ))
+  }
+}
+
+fn parse_schema_fields(
+  parser: Parser,
+  acc: List(Expr),
+) -> ParseResult(List(Expr)) {
+  let parser = skip_newlines(parser)
+  case peek(parser) {
+    Some(#(token.RBrace, _)) -> {
+      let #(_, parser) = advance(parser)
+      Ok(#(list.reverse(acc), parser))
+    }
+    Some(#(token.Name(key), Position(kline))) -> {
+      let #(_, parser) = advance(parser)
+      case expect(parser, token.Colon) {
+        Ok(#(_, parser)) ->
+          case parse_schema(parser) {
+            Ok(#(vschema, parser)) -> {
+              let field = ast.MapFieldAtom(key, vschema, kline)
+              let parser = skip_newlines(parser)
+              case peek_token(parser) {
+                Some(token.Comma) -> {
+                  let #(_, parser) = advance(parser)
+                  parse_schema_fields(parser, [field, ..acc])
+                }
+                _ ->
+                  case expect(parser, token.RBrace) {
+                    Ok(#(_, parser)) ->
+                      Ok(#(list.reverse([field, ..acc]), parser))
+                    Error(e) -> Error(e)
+                  }
+              }
+            }
+            Error(e) -> Error(e)
+          }
+        Error(e) -> Error(e)
+      }
+    }
+    _ -> Error(error.ParseError(current_line(parser), "schema field", "other"))
+  }
+}
+
+fn has_method_named(stmts: List(TopLevel), prefixed: String) -> Bool {
+  list.any(stmts, fn(s) {
+    case s {
+      ast.FuncDef(n, _, _, _, _, _) -> n == prefixed
+      _ -> False
+    }
+  })
+}
+
+fn make_agent_method(
+  prefixed: String,
+  mname: String,
+  arity: Int,
+  schema: Expr,
+  kind: String,
+  config: Expr,
+  line: Int,
+) -> TopLevel {
+  let arg_vars =
+    list.map(agent_arg_names(arity, 1, []), fn(nm) { ast.Var(nm, line) })
+  // returns {:jet_agent_async, config, :method, [args], schema, kind}; where
+  // kind is :ask (typed answer) or :task (TurnResult). handle_call turns this
+  // into an async turn and replies an AsyncResult future.
+  let body = [
+    ast.TupleLit(
+      [
+        ast.AtomLit("jet_agent_async", line),
+        config,
+        ast.AtomLit(mname, line),
+        ast.ListLit(arg_vars, line),
+        schema,
+        ast.AtomLit(kind, line),
+      ],
+      line,
+    ),
+  ]
+  ast.FuncDef(
+    name: prefixed,
+    line: line,
+    args: [ast.Var("self", line), ..arg_vars],
+    guards: [],
+    body: body,
+    context: ast.InstanceMethod,
+  )
+}
+
+fn agent_arg_names(n: Int, i: Int, acc: List(String)) -> List(String) {
+  case i > n {
+    True -> list.reverse(acc)
+    False -> agent_arg_names(n, i + 1, ["arg" <> int.to_string(i), ..acc])
   }
 }
 
@@ -1890,6 +2727,8 @@ fn parse_expr(parser: Parser) -> ParseResult(Expr) {
     Some(#(token.If, _)) -> parse_if_expr(parser)
     Some(#(token.Match, _)) -> parse_match_expr(parser)
     Some(#(token.Receive, _)) -> parse_receive_expr(parser)
+    Some(#(token.Try, _)) -> parse_try_expr(parser)
+    Some(#(token.Raise, _)) -> parse_raise_expr(parser)
     Some(#(token.Catch, Position(line))) -> {
       let #(_, parser) = advance(parser)
       case parse_binop_expr(parser, 0) {
@@ -2959,6 +3798,129 @@ fn parse_record_expr(parser: Parser) -> ParseResult(Expr) {
 }
 
 // --- If expression ---
+
+// --- Try / catch / finally ---
+
+fn parse_try_expr(parser: Parser) -> ParseResult(Expr) {
+  let #(#(_, Position(line)), parser) = advance(parser)
+  let parser = skip_newlines(parser)
+  case parse_try_body(parser) {
+    Ok(#(body, parser)) ->
+      case peek_token(parser) {
+        Some(token.Catch) -> {
+          let #(_, parser) = advance(parser)
+          case expect_name(parser) {
+            Ok(#(#(catch_var, _), parser)) -> {
+              let parser = skip_newlines(parser)
+              case parse_try_body(parser) {
+                Ok(#(catch_body, parser)) ->
+                  finish_try(parser, line, body, True, catch_var, catch_body)
+                Error(e) -> Error(e)
+              }
+            }
+            Error(e) -> Error(e)
+          }
+        }
+        _ -> finish_try(parser, line, body, False, "", [])
+      }
+    Error(e) -> Error(e)
+  }
+}
+
+fn finish_try(
+  parser: Parser,
+  line: Int,
+  body: List(Expr),
+  has_catch: Bool,
+  catch_var: String,
+  catch_body: List(Expr),
+) -> ParseResult(Expr) {
+  let parser = skip_newlines(parser)
+  case peek_token(parser) {
+    Some(token.Finally) -> {
+      let #(_, parser) = advance(parser)
+      let parser = skip_newlines(parser)
+      case parse_try_body(parser) {
+        Ok(#(finally_body, parser)) -> {
+          let parser = skip_newlines(parser)
+          case expect(parser, token.End) {
+            Ok(#(_, parser)) ->
+              Ok(#(
+                ast.TryExpr(
+                  body: body,
+                  has_catch: has_catch,
+                  catch_var: catch_var,
+                  catch_body: catch_body,
+                  finally: finally_body,
+                  line: line,
+                ),
+                parser,
+              ))
+            Error(e) -> Error(e)
+          }
+        }
+        Error(e) -> Error(e)
+      }
+    }
+    Some(token.End) ->
+      case has_catch {
+        True -> {
+          let #(_, parser) = advance(parser)
+          Ok(#(
+            ast.TryExpr(
+              body: body,
+              has_catch: has_catch,
+              catch_var: catch_var,
+              catch_body: catch_body,
+              finally: [],
+              line: line,
+            ),
+            parser,
+          ))
+        }
+        False ->
+          Error(error.ParseError(
+            current_line(parser),
+            "catch or finally clause in try",
+            "end",
+          ))
+      }
+    _ ->
+      Error(error.ParseError(current_line(parser), "catch, finally, or end", "other"))
+  }
+}
+
+/// Parse a sequence of statements until catch/finally/end (try block bodies).
+fn parse_try_body(parser: Parser) -> ParseResult(List(Expr)) {
+  parse_try_body_acc(parser, [])
+}
+
+fn parse_try_body_acc(
+  parser: Parser,
+  acc: List(Expr),
+) -> ParseResult(List(Expr)) {
+  let parser = skip_delims(parser)
+  case peek_token(parser) {
+    Some(token.Catch) | Some(token.Finally) | Some(token.End) | None ->
+      Ok(#(list.reverse(acc), parser))
+    _ ->
+      case parse_binop_expr(parser, 0) {
+        Ok(#(expr, parser)) -> {
+          let parser = skip_delims(parser)
+          parse_try_body_acc(parser, [expr, ..acc])
+        }
+        Error(e) -> Error(e)
+      }
+  }
+}
+
+fn parse_raise_expr(parser: Parser) -> ParseResult(Expr) {
+  let #(#(_, Position(line)), parser) = advance(parser)
+  case parse_binop_expr(parser, 0) {
+    Ok(#(value, parser)) -> Ok(#(ast.RaiseExpr(value: value, line: line), parser))
+    Error(e) -> Error(e)
+  }
+}
 
 fn parse_if_expr(parser: Parser) -> ParseResult(Expr) {
   let #(#(_, Position(line)), parser) = advance(parser)

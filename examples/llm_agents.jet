@@ -1,13 +1,13 @@
-# マルチエージェントLLMシステム — Jetの真骨頂
+# Multi-agent LLM system — Jet at its best
 # Usage: ./jet -r LlmAgents::LlmAgents.demo examples/llm_agents.jet
 #
-# 環境変数 ANTHROPIC_API_KEY を設定してから実行してください
+# Set the ANTHROPIC_API_KEY environment variable before running
 #
-# ResearcherとWriterの2つのActorが協調して動作：
-#   1. Writerがtopicを受け取る
-#   2. WriterがResearcherにリサーチを依頼（peers経由でgen_server::call）
-#   3. Researcherがリサーチ結果を返す
-#   4. Writerがリサーチ結果を元に記事を書く
+# Two Actors, Researcher and Writer, collaborate:
+#   1. Writer receives a topic
+#   2. Writer asks Researcher to do the research (gen_server::call via peers)
+#   3. Researcher returns the research findings
+#   4. Writer writes an article based on the findings
 
 module LlmAgents
   actor Researcher
@@ -48,15 +48,15 @@ module LlmAgents
 
     io::format("=== Multi-Agent LLM System ===~n~n", [])
 
-    # spawn_namedで名前付き登録 — peersが自動解決される
+    # spawn_named registers under a name — peers are resolved automatically
     researcher = LlmAgents::Researcher.spawn_named(:researcher, api_key)
     writer = LlmAgents::Writer.spawn_named(:writer, api_key)
 
-    # Writerに記事作成を依頼（内部でresearcher()がwhereis(:researcher)で自動解決）
+    # Ask the Writer to create the article (internally, researcher() auto-resolves via whereis(:researcher))
     article = writer.write("the Erlang programming language")
     io::format("~n=== Final Article ===~n~s~n", [article])
 
-    # クリーンアップ
+    # Cleanup
     gen_server::stop(writer)
     gen_server::stop(researcher)
   end

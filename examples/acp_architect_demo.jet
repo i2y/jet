@@ -1,0 +1,13 @@
+# Architect: self-generating topology. The
+# orchestrator DESIGNS the team for the task (picks a shape + writes member roles),
+# then runs it. Nothing pre-configured but the designer.
+# ALL-CLAUDE: `drives` makes the DESIGNER and the generated team's members/lead all
+# Claude Code (smart design + tool-using work). The slowest agent -- a design call
+# plus a whole generated team, all Claude -- expect minutes per turn.
+#   jet acp-serve acp_architect_demo::Architect::handle examples/acp_architect_demo.jet
+module acp_architect_demo
+  agent Architect
+    runner Architect(drives: "claude-code-acp")
+    ask handle(task)
+  end
+end

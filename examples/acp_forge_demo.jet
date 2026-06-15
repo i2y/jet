@@ -1,0 +1,33 @@
+# Jet Forge -- the best coding agent we can assemble from the current stack.
+#
+# Composition (everything that helps coding, nothing that doesn't):
+#   - drives "claude-code-acp"  : a complete FRONTIER coding agent -- full file/edit/shell
+#       tools, runs tests, AND natively reads Agent Skills (the cross-vendor SKILL.md
+#       standard: your ~/.claude/skills + ~/.agents/skills, e.g. cute/ramune) and has
+#       WebFetch/WebSearch built in. So skills + web come for free here.
+#   - runner Goal(...)          : VERIFY-UNTIL-PROVEN. The acceptance condition below is
+#       machine-checkable + ANTI-SIMULATION + no-regression; Goal's checker (also Claude
+#       Code) actually RUNS the checks and re-attempts until they genuinely pass. This is
+#       the quality multiplier over a bare coding agent.
+#   - via: {name: :Architect}   : per task, Architect designs the right team -- Codegen
+#       (parallel implementations -> pick the best) for hard problems, or Pipeline
+#       (implement -> test -> review) -- staffed with Claude Code agents. They share the
+#       cwd (files on disk), so the structure helps without losing state.
+#   - surface: true             : the design + each member's real work streams into the ACP client.
+#   Cross-session memory is handled by the ACP server layer (per client thread).
+#
+# This is the "serious coding" flagship. It is SLOW and uses your Claude Code (Goal x
+# Architect x Claude, up to max_rounds). For an all-local alternative see Jet Local Verified
+# Coder; for a single quick edit, plain Jet Coder. Needs claude-code-acp.
+#   jet acp-serve acp_forge_demo::Forge::handle examples/acp_forge_demo.jet
+module acp_forge_demo
+  agent Forge
+    runner Goal(
+      via: {name: :Architect},
+      drives: "claude-code-acp",
+      accept: "The task is FULLY implemented in real files (code actually written or edited, not merely described), AND proven to work by an ACTUAL execution whose REAL terminal output is included in the answer: run the relevant tests, or if none exist a command that clearly exercises the new or changed behavior, and show the genuine output -- never simulated, summarized, or paraphrased. Pre-existing tests and the build must still pass (no regressions). Edge cases and error handling must be addressed. The goal is NOT met if any required check fails, the proving output is absent, or results are only described.",
+      surface: true,
+      max_rounds: 4)
+    ask handle(task)
+  end
+end

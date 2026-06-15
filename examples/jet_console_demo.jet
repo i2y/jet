@@ -1,0 +1,100 @@
+# The agents the Jet Console (console/) lets you pick per thread -- the same set you'd wire as
+# ACP agent-servers, but selectable in one UI. All expose a uniform `chat(message)` so the
+# frontend drives them identically (jet_console::run_to_tagged(agent, :chat, [msg], sink, tag)).
+# They operate in the current project directory (the console sets the node cwd to it).
+#   ./jet -r jet_console_demo::run examples/jet_console_demo.jet      (needs ollama)
+module jet_console_demo
+  # 1. Local assistant -- fast, Node-free, read-only file tools.
+  agent Assistant
+    model "ollama:qwen3.6:35b-a3b"
+    tool_fuel 12
+    role "You are a coding assistant working IN the current project directory. Use your tools to inspect real files before answering -- never guess. To summarize a project: list_dir(\".\"), then read_file the README and key config files, then summarize what you actually read."
+    tool list_dir(path: String) do |p| jet_fs::list(p) end
+    tool read_file(path: String) do |p| jet_fs::read(p) end
+    ask chat(message)
+  end
+
+  # 2. Local coder -- full file + shell tools, works in the project dir (Node-free).
+  agent Coder
+    model "ollama:qwen3.6:35b-a3b"
+    tool_fuel 25
+    role "You are a coding assistant working IN the current project directory. Use read_file/write_file/edit_file/list_dir (paths relative to the project, or absolute) to read/create/edit files, and run for shell commands (they execute in the project dir). Verify your work by reading files / running them. Be concise."
+    tool read_file(path: String) do |p| jet_fs::read(p) end
+    tool write_file(path: String, content: String) do |p, c| jet_fs::write(p, c) end
+    tool edit_file(path: String, old: String, new: String) do |p, o, n| jet_fs::edit(p, o, n) end
+    tool list_dir(path: String) do |p| jet_fs::list(p) end
+    tool run(command: String) do |c| os::cmd(erlang::binary_to_list(erlang::iolist_to_binary(c))) end
+    approve do |req|
+      jet_policy::gate(req, <<"run">>, {|r| jet_policy::deny_tokens(r, jet_policy::default_deny())})
+    end
+    ask chat(message)
+  end
+
+  # 3. Local researcher -- web search + fetch.
+  agent Researcher
+    model "ollama:qwen3.6:35b-a3b"
+    tool_fuel 12
+    role "You are a research assistant. Use web_search(query) to look things up and web_fetch(url) to read a page, then answer concisely based on what you found."
+    tool web_search(query: String) do |q| jet_web::search(q) end
+    tool web_fetch(url: String) do |u| jet_web::fetch(u) end
+    ask chat(message)
+  end
+
+  # 4. Claude Code over ACP -- frontier coding agent with full file/shell tools.
+  agent ClaudeThread
+    drives "claude-code-acp"
+    ask chat(message)
+  end
+
+  # 5. Jet Forge -- Goal + Architect on Claude Code: verify-until-PROVEN, designs a team per task.
+  agent Forge
+    runner Goal(
+      via: {name: :Architect},
+      drives: "claude-code-acp",
+      accept: "The task is FULLY implemented in real files (code actually written or edited, not merely described), AND proven to work by an ACTUAL execution whose REAL terminal output is included in the answer: run the relevant tests, or if none exist a command that clearly exercises the new or changed behavior, and show the genuine output -- never simulated, summarized, or paraphrased. Pre-existing tests and the build must still pass (no regressions). Edge cases and error handling must be addressed. The goal is NOT met if any required check fails, the proving output is absent, or results are only described.",
+      surface: true,
+      max_rounds: 4)
+    ask chat(message)
+  end
+
+  # 6. Jet Verified Coder -- Goal + Flow on Claude Code: a leaner verify-until-proven loop.
+  agent VerifiedCoder
+    runner Goal(
+      accept: "the requested code or change is implemented in real files AND a SHOWN real command or test run confirms it works -- the expected behavior must appear in actual terminal output, not a described or simulated result",
+      via: {name: :Flow},
+      surface: true,
+      max_rounds: 3,
+      drives: "claude-code-acp")
+    ask chat(message)
+  end
+
+  def self.run()
+    a = jet_console_demo::Assistant.spawn()
+    io::format("=== Jet Console (terminal) — streaming the agent's reply ===~n~n", [])
+    jet_console::print_stream(a.chat("In one sentence, what is the Erlang BEAM VM?"))
+    io::format("~n--- turn complete ---~n", [])
+  end
+
+  # spawn the default (local) agent and return its pid.
+  def self.spawn_agent()
+    jet_console_demo::Assistant.spawn()
+  end
+
+  # spawn a backend by kind (the console's dropdown). All return a pid driveable via :chat.
+  def self.spawn_backend(kind)
+    match kind
+      case :coder
+        jet_console_demo::Coder.spawn()
+      case :researcher
+        jet_console_demo::Researcher.spawn()
+      case :claude
+        jet_console_demo::ClaudeThread.spawn()
+      case :forge
+        jet_console_demo::Forge.spawn()
+      case :verified
+        jet_console_demo::VerifiedCoder.spawn()
+      case _
+        jet_console_demo::Assistant.spawn()
+    end
+  end
+end

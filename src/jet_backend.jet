@@ -1,0 +1,424 @@
+module jet_backend
+  # The shared substrate every collaboration *shape* (Fleet, Pipeline, Debate,
+  # Refine, Map, Auto, ...) reuses. A shape only decides HOW to wire these calls;
+  # this module is WHAT a single member/step actually is:
+  #   - resolve a spec to a concrete backend ({:ollama, model} | {:acp, command})
+  #   - run that backend (a local Ollama LLM, or any external ACP agent the user
+  #     wires via `drives:` -- claude-code-acp, codex, gemini, ...) on a role +
+  #     input, returning text. The backend is the END USER's choice, never assumed.
+  # So every shape is "a runner module + one dispatch line" over this substrate,
+  # and every member runs on the BEAM under OTP supervision (crash-isolated).
+
+  # resolve a member/step backend: explicit `drives` -> an external ACP agent;
+  # explicit `model` -> Ollama; else the group's `drives`, else the group's `model`.
+  # If NOTHING is configured, raise a clear error -- we do NOT guess a model (a default
+  # would just assume the user's machine has Ollama + a specific
+  # model). The backend is the user's required choice.
+  def self.resolve(spec_drives, spec_model, group_drives, group_model)
+    if spec_drives != nil
+      {:acp, to_bin(spec_drives)}
+    elsif spec_model != nil
+      {:ollama, model_name(spec_model)}
+    elsif group_drives != nil
+      {:acp, to_bin(group_drives)}
+    elsif group_model != nil
+      {:ollama, model_name(group_model)}
+    else
+      no_backend()
+    end
+  end
+
+  # a backend was needed but none is configured anywhere -- fail loudly with how to fix.
+  def self.no_backend()
+    erlang::error({:jet_no_backend,
+      <<"no LLM backend configured: set model: (an Ollama model, e.g. \"ollama:llama3.2\") or drives: (an ACP agent command, e.g. \"claude-code-acp\") on the runner">>})
+  end
+
+  # the lead/reducer backend: `lead` ("ollama:x" or an ACP command) overrides the
+  # group default.
+  def self.resolve_lead(group_model, group_drives, lead)
+    if lead == nil
+      resolve(nil, nil, group_drives, group_model)
+    elsif jet_llm::ollama?(lead)
+      {:ollama, jet_llm::ollama_model(lead)}
+    else
+      {:acp, to_bin(lead)}
+    end
+  end
+
+  # --- escalation pool (shared by the iterative shapes: Goal, Refine). If `opts` has a
+  # tier-ordered `models:` list (cheapest first) + `select: :escalate`, resolve it to an
+  # ordered list of {backend, label}; else :static (the caller uses its own single backend).
+  # The Nth round/attempt then uses the Nth model, so a failed check escalates the next
+  # try to a stronger model -- cheap-first cascade (FrugalGPT-style). Pool = user's choice. ---
+  def self.resolve_pool(opts)
+    pool = maps::get(:models, opts, nil)
+    if erlang::is_list(pool) and (pool != [])
+      doers = lists::map({|e| {backend: resolve_lead(nil, nil, pool_name(e)), label: pool_label(e), profile: pool_profile(e)}}, pool)
+      match maps::get(:select, opts, :static)
+        case :escalate                # cycle the pool by round (cheap -> strong on failure)
+          {:escalate, doers}
+        case :route                   # a cheap router picks the best-fit model ONCE per task
+          {:route, doers}
+        case _
+          :static
+      end
+    else
+      :static
+    end
+  end
+
+  # routing: a cheap router reads the task + the pool's tiers and picks the best-fit model
+  # ONCE (vs escalate, which cycles on failure). Returns the chosen {backend, label}. Falls
+  # back to the cheapest (first) entry if routing fails. The router defaults to the cheapest
+  # pool model unless `router:` overrides it. Emits a "Routed to ..." note.
+  def self.route_pick(opts, doers, task)
+    router = route_router(opts, doers)
+    role = "You are a model ROUTER. Given a task and a numbered list of available models -- each with a tier and any capability notes (strengths, language, context size, tools) -- reply with ONLY the index number of the model best suited to the task. Match the task's needs (domain, language, length, tool use) to the models' stated capabilities; among models that are adequate, prefer the CHEAPEST tier. Output just the number, nothing else."
+    input = erlang::iolist_to_binary(["Task:\n", to_bin(task), "\n\nModels:\n", route_menu(doers, 0), "\nReply with only the best index number."])
+    chosen = lists::nth(parse_index(run_silent(router, role, input), erlang::length(doers)) + 1, doers)
+    jet_acp::emit_event({:thought, erlang::iolist_to_binary(["Routed to ", label_of(chosen), " for this task."])})
+    jet_acp::emit_trace(:route, erlang::iolist_to_binary(["🧭 routed → ", label_of(chosen)]), "ok")
+    chosen
+  end
+
+  # the router backend: explicit `router:` wins, else the cheapest (first) pool model.
+  def self.route_router(opts, doers)
+    match maps::get(:router, opts, nil)
+      case nil
+        maps::get(:backend, erlang::hd(doers), nil)
+      case r
+        resolve_lead(nil, nil, r)
+    end
+  end
+
+  def self.route_menu(doers, i)
+    match doers
+      case []
+        []
+      case [d, *rest]
+        [erlang::integer_to_binary(i), ": ", profile_of(d), "\n", route_menu(rest, i + 1)]
+    end
+  end
+
+  def self.label_of(d)
+    maps::get(:label, d, <<"(model)">>)
+  end
+
+  # the full capability profile the router sees: "<name> -- <key>: <val>, ..." over ALL of the
+  # entry's metadata except :name (tier/strengths/lang/context/tools/...). Keys are NOT
+  # hardcoded -- whatever the user writes on a pool entry is rendered for the router to weigh.
+  def self.profile_of(d)
+    maps::get(:profile, d, label_of(d))
+  end
+
+  def self.pool_profile(e)
+    if erlang::is_map(e)
+      erlang::iolist_to_binary([to_bin(maps::get(:name, e, <<"?">>)), profile_attrs(maps::to_list(e))])
+    else
+      to_bin(e)
+    end
+  end
+
+  def self.profile_attrs(kvs)
+    match attr_strs(kvs)
+      case []
+        []
+      case strs
+        [" -- ", join_bin(strs, <<", ">>)]
+    end
+  end
+
+  # every {key, value} except :name -> "key: value" (value via to_bin: atom/int/string alike).
+  def self.attr_strs(kvs)
+    pairs = lists::filter({|kv| erlang::element(1, kv) != :name}, kvs)
+    lists::map({|kv| erlang::iolist_to_binary([erlang::atom_to_binary(erlang::element(1, kv), :utf8), ": ", to_bin(erlang::element(2, kv))])}, pairs)
+  end
+
+  def self.join_bin(strs, sep)
+    match strs
+      case []
+        []
+      case [s]
+        s
+      case [s, *rest]
+        [s, sep, join_bin(rest, sep)]
+    end
+  end
+
+  # first integer in the router's reply, clamped to [0, n-1]; default 0 (cheapest) on failure.
+  def self.parse_index(raw, n)
+    match re::run(to_bin(raw), "[0-9]+", [{:capture, :first, :binary}])
+      case {:match, [d]}
+        i = erlang::binary_to_integer(d)
+        if i < 0
+          0
+        elsif i >= n
+          n - 1
+        else
+          i
+        end
+      case _
+        0
+    end
+  end
+
+  # the Nth entry of a doers list, clamped to the last once the pool is exhausted.
+  def self.at(doers, n)
+    len = erlang::length(doers)
+    pos = if n < len
+      n
+    else
+      len
+    end
+    lists::nth(pos, doers)
+  end
+
+  def self.pool_name(e)
+    if erlang::is_map(e)
+      maps::get(:name, e, <<>>)
+    else
+      e
+    end
+  end
+
+  # "<tier> (<model>)" or just the model name -- shown by callers in their per-round note.
+  def self.pool_label(e)
+    if erlang::is_map(e)
+      name = to_bin(maps::get(:name, e, <<"?">>))
+      match maps::find(:tier, e)
+        case {:ok, t}
+          erlang::iolist_to_binary([erlang::atom_to_binary(t, :utf8), " (", name, ")"])
+        case :error
+          name
+      end
+    else
+      to_bin(e)
+    end
+  end
+
+  # run a backend on role + input -> text (<<>> on failure). The one primitive all
+  # shapes call.
+  def self.run(backend, role, input)
+    match backend
+      case {:ollama, m}
+        run_ollama(m, role, input)
+      case {:acp, cmd}
+        run_acp(cmd, role, input)
+    end
+  end
+
+  # like run/3 but suppresses streaming to the user -- for INTERNAL calls (a
+  # meta-orchestrator's router/designer, a shape's members/stages) whose output is
+  # plumbing or a tool_call, NOT the final answer. (An ACP-agent backend streams its
+  # chunks via the process's :__acp_stream__; clear it around the call, then restore.)
+  def self.run_silent(backend, role, input)
+    saved = erlang::get(:__acp_stream__)
+    erlang::erase(:__acp_stream__)
+    out = run(backend, role, input)
+    if saved != :undefined
+      erlang::put(:__acp_stream__, saved)
+    end
+    out
+  end
+
+  # run the FINAL answer so it reaches the user's message EXACTLY ONCE: an ACP-agent
+  # backend already streamed its chunks during the call, so just return; an Ollama
+  # backend didn't stream, so emit the result once. (Shapes must NOT also emit the
+  # text themselves -- that double-printed agent answers.)
+  def self.run_streaming(backend, role, input)
+    match backend
+      case {:acp, cmd}
+        run_acp(cmd, role, input)
+      case {:ollama, m}
+        out = run_ollama(m, role, input)
+        if out != <<>>
+          jet_acp::emit_event({:text, out})
+        end
+        out
+    end
+  end
+
+  # run a backend with a per-call workspace (cwd) -- used by code shapes so a
+  # member edits in its OWN git worktree. Ollama has no fs, so workspace is moot
+  # there; an ACP agent gets it as the session root.
+  # run a backend WITH tools (for shapes that let a node act). Ollama -> a tool-use loop
+  # (jet_llm); an ACP agent already has its own toolset, so `tools` (jet-side) is ignored.
+  def self.run_tools(backend, role, input, tools)
+    match backend
+      case {:ollama, m}
+        jet_llm::run_tools(m, role, input, tools, 12)
+      case {:acp, cmd}
+        run_acp(cmd, role, input)
+    end
+  end
+
+  def self.run_in(backend, role, input, workspace)
+    match backend
+      case {:ollama, m}
+        run_ollama(m, role, input)
+      case {:acp, cmd}
+        run_acp_in(cmd, role, input, workspace)
+    end
+  end
+
+  def self.run_ollama(m, role, input)
+    match jet_llm::ollama_post({model: m, stream: false,
+                                messages: [{role: "system", content: role}, {role: "user", content: to_bin(input)}]})
+      case {:ok, msg}
+        to_bin(maps::get(<<"content">>, msg, <<>>))
+      case _
+        <<>>
+    end
+  end
+
+  def self.run_acp(cmd, role, input)
+    run_acp_in(cmd, role, input, nil)
+  end
+
+  def self.run_acp_in(cmd, role, input, workspace)
+    base = {runner: {name: :Acp, opts: {command: to_bin(cmd)}}, role: role}
+    config = if workspace == nil
+      base
+    else
+      maps::put(:workspace, to_bin(workspace), base)
+    end
+    # a native `claude` drive runs the CLI directly (no ACP adapter); everything else is ACP.
+    if jet_claude::native?(cmd)
+      acp_result(jet_claude::turn(config, :run, [to_bin(input)], :any))
+    else
+      acp_result(jet_acp::turn(config, :run, [to_bin(input)], :any))
+    end
+  end
+
+  # Map an ACP drive turn result to text. A normal turn returns its text. A drive that idle-
+  # times-out (5 min, jet_acp) or whose process closes is made VISIBLE and RECOVERABLE: emit a
+  # note and return the PARTIAL output (or a marker if none) so the attempt completes and a
+  # caller (e.g. Goal) re-attempts on the next round -- instead of a silent empty that
+  # truncated the whole run. Pure mapping (the emit is the only side effect) -> unit-testable.
+  def self.acp_result(result)
+    match result
+      case {:ok, text}
+        to_bin(text)
+      case {:error, :acp_prompt_failed, {:timeout, acc}}
+        drive_interrupted(<<"timed out (5 min idle)">>, acc)
+      case {:error, :acp_prompt_failed, {:closed, _st, acc}}
+        drive_interrupted(<<"agent process closed">>, acc)
+      case {:error, kind, _info}
+        drive_interrupted(erlang::atom_to_binary(kind, :utf8), <<>>)
+      case _
+        <<>>
+    end
+  end
+
+  def self.drive_interrupted(why, acc)
+    jet_acp::emit_event({:text, erlang::iolist_to_binary(["\n[drive ", why, " -- using partial result, continuing]\n"])})
+    partial = to_bin(acc)
+    if partial == <<>>
+      erlang::iolist_to_binary(["(the drive agent produced no output before it ", why, ")"])
+    else
+      partial
+    end
+  end
+
+  # shared by every shape runner: pull the runner opts map out of the agent config,
+  # and coerce a final text to the declared schema.
+  def self.opts(config)
+    runner = maps::get(:runner, config, nil)
+    if erlang::is_map(runner)
+      maps::get(:opts, runner, maps::new())
+    else
+      maps::new()
+    end
+  end
+
+  def self.coerce(text, schema)
+    if schema == :any
+      {:ok, text}
+    else
+      jet_acp::parse_result(text, schema)
+    end
+  end
+
+  # does the conversation already have a prior assistant answer? (used to tell a
+  # genuinely new task from a follow-up, so meta-orchestrators don't re-design a
+  # whole new team for "did it stop?"). The conv is "...Assistant: a\n\nUser: latest".
+  def self.has_prior_answer?(topic)
+    match binary::split(to_bin(topic), <<"\n\nAssistant: ">>)
+      case [_only]
+        false
+      case _
+        true
+    end
+  end
+
+  # does this turn warrant the full machinery (generate a team/graph, convene a panel),
+  # or is it chitchat / a refinement the lead should just answer directly? Turn 1: a
+  # bare greeting -> NO; a real request -> YES. Later turns: a refinement (translate,
+  # shorten, clarify, tiny follow-up) -> NO; a genuinely NEW request -> YES. Two single-
+  # axis YES/NO calls are more reliable than one. `router` is the routing backend.
+  def self.is_substantive_request?(router, topic)
+    if has_prior_answer?(topic)
+      not refinement?(router, topic)
+    else
+      not chitchat?(router, latest_message(topic))
+    end
+  end
+
+  def self.chitchat?(router, msg)
+    role = "Is the user's message ONLY a greeting, thanks, or small talk, with no actual question or request? Reply with EXACTLY one word: YES or NO. Examples: \"good morning\"->YES; \"hi\"->YES; \"thanks!\"->YES; \"おはよう\"->YES; \"should we use Kubernetes?\"->NO; \"analyze Qt's future\"->NO; \"考えてみて\"->NO."
+    said_yes?(run_silent(router, role, to_bin(msg)))
+  end
+
+  def self.refinement?(router, topic)
+    role = "Is the user's LATEST message just a refinement of the previous answer (translate, shorten, rephrase, clarify, or a tiny follow-up), rather than a NEW question or request? Reply with EXACTLY one word: YES or NO."
+    user = erlang::iolist_to_binary(["Conversation:\n", topic, "\n\nLatest message: \"",
+                                     latest_message(topic), "\"\nIs it just a refinement? YES or NO:"])
+    said_yes?(run_silent(router, role, user))
+  end
+
+  # the user's most recent message (the conv is "...User: u\n\nAssistant: a\n\nUser: latest").
+  def self.latest_message(topic)
+    lists::last(binary::split(to_bin(topic), <<"\n\nUser: ">>, [:global]))
+  end
+
+  # does the (YES/NO) reply start-contain "yes"? (binary::split, not binary::match --
+  # `match` is a reserved keyword in Jet.)
+  def self.said_yes?(text)
+    match binary::split(erlang::iolist_to_binary(string::lowercase(to_bin(text))), <<"yes">>)
+      case [_only]
+        false
+      case _
+        true
+    end
+  end
+
+  def self.model_name(m)
+    if jet_llm::ollama?(m)
+      jet_llm::ollama_model(m)
+    else
+      m
+    end
+  end
+
+  def self.to_bin(x)
+    if erlang::is_binary(x)
+      x
+    elsif erlang::is_list(x)
+      erlang::iolist_to_binary(x)
+    else
+      erlang::iolist_to_binary(io_lib::format("~p", [x]))
+    end
+  end
+
+  # a short display label for a member's backend: its driver, else its model, else "?".
+  def self.bk_label(model, drives)
+    if drives != nil
+      to_bin(drives)
+    elsif model != nil
+      to_bin(model)
+    else
+      <<"?">>
+    end
+  end
+end

@@ -1,17 +1,17 @@
 # LLM Library — Multi-provider chat, streaming, and tool use
 #
-# Usage:
+# Usage (model: is REQUIRED -- pick the provider's model id yourself; no default):
 #   # Simple chat
-#   Llm::chat(:claude, [{:user, "Hello"}], {api_key: key, system: "You are helpful"})
+#   Llm::chat(:claude, [{:user, "Hello"}], {api_key: key, model: <id>, system: "..."})
 #
 #   # Streaming
-#   Llm::stream(:claude, [{:user, "Hello"}], {api_key: key}, {|chunk| puts(chunk) })
+#   Llm::stream(:claude, [{:user, "Hello"}], {api_key: key, model: <id>}, {|chunk| puts(chunk) })
 #
 #   # Stream to actor
-#   Llm::stream_to(:claude, [{:user, "Hello"}], {api_key: key}, target_pid)
+#   Llm::stream_to(:claude, [{:user, "Hello"}], {api_key: key, model: <id>}, target_pid)
 #
 #   # Client (stateful)
-#   client = Llm::Client.new(:claude, {api_key: key, model: "claude-sonnet-4-20250514"})
+#   client = Llm::Client.new(:claude, {api_key: key, model: <id>})
 #   client.chat([{:user, "Hello"}])
 
 module Llm
@@ -19,7 +19,7 @@ module Llm
   # --- Synchronous chat ---
   def self.chat(provider, messages, opts)
     jet_http_ffi::ensure_started()
-    model = maps::get(:model, opts, LlmAdapter::default_model(provider))
+    model = LlmAdapter::require_model(opts)
     max_tokens = maps::get(:max_tokens, opts, 4096)
     url = LlmAdapter::api_url(provider)
     headers = LlmAdapter::build_headers(provider, opts)
@@ -53,7 +53,7 @@ module Llm
   # --- Streaming ---
   def self.stream(provider, messages, opts, callback)
     jet_http_ffi::ensure_started()
-    model = maps::get(:model, opts, LlmAdapter::default_model(provider))
+    model = LlmAdapter::require_model(opts)
     max_tokens = maps::get(:max_tokens, opts, 4096)
     url = LlmAdapter::api_url(provider)
     headers = LlmAdapter::build_headers(provider, opts)
@@ -115,9 +115,9 @@ module Llm
     Llm::stream(provider, messages, opts, callback)
   end
 
-  # --- Backward-compatible simple API ---
-  def self.chat(provider, api_key, system_prompt, user_message)
-    Llm::chat(provider, [{:user, user_message}], {api_key: api_key, system: system_prompt})
+  # --- Simple one-shot API (model is explicit, like everywhere else) ---
+  def self.chat(provider, model, api_key, system_prompt, user_message)
+    Llm::chat(provider, [{:user, user_message}], {api_key: api_key, model: model, system: system_prompt})
   end
 
   # --- Client class (stateful) ---

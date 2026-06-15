@@ -1,0 +1,36 @@
+# Demonstrates the on_approval permission hook for the Acp runner.
+# Instead of blindly auto-allowing every agent request, the agent can define
+# `on_approval(req)` returning :allow / :deny (or a specific optionId).
+#   ./jet -r agent_approval::run examples/agent_approval.jet
+module agent_approval
+  agent Guard
+    runner Acp(command: "true")
+    role "guard"
+    expose ask(question) -> {answer: String}
+
+    # permission policy: refuse shell execution, allow everything else
+    def on_approval(req)
+      match req.get(:kind)
+        case "execute"
+          :deny
+        case _
+          :allow
+      end
+    end
+  end
+
+  def self.run()
+    g = agent_approval::Guard.spawn()
+
+    # 1) the hook, exercised exactly as the ACP connection process would
+    exec = gen_server::call(g, {:__jet_approval__, {kind: "execute", title: "rm -rf /", options: []}})
+    read = gen_server::call(g, {:__jet_approval__, {kind: "read", title: "cat notes", options: []}})
+    io::format("on_approval execute => ~p~n", [exec])
+    io::format("on_approval read    => ~p~n", [read])
+
+    # 2) decision -> ACP outcome mapping, over real (binary-keyed) options
+    {:ok, msg} = jet_json_ffi::decode("{\"params\":{\"options\":[{\"optionId\":\"a1\",\"kind\":\"allow_once\"},{\"optionId\":\"r1\",\"kind\":\"reject_once\"}]}}")
+    io::format("outcome(:allow) => ~p~n", [jet_acp::permission_outcome(:allow, msg)])
+    io::format("outcome(:deny)  => ~p~n", [jet_acp::permission_outcome(:deny, msg)])
+  end
+end

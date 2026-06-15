@@ -1,0 +1,38 @@
+# Two single-tool agents over ACP (small local models handle one tool reliably).
+#   jet acp-serve acp_fs_demo::Reader::describe examples/acp_fs_demo.jet
+#   jet acp-serve acp_fs_demo::Lister::list     examples/acp_fs_demo.jet
+# Reader is *bidirectional* (it asks the client to read a file); Lister is a
+# *local* BEAM capability (ACP fs has no directory listing). Both take the path
+# from the "[attached: name -> /path]" note the server adds from an @-mention.
+module acp_fs_demo
+  agent Reader
+    model "ollama:qwen3.6:35b-a3b"
+    role "Call read_file with the path from the '[attached: name -> /path]' note, then answer strictly from the contents. Never guess paths or contents."
+    ask describe(request)
+
+    tool read_file(path: String) do |p|
+      match jet_acp_server::read_file(p)        # agent -> client request (fs/read_text_file)
+        case {:ok, res}
+          maps::get(<<"content">>, res, <<"(empty)">>)
+        case _
+          "could not read the file"
+      end
+    end
+  end
+
+  agent Lister
+    model "ollama:qwen3.6:35b-a3b"
+    role "Call list_dir with the path from the '[attached: name -> /path]' note, then report exactly what it returns (it starts with the count). Never guess."
+    ask list(request)
+
+    tool list_dir(path: String) do |p|
+      match file::list_dir(p)
+        case {:ok, names}
+          erlang::iolist_to_binary([erlang::integer_to_binary(erlang::length(names)),
+                                    " entries:\n", lists::map({|n| [n, "\n"]}, names)])
+        case _
+          "could not list the directory"
+      end
+    end
+  end
+end

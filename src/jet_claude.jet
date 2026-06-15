@@ -1,0 +1,488 @@
+module jet_claude
+  # Native Claude Code backend. Drives the `claude` CLI DIRECTLY in headless streaming-JSON mode
+  #   claude -p --input-format stream-json --output-format stream-json --verbose
+  # -- no external ACP adapter (`claude-code-acp`) in between. It speaks the SAME persistent-connection
+  # protocol as jet_acp:
+  #   receive {:turn, caller, ref, prompt, schema, kind} -> caller ! {ref, {:done, {:ok,text}|{:error,..}}}
+  # and reuses jet_acp::emit_event for the stream, so the Console UI + every shape runner work
+  # unchanged. Routing: a `drives:` agent comes here (not jet_acp) when its command is the native
+  # marker -- bare `claude` / `claude-cli`, or a `claude:<path>` scheme. `claude-code-acp`, `codex`,
+  # `gemini`, ... stay on jet_acp. See jet_agent::open_and_store, jet_backend::run_acp_in, jet_runtime.
+  #
+  # Permission: headless `claude` can't pop an interactive prompt, so tool gating is set via
+  # --permission-mode (default `acceptEdits`: auto-accept edits, still gate bash/etc). Override with
+  # env JET_CLAUDE_PERMISSION=bypassPermissions for full autonomy in an isolated worktree. True
+  # Allow/Deny parity with the Console 🔐 (via --permission-prompt-tool/MCP) is a follow-up.
+
+  # --- routing predicate + binary resolution -------------------------------------------------
+
+  # is this drive string the native path? bare `claude`/`claude-cli`, or a `claude:`-prefixed path.
+  def self.native?(cmd)
+    c = to_bin(cmd)
+    (c == <<"claude">>) or (c == <<"claude-cli">>) or claude_scheme?(c)
+  end
+
+  def self.claude_scheme?(c)
+    match binary::split(c, <<"claude:">>)
+      case [<<>>, _rest]      # split lands at the very start -> `claude:` is a prefix
+        true
+      case _
+        false
+    end
+  end
+
+  # the claude executable: `claude:<path>` pins it, else `claude` (found on PATH).
+  def self.binary_of(cmd)
+    match binary::split(to_bin(cmd), <<"claude:">>)
+      case [<<>>, rest]
+        if rest == <<>>
+          <<"claude">>
+        else
+          rest
+        end
+      case _
+        <<"claude">>
+    end
+  end
+
+  # --- process command line ------------------------------------------------------------------
+
+  # build the claude command line. token != nil -> bridge tool permissions to the Console 🔐 via an
+  # MCP permission-prompt tool (--permission-mode default routes prompts to it). token == nil ->
+  # no bridge: default acceptEdits (auto-accept edits, gate bash/etc), overridable with env
+  # JET_CLAUDE_PERMISSION=bypassPermissions for full autonomy in an isolated worktree.
+  def self.cmd_string(cmd, token)
+    base = erlang::iolist_to_binary([binary_of(cmd),
+      " -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages", extra_flags()])
+    if token == nil
+      erlang::iolist_to_binary([base, " --permission-mode ", perm_mode()])
+    else
+      cfg = write_mcp_config(token, erlang::iolist_to_binary(mcp_base()))
+      erlang::iolist_to_binary([base,
+        " --permission-mode default --permission-prompt-tool mcp__jetperm__approve --mcp-config ", cfg])
+    end
+  end
+
+  # optional --model (alias like opus/sonnet/fable, or a full name) + --effort (low/medium/high/
+  # xhigh/max), from env JET_CLAUDE_MODEL / JET_CLAUDE_EFFORT (set via 🔌 Settings). Empty = the
+  # CLI's own default. Orthogonal to the permission mode.
+  def self.extra_flags()
+    erlang::iolist_to_binary([flag(" --model ", os::getenv("JET_CLAUDE_MODEL")),
+                              flag(" --effort ", os::getenv("JET_CLAUDE_EFFORT"))])
+  end
+
+  def self.flag(name, v)
+    if v == false
+      <<>>
+    else
+      erlang::iolist_to_binary([name, erlang::iolist_to_binary(v)])
+    end
+  end
+
+  def self.perm_mode()
+    match os::getenv("JET_CLAUDE_PERMISSION")
+      case false
+        <<"acceptEdits">>
+      case v
+        erlang::iolist_to_binary(v)
+    end
+  end
+
+  # the Console base URL for the permission MCP endpoint (set by Jc.Application at boot), or false.
+  def self.mcp_base()
+    os::getenv("JET_CONSOLE_MCP_BASE")
+  end
+
+  # the 🔐 bridge is used when the user has NOT pinned a fixed permission mode (JET_CLAUDE_PERMISSION
+  # unset = "Ask in the Console"), AND the Console published its URL + registry table. Setting
+  # JET_CLAUDE_PERMISSION (e.g. bypassPermissions = Claude Code's auto mode, or acceptEdits) opts OUT
+  # of prompts and runs that mode autonomously instead.
+  def self.bridge_on?()
+    (os::getenv("JET_CLAUDE_PERMISSION") == false) and (mcp_base() != false) and (ets::info(:jc_native_perm) != :undefined)
+  end
+
+  # write claude's --mcp-config (the permission tool's HTTP server, scoped to this token) to a temp
+  # file; return its path. Inline JSON would be split by the spawn arg parser, so use a file.
+  def self.write_mcp_config(token, base)
+    path = erlang::iolist_to_binary(["/tmp/jetperm-", token, ".json"])
+    url = erlang::iolist_to_binary([base, "/mcp/perm/", token])
+    file::write_file(path, jet_json_ffi::encode({mcpServers: {jetperm: {type: <<"http">>, url: url}}}))
+    path
+  end
+
+  def self.open_port(cmd, root, token)
+    jet_port_ffi::open(cmd_string(cmd, token), [:separate_stderr, {:cd, erlang::binary_to_list(root)}])
+  end
+
+  # --- persistent connection (the Console per-thread agent; mirrors jet_acp::open_connection) ---
+
+  def self.open_connection(config, agent_pid)
+    erlang::spawn(:jet_claude, :connection_init, [config, agent_pid])
+  end
+
+  def self.connection_init(config, agent_pid)
+    erlang::monitor(:process, agent_pid)
+    cmd = jet_acp::command_of(maps::get(:runner, config, nil))
+    root = jet_acp::workspace_root(config)
+    token = maybe_token()
+    match open_port(cmd, root, token)
+      case {:ok, port}
+        erlang::put(:__acp_root__, root)
+        erlang::put(:__acp_agent__, agent_pid)
+        connection_loop(port, agent_pid, token)
+      case {:error, _reason}
+        unregister_token(token)
+        :error
+    end
+  end
+
+  # mint + register a per-connection token when the 🔐 bridge is available (else nil = no bridge).
+  def self.maybe_token()
+    if bridge_on?()
+      token = erlang::integer_to_binary(erlang::unique_integer([:positive]))
+      ets::insert(:jc_native_perm, {token, erlang::self()})
+      token
+    else
+      nil
+    end
+  end
+
+  def self.unregister_token(token)
+    if token != nil
+      if ets::info(:jc_native_perm) != :undefined
+        ets::delete(:jc_native_perm, token)
+      end
+      file::delete(erlang::iolist_to_binary(["/tmp/jetperm-", token, ".json"]))
+    else
+      :ok
+    end
+  end
+
+  def self.connection_loop(port, agent_pid, token)
+    receive
+      case {:turn, caller, ref, prompt, schema, _kind}
+        erlang::put(:__acp_stream__, {caller, ref})
+        result = run_turn_on_port(port, prompt, schema)
+        caller ! {ref, {:done, result}}
+        connection_loop(port, agent_pid, token)
+      case :__close__
+        unregister_token(token)
+        jet_port_ffi::close(port)
+      case {p, {:exit_status, _st}} if p == port
+        unregister_token(token)
+        :closed
+      case {:DOWN, _mref, :process, dp, _reason} if dp == agent_pid
+        unregister_token(token)
+        jet_port_ffi::close(port)
+    end
+  end
+
+  # --- one-shot turn (jet_backend shapes + the slash-command probe; mirrors jet_acp::turn) ---
+
+  def self.turn(config, method, args, schema)
+    cmd = jet_acp::command_of(maps::get(:runner, config, nil))
+    root = jet_acp::workspace_root(config)
+    match args
+      case [:jet_list_commands]
+        probe_commands(cmd, root)
+      case _
+        match open_port(cmd, root, nil)
+          case {:ok, port}
+            erlang::put(:__acp_root__, root)
+            result = run_turn_on_port(port, jet_acp::build_prompt(config, method, args), schema)
+            jet_port_ffi::close(port)
+            result
+          case {:error, reason}
+            {:error, :claude_spawn_failed, reason}
+        end
+    end
+  end
+
+  # send the user message, then pump stream-json events until this turn's `result`.
+  def self.run_turn_on_port(port, prompt, _schema)
+    erlang::put(:__acp_idle_ticks__, 0)
+    erlang::erase(:__claude_streamed__)   # track whether THIS message's text already streamed as deltas
+    send_user(port, prompt)
+    await(port, <<>>, <<>>)
+  end
+
+  def self.send_user(port, prompt)
+    msg = {type: <<"user">>, message: {role: <<"user">>, content: [{type: <<"text">>, text: to_bin(prompt)}]}}
+    jet_port_ffi::send_input(port, erlang::iolist_to_binary([jet_json_ffi::encode(msg), "\n"]))
+  end
+
+  # --- ndjson read loop (frame on \n, accumulate partials, 1-min idle heartbeat) -------------
+
+  def self.await(port, buf, acc)
+    match binary::split(buf, <<"\n">>)
+      case [line, rest]
+        handle_line(port, line, rest, acc)
+      case _
+        receive
+          case {p, {:data, data}} if p == port
+            erlang::put(:__acp_idle_ticks__, 0)
+            await(port, erlang::iolist_to_binary([buf, data]), acc)
+          case {p, {:exit_status, st}} if p == port
+            {:error, :claude_closed, {st, acc}}
+          case {:native_permission, req, reply_to}
+            # claude paused for a tool permission -> raise the 🔐, answer it, then keep reading
+            reply_to ! {:native_permission_decision, ask_user(req)}
+            await(port, buf, acc)
+        after 60000
+          idle_tick(port, buf, acc)
+        end
+    end
+  end
+
+  # raise the Console 🔐 for this tool request (reusing the ACP permission event) and block until
+  # the user answers via the LiveView (which sends {:permission_response, ...} back here), or 5 min.
+  def self.ask_user(req)
+    pref = erlang::make_ref()
+    jet_acp::emit_event({:permission, pref, erlang::self(),
+                         maps::get(:title, req, <<"tool">>), maps::get(:kind, req, <<"native">>)})
+    receive
+      case {:permission_response, pr, decision} if pr == pref
+        decision
+    after 300000
+      :deny
+    end
+  end
+
+  def self.idle_tick(port, buf, acc)
+    ticks = jet_acp::idle_count() + 1
+    erlang::put(:__acp_idle_ticks__, ticks)
+    if jet_acp::idle_giveup?(ticks)
+      {:error, :claude_timeout, acc}
+    else
+      jet_acp::emit_event({:thought, erlang::iolist_to_binary(["(claude quiet for ", erlang::integer_to_binary(ticks), " min, still waiting…)"])})
+      await(port, buf, acc)
+    end
+  end
+
+  def self.handle_line(port, line, rest, acc)
+    match jet_json_ffi::decode(line)
+      case {:ok, ev}
+        handle_event(port, ev, rest, acc)
+      case _
+        await(port, rest, acc)
+    end
+  end
+
+  # --- stream-json event -> Jet event contract -----------------------------------------------
+
+  def self.handle_event(port, ev, rest, acc)
+    match maps::get(<<"type">>, ev, nil)
+      case <<"system">>
+        maybe_emit_commands(ev)
+        await(port, rest, acc)
+      case <<"stream_event">>
+        # --include-partial-messages: stream text/thinking token-by-token so a long (e.g. high/max
+        # effort) turn shows progress instead of going silent until the whole message is composed.
+        await(port, rest, handle_stream_event(ev, acc))
+      case <<"assistant">>
+        # the complete message: its text already streamed via deltas -> emit only tool calls here.
+        await(port, rest, handle_assistant(ev, acc))
+      case <<"result">>
+        finish(ev, acc)
+      case _
+        await(port, rest, acc)
+    end
+  end
+
+  def self.handle_stream_event(ev, acc)
+    inner = maps::get(<<"event">>, ev, nil)
+    if erlang::is_map(inner) and (maps::get(<<"type">>, inner, nil) == <<"content_block_delta">>)
+      handle_delta(maps::get(<<"delta">>, inner, nil), acc)
+    else
+      acc
+    end
+  end
+
+  def self.handle_delta(delta, acc)
+    if erlang::is_map(delta)
+      match maps::get(<<"type">>, delta, nil)
+        case <<"text_delta">>
+          t = maps::get(<<"text">>, delta, <<>>)
+          erlang::put(:__claude_streamed__, true)   # this message's text is arriving as deltas
+          jet_acp::emit_event({:text, t})
+          erlang::iolist_to_binary([acc, t])
+        case <<"thinking_delta">>
+          jet_acp::emit_event({:thought, maps::get(<<"thinking">>, delta, <<>>)})
+          acc
+        case _
+          acc
+      end
+    else
+      acc
+    end
+  end
+
+  # final text: the authoritative `result` field, else whatever streamed (acc). The assistant
+  # text was already emitted incrementally via {:text,..}, so this is the once-only return value.
+  def self.finish(ev, acc)
+    if maps::get(<<"is_error">>, ev, false) == true
+      {:error, :claude_error, to_bin(maps::get(<<"result">>, ev, <<>>))}
+    else
+      text = maps::get(<<"result">>, ev, nil)
+      if (text == nil) or (text == <<>>)
+        {:ok, acc}
+      else
+        {:ok, to_bin(text)}
+      end
+    end
+  end
+
+  def self.handle_assistant(ev, acc)
+    msg = maps::get(<<"message">>, ev, nil)
+    if erlang::is_map(msg)
+      acc2 = handle_blocks(maps::get(<<"content">>, msg, []), acc)
+      erlang::erase(:__claude_streamed__)   # reset for the next message in this turn
+      acc2
+    else
+      acc
+    end
+  end
+
+  def self.handle_blocks(blocks, acc)
+    match blocks
+      case []
+        acc
+      case [b, *rest]
+        handle_blocks(rest, handle_block(b, acc))
+    end
+  end
+
+  # the COMPLETE assistant message. Model-generated text already streamed via stream_event deltas
+  # (flag set) -> don't re-emit. But a LOCAL slash command (e.g. /config, /context) returns its
+  # output ONLY as a complete message with NO deltas (flag unset) -> emit it here. Tool calls are
+  # always emitted here (their full input is assembled by now).
+  def self.handle_block(b, acc)
+    match maps::get(<<"type">>, b, nil)
+      case <<"text">>
+        if erlang::get(:__claude_streamed__) == true
+          acc
+        else
+          t = maps::get(<<"text">>, b, <<>>)
+          jet_acp::emit_event({:text, t})
+          erlang::iolist_to_binary([acc, t])
+        end
+      case <<"tool_use">>
+        jet_acp::emit_event({:tool_call, tool_info(b)})
+        acc
+      case _
+        acc
+    end
+  end
+
+  # map a tool_use block to the {id,title,kind,status} shape the Console renders for ACP.
+  def self.tool_info(b)
+    {id: maps::get(<<"id">>, b, nil),
+     title: tool_title(b),
+     kind: <<>>,
+     status: <<"pending">>}
+  end
+
+  def self.tool_title(b)
+    name = to_bin(maps::get(<<"name">>, b, <<"tool">>))
+    hint = tool_hint(maps::get(<<"input">>, b, nil))
+    if hint == <<>>
+      name
+    else
+      erlang::iolist_to_binary([name, ": ", hint])
+    end
+  end
+
+  # a short hint for the tool line: the file path / command / pattern / url, if the input has one.
+  def self.tool_hint(input)
+    if erlang::is_map(input)
+      first_present(input, [<<"file_path">>, <<"path">>, <<"command">>, <<"pattern">>, <<"url">>])
+    else
+      <<>>
+    end
+  end
+
+  def self.first_present(m, keys)
+    match keys
+      case []
+        <<>>
+      case [k, *rest]
+        v = maps::get(k, m, nil)
+        if erlang::is_binary(v)
+          v
+        else
+          first_present(m, rest)
+        end
+    end
+  end
+
+  # the init event lists the agent's slash commands -> populate the / menu (free, no API turn).
+  def self.maybe_emit_commands(ev)
+    cmds = maps::get(<<"slash_commands">>, ev, nil)
+    if erlang::is_list(cmds) and (cmds != [])
+      jet_acp::emit_event({:commands, lists::map({|c| {name: to_bin(c), description: <<>>}}, cmds)})
+    else
+      :ok
+    end
+  end
+
+  # --- slash-command probe: open the process, read its startup `system/init` (which carries the
+  #     command list) WITHOUT sending a prompt, emit {:commands,..}, close. No API turn is spent. ---
+
+  def self.probe_commands_async(caller, ref, config)
+    erlang::put(:__acp_stream__, {caller, ref})
+    cmd = jet_acp::command_of(maps::get(:runner, config, nil))
+    root = jet_acp::workspace_root(config)
+    probe_commands(cmd, root)
+    caller ! {ref, {:done, :ok}}
+  end
+
+  # claude emits its startup `system/init` (which carries slash_commands) only AFTER a message is
+  # sent -- so trigger it with a one-char hidden prompt, read JUST the init, emit {:commands,..},
+  # and close immediately (killing the turn before the model answers -> minimal cost).
+  def self.probe_commands(cmd, root)
+    match open_port(cmd, root, nil)
+      case {:ok, port}
+        send_user(port, <<"hi">>)
+        await_init(port, <<>>)
+        jet_port_ffi::close(port)
+        {:ok, <<>>}
+      case {:error, _reason}
+        {:ok, <<>>}
+    end
+  end
+
+  def self.await_init(port, buf)
+    match binary::split(buf, <<"\n">>)
+      case [line, rest]
+        match jet_json_ffi::decode(line)
+          case {:ok, ev}
+            if maps::get(<<"type">>, ev, nil) == <<"system">>
+              maybe_emit_commands(ev)
+            else
+              await_init(port, rest)
+            end
+          case _
+            await_init(port, rest)
+        end
+      case _
+        receive
+          case {p, {:data, data}} if p == port
+            await_init(port, erlang::iolist_to_binary([buf, data]))
+          case {p, {:exit_status, _st}} if p == port
+            :ok
+        after 8000
+          :ok
+        end
+    end
+  end
+
+  def self.to_bin(x)
+    if erlang::is_binary(x)
+      x
+    elsif erlang::is_list(x)
+      erlang::iolist_to_binary(x)
+    else
+      erlang::iolist_to_binary(io_lib::format("~p", [x]))
+    end
+  end
+end

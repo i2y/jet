@@ -1,0 +1,369 @@
+module jet_skills
+  # Agent Skills (agentskills.io) for the native Llm runner AND shape nodes, with PROGRESSIVE
+  # DISCLOSURE. A skill is a directory <root>/<name>/SKILL.md (YAML frontmatter: name +
+  # description [+ allowed-tools]; markdown body) with optional scripts/ references/ assets/.
+  #
+  # ROOTS (auto-discovered, like the spec): the agent's explicit `skills "<dir>"` PLUS the
+  # standard locations ./.claude/skills and ~/.claude/skills. The skill id is the DIRECTORY
+  # name -- the `skill` tool resolves by dir, and the catalog advertises the same dir name,
+  # so they always agree (the spec requires frontmatter name == dir; we resolve by dir).
+
+  # --- roots: explicit dir + standard locations (existing dirs only; explicit first) ---
+  def self.roots(explicit)
+    lists::filter({|d| filelib::is_dir(to_list(d))},
+                  lists::append(explicit_list(explicit), standard_dirs()))
+  end
+
+  def self.explicit_list(explicit)
+    if is_nil?(explicit)
+      []
+    else
+      [to_bin(explicit)]
+    end
+  end
+
+  # nil check: Jet nil is [], Erlang nil atom is :nil -- accept both for FFI compat
+  def self.is_nil?(x)
+    (x == nil) or (x == :nil)
+  end
+
+  # standard skill locations, project (cwd up to git root) before personal (home), each
+  # checked for the vendor-NEUTRAL `.agents/skills` (the converging cross-vendor location,
+  # used by Codex et al.) and Anthropic's `.claude/skills`. Non-existent ones are filtered
+  # out by roots/1. Walks from cwd to git root (or filesystem root if no .git found),
+  # collecting .agents/skills and .claude/skills from each ancestor.
+  def self.standard_dirs()
+    dedup(lists::append(cwd_ancestors_skills(), under(home_dir())))
+  end
+
+  # walk from cwd to git root (or /) and collect .agents/skills, .claude/skills at each level
+  def self.cwd_ancestors_skills()
+    match cwd_dir()
+      case nil
+        []
+      case cwd
+        ancestors_skills(to_bin(cwd), git_root(to_bin(cwd)))
+    end
+  end
+
+  # collect skills dirs from `dir` up to and including `stop` (git root or /); stop=nil -> /
+  def self.ancestors_skills(dir, stop)
+    collect_up(dir, stop, [])
+  end
+
+  def self.collect_up(dir, stop, acc)
+    new_acc = lists::append(acc, under(dir))
+    if is_stop?(dir, stop)
+      new_acc
+    else
+      parent = parent_dir(dir)
+      if parent == dir   # reached filesystem root (no more parents)
+        new_acc
+      else
+        collect_up(parent, stop, new_acc)
+      end
+    end
+  end
+
+  def self.is_stop?(dir, stop)
+    if is_nil?(stop)
+      false
+    else
+      dir == stop
+    end
+  end
+
+  # find the git root by walking up from `dir` looking for .git directory
+  def self.git_root(dir)
+    find_git_up(dir)
+  end
+
+  def self.find_git_up(dir)
+    git_path = erlang::binary_to_list(erlang::iolist_to_binary([dir, "/.git"]))
+    if filelib::is_dir(git_path)
+      dir
+    else
+      parent = parent_dir(dir)
+      if parent == dir   # reached filesystem root, no .git found
+        nil
+      else
+        find_git_up(parent)
+      end
+    end
+  end
+
+  # return parent directory as binary (or same dir if already at root)
+  def self.parent_dir(dir)
+    to_bin(filename::dirname(to_list(dir)))
+  end
+
+  # remove duplicate directories from list while preserving order (first occurrence kept)
+  def self.dedup(dirs)
+    dedup_acc(dirs, [], [])
+  end
+
+  def self.dedup_acc(dirs, seen, acc)
+    match dirs
+      case []
+        acc
+      case [d, *rest]
+        if lists::member(d, seen)
+          dedup_acc(rest, seen, acc)
+        else
+          dedup_acc(rest, [d, *seen], lists::append(acc, [d]))
+        end
+    end
+  end
+
+  def self.under(base)
+    if is_nil?(base)
+      []
+    else
+      [erlang::iolist_to_binary([base, "/.agents/skills"]),
+       erlang::iolist_to_binary([base, "/.claude/skills"])]
+    end
+  end
+
+  def self.cwd_dir()
+    match file::get_cwd()
+      case {:ok, c}
+        c
+      case _
+        nil
+    end
+  end
+
+  def self.home_dir()
+    match os::getenv("HOME")
+      case false
+        nil
+      case h
+        h
+    end
+  end
+
+  # [{id_bin, desc_bin}] for every skill under any root (id = dir name). Cheap (frontmatter).
+  def self.catalog(explicit)
+    lists::foldl({|root, acc| catalog_root(root, acc)}, [], roots(explicit))
+  end
+
+  def self.catalog_root(root, acc)
+    match file::list_dir(to_list(root))
+      case {:ok, entries}
+        lists::foldl({|e, a| catalog_entry(root, e, a)}, acc, lists::sort(entries))
+      case _
+        acc
+    end
+  end
+
+  def self.catalog_entry(root, entry, acc)
+    id = to_bin(entry)
+    if filelib::is_file(skill_md(root, entry)) and (not has_id?(acc, id))   # first root wins
+      {_name, desc, _tools} = parse_fm(read_fm(skill_md(root, entry)))
+      lists::append(acc, [{id, desc}])
+    else
+      acc
+    end
+  end
+
+  def self.has_id?(cat, id)
+    lists::any({|s| erlang::element(1, s) == id}, cat)
+  end
+
+  # render the catalog as a compact system-prompt block (level-1 disclosure).
+  def self.catalog_block(cat)
+    if cat == []
+      []
+    else
+      ["\n\n[Skills] You have these skills. When one fits the task, call the `skill` tool with its name to load full instructions BEFORE acting:\n",
+       lists::map({|s| skill_line(s)}, cat)]
+    end
+  end
+
+  def self.skill_line(s)
+    {id, desc} = s
+    ["- ", id, ": ", desc, "\n"]
+  end
+
+  # the full body of a named skill (level-2 disclosure), loaded on demand via the `skill`
+  # tool: the SKILL.md body, an allowed-tools directive (if declared), inlined references/,
+  # and a listing of scripts/ + assets/. Searches all roots; first match wins.
+  def self.body(explicit, name)
+    match find_root(roots(explicit), name)
+      case {:ok, root}
+        match read_md(skill_md(root, name))
+          case {:ok, fm, bdy}
+            {_n, _d, tools} = parse_fm(fm)
+            erlang::iolist_to_binary([bdy, allowed_note(tools), bundled_content(root, name)])
+          case _
+            not_found(name)
+        end
+      case :error
+        not_found(name)
+    end
+  end
+
+  def self.find_root(roots, name)
+    match lists::filter({|r| filelib::is_file(skill_md(r, name))}, roots)
+      case [r, *_]
+        {:ok, r}
+      case _
+        :error
+    end
+  end
+
+  def self.not_found(name)
+    erlang::iolist_to_binary(["(no skill named \"", to_bin(name), "\")"])
+  end
+
+  # allowed-tools -> a directive in the loaded body (advisory: the model is told to restrict
+  # itself; we do not hard-filter the tool list mid-loop -- that would be a deeper change).
+  def self.allowed_note(tools)
+    if is_nil?(tools)
+      []
+    else
+      ["\n\n## Allowed tools\nWhile following this skill, use ONLY these tools: ", tools_str(tools), "\n"]
+    end
+  end
+
+  def self.tools_str(tools)
+    if erlang::is_list(tools) and (not is_string?(tools))
+      erlang::iolist_to_binary(lists::join(<<", ">>, lists::map({|t| to_bin(t)}, tools)))
+    else
+      to_bin(tools)
+    end
+  end
+
+  def self.is_string?(x)
+    erlang::is_list(x) and lists::all({|c| erlang::is_integer(c)}, x)
+  end
+
+  # --- bundled resources: inline references/ (knowledge), list scripts/ + assets/ ---
+  def self.bundled_content(root, name)
+    base = erlang::iolist_to_binary([to_bin(root), "/", to_bin(name)])
+    erlang::iolist_to_binary([inline_dir(base, "references"),
+                              list_dir_note(base, "scripts", "run with your tools as needed"),
+                              list_dir_note(base, "assets", "read with your file tools as needed")])
+  end
+
+  def self.inline_dir(base, sub)
+    match file::list_dir(erlang::binary_to_list(erlang::iolist_to_binary([base, "/", sub])))
+      case {:ok, []}
+        []
+      case {:ok, entries}
+        ["\n\n## ", sub, "/ (contents inlined)\n", lists::map({|e| inline_file(base, sub, e)}, lists::sort(entries))]
+      case _
+        []
+    end
+  end
+
+  def self.inline_file(base, sub, e)
+    path = erlang::binary_to_list(erlang::iolist_to_binary([base, "/", sub, "/", to_bin(e)]))
+    match file::read_file(path)
+      case {:ok, content}
+        ["\n### ", sub, "/", to_bin(e), "\n```\n", cap(content, 4000), "\n```\n"]
+      case _
+        ["\n### ", sub, "/", to_bin(e), " (unreadable)\n"]
+    end
+  end
+
+  def self.list_dir_note(base, sub, hint)
+    match file::list_dir(erlang::binary_to_list(erlang::iolist_to_binary([base, "/", sub])))
+      case {:ok, []}
+        []
+      case {:ok, entries}
+        ["\n\n## ", sub, "/ (", hint, ")\n", lists::map({|e| ["- ", sub, "/", to_bin(e), "\n"]}, lists::sort(entries))]
+      case _
+        []
+    end
+  end
+
+  def self.cap(bin, n)
+    if erlang::byte_size(bin) > n
+      erlang::iolist_to_binary([binary::part(bin, 0, n), "\n...(truncated)"])
+    else
+      bin
+    end
+  end
+
+  # --- SKILL.md parsing: frontmatter (name/description/allowed-tools) + body ---
+
+  def self.parse_fm(fm)
+    match jet_yaml_ffi::parse(fm)
+      case {:ok, m}
+        if erlang::is_map(m)
+          {field(m, <<"name">>, <<"skill">>), field(m, <<"description">>, <<>>), maps::get(<<"allowed-tools">>, m, nil)}
+        else
+          {<<"skill">>, <<>>, nil}
+        end
+      case _
+        {<<"skill">>, <<>>, nil}
+    end
+  end
+
+  def self.field(m, key, default)
+    to_bin(maps::get(key, m, default))
+  end
+
+  # read just the frontmatter text of a SKILL.md (for the cheap catalog scan).
+  def self.read_fm(md)
+    match read_md(md)
+      case {:ok, fm, _body}
+        fm
+      case _
+        <<>>
+    end
+  end
+
+  # read SKILL.md -> {:ok, frontmatter_bin, body_bin}; no frontmatter -> {:ok, <<>>, whole}.
+  def self.read_md(md)
+    match file::read_file(md)
+      case {:ok, content}
+        {fm, body} = split_fm(content)
+        {:ok, fm, body}
+      case {:error, reason}
+        {:error, reason}
+    end
+  end
+
+  # content beginning with "---\n" -> {frontmatter, body}; else {<<>>, content}.
+  def self.split_fm(content)
+    match binary::split(content, <<"---\n">>)
+      case [<<>>, rest]
+        match binary::split(rest, <<"\n---">>)
+          case [fm, body]
+            {fm, strip(body)}
+          case _
+            {<<>>, content}
+        end
+      case _
+        {<<>>, content}
+    end
+  end
+
+  def self.strip(b)
+    erlang::iolist_to_binary(string::trim(b))
+  end
+
+  # --- path / type helpers ---
+
+  def self.skill_md(dir, entry)
+    erlang::binary_to_list(erlang::iolist_to_binary([to_bin(dir), "/", to_bin(entry), "/SKILL.md"]))
+  end
+
+  def self.to_bin(x)
+    if erlang::is_binary(x)
+      x
+    else
+      erlang::iolist_to_binary(x)
+    end
+  end
+
+  def self.to_list(x)
+    if erlang::is_list(x)
+      x
+    else
+      erlang::binary_to_list(x)
+    end
+  end
+end

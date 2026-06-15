@@ -1,0 +1,79 @@
+# A fleet of supervised agents: spawn thousands, crash some at random, and the
+# fleet stays up -- only the crashed ones are restarted, the rest never notice.
+#   ./jet -r fleet::run examples/fleet.jet
+module fleet
+  actor Agent                        # a stateful agent (a supervised process)
+    def initialize(id)  @id = id  @work = 0  end
+    def on_message(_)  erlang::error(:boom)  end   # any message crashes it
+  end
+
+  def self.c(code, s)  [27] ++ "[" ++ code ++ "m" ++ s ++ [27] ++ "[0m"  end   # ANSI
+
+  # the supervisor: launch the fleet, monitor every agent, respawn any that die.
+  def self.start(parent, n)
+    pids = launch(n, 1, maps::new())
+    parent ! {:up, maps::size(pids)}
+    loop(pids, 0)
+  end
+
+  def self.launch(n, i, acc)
+    if i > n
+      acc
+    else
+      pid = fleet::Agent.spawn(i)
+      erlang::monitor(:process, pid)
+      launch(n, i + 1, maps::put(pid, i, acc))     # map pid => id
+    end
+  end
+
+  def self.loop(pids, restarts)
+    receive
+      case {:DOWN, _ref, :process, dead, _why}
+        id = maps::get(dead, pids, 0)
+        np = fleet::Agent.spawn(id)                 # restart that agent
+        erlang::monitor(:process, np)
+        loop(maps::put(np, id, maps::remove(dead, pids)), restarts + 1)
+      case {:crash, k}
+        crash_k(maps::keys(pids), k)
+        loop(pids, restarts)
+      case {:report, caller}
+        caller ! {:fleet, maps::size(pids), restarts}
+        loop(pids, restarts)
+    end
+  end
+
+  def self.crash_k(_pids, 0)  :ok  end
+  def self.crash_k([], _k)  :ok  end
+  def self.crash_k([pid, *rest], k)
+    pid ! :die
+    crash_k(rest, k - 1)
+  end
+
+  def self.run()
+    logger::set_primary_config(:level, :critical)   # mute OTP crash reports
+    n = 10000
+    k = 2000
+    io::format("  spawning a fleet of ~p supervised agents...~n", [n])
+    timer::sleep(600)
+    m0 = erlang::memory(:total)
+    t0 = erlang::monotonic_time(:millisecond)
+    sup = erlang::spawn(:fleet, :start, [erlang::self(), n])
+    receive
+      case {:up, count}
+        t1 = erlang::monotonic_time(:millisecond)
+        used = erlang::memory(:total) - m0
+        io::format(c("36", "  fleet up: ~p agents in ~p ms  (~p MB, ~~~p KB each)") ++ "~n",
+                   [count, t1 - t0, erlang::round(used / 1048576), erlang::round(used / count / 1024)])
+    end
+    timer::sleep(800)
+    io::format(c("31", "  crashing ~p of them at random...") ++ "~n", [k])
+    sup ! {:crash, k}
+    timer::sleep(2200)
+    sup ! {:report, erlang::self()}
+    receive
+      case {:fleet, size, restarts}
+        io::format(c("32", "  [supervisor] restarted ~p; fleet = ~p (intact)") ++ "~n", [restarts, size])
+        io::format(c("32", "  -> ~p agents never noticed -- the BEAM isolated every failure.") ++ "~n", [n - restarts])
+    end
+  end
+end

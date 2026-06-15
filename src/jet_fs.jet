@@ -1,0 +1,123 @@
+module jet_fs
+  # Native (BEAM, NO external server) file tools for agents -- a Node-free replacement for the
+  # filesystem MCP server (`npx @modelcontextprotocol/server-filesystem`). Wire as `tool`s and
+  # sandbox/gate via the agent's `approve` policy (jet_policy). Each returns a binary tool
+  # result (an error string on failure -- never crashes the tool loop). Mirrors jet_web.
+  #   tool read_file(path: String)                      do |p|     jet_fs::read(p)     end
+  #   tool write_file(path: String, content: String)    do |p, c|  jet_fs::write(p, c) end
+  #   tool edit_file(path: String, old: String, new: String) do |p, o, n| jet_fs::edit(p, o, n) end
+  #   tool list_dir(path: String)                       do |p|     jet_fs::list(p)     end
+
+  def self.read(path)
+    match file::read_file(to_list(path))
+      case {:ok, content}
+        cap(content, 30000)
+      case {:error, reason}
+        err(<<"read">>, path, reason)
+    end
+  end
+
+  # write content to path, creating parent directories as needed.
+  def self.write(path, content)
+    bin = to_bin(content)
+    filelib::ensure_dir(to_list(path))   # create parent dirs
+    match file::write_file(to_list(path), bin)
+      case :ok
+        erlang::iolist_to_binary(["wrote ", erlang::integer_to_binary(erlang::byte_size(bin)), " bytes to ", to_bin(path)])
+      case {:error, reason}
+        err(<<"write">>, path, reason)
+    end
+  end
+
+  # replace `old` with `new` in the file. `old` must appear EXACTLY ONCE (like an editor's
+  # targeted patch) -- otherwise an error, so the agent disambiguates instead of clobbering.
+  def self.edit(path, old, new)
+    match file::read_file(to_list(path))
+      case {:ok, content}
+        match binary::split(content, to_bin(old), [:global])
+          case [_only]
+            erlang::iolist_to_binary(["edit error: old text not found in ", to_bin(path)])
+          case [before, rest]
+            updated = erlang::iolist_to_binary([before, to_bin(new), rest])
+            match file::write_file(to_list(path), updated)
+              case :ok
+                erlang::iolist_to_binary(["edited ", to_bin(path)])
+              case {:error, reason}
+                err(<<"write">>, path, reason)
+            end
+          case _
+            erlang::iolist_to_binary(["edit error: old text is not unique in ", to_bin(path), " (appears 2+ times) -- include more surrounding context"])
+        end
+      case {:error, reason}
+        err(<<"read">>, path, reason)
+    end
+  end
+
+  def self.list(path)
+    match file::list_dir(to_list(path))
+      case {:ok, []}
+        <<"(empty directory)">>
+      case {:ok, entries}
+        erlang::iolist_to_binary(lists::join(<<"\n">>, lists::map({|e| entry_line(path, e)}, lists::sort(entries))))
+      case {:error, reason}
+        err(<<"list">>, path, reason)
+    end
+  end
+
+  # grep(pattern, path) -- recursive FIXED-STRING search under `path`; returns matching
+  # "file:line:text" lines (capped). For "where is X used?" across a project.
+  def self.grep(pattern, path)
+    cmd = erlang::iolist_to_binary(["grep -rnIF -- ", sq(pattern), " ", sq(path), " 2>/dev/null | head -200"])
+    out = to_bin(os::cmd(erlang::binary_to_list(cmd)))
+    if erlang::byte_size(out) == 0
+      erlang::iolist_to_binary(["(no matches for ", to_bin(pattern), " under ", to_bin(path), ")"])
+    else
+      cap(out, 20000)
+    end
+  end
+
+  # --- helpers ---
+
+  # single-quote a string for the shell (wrap in '...', escaping embedded quotes as '\'').
+  def self.sq(s)
+    esc = erlang::apply(:binary, :replace, [to_bin(s), <<"'">>, <<"'\\''">>, [:global]])
+    erlang::iolist_to_binary(["'", esc, "'"])
+  end
+
+  def self.entry_line(dir, e)
+    full = erlang::binary_to_list(erlang::iolist_to_binary([to_bin(dir), "/", to_bin(e)]))
+    if filelib::is_dir(full)
+      erlang::iolist_to_binary([to_bin(e), "/"])    # trailing slash marks a directory
+    else
+      to_bin(e)
+    end
+  end
+
+  def self.err(op, path, reason)
+    erlang::iolist_to_binary([op, " error (", to_bin(path), "): ", io_lib::format("~p", [reason])])
+  end
+
+  def self.cap(bin, n)
+    if erlang::byte_size(bin) > n
+      erlang::iolist_to_binary([binary::part(bin, 0, n), "\n...(truncated)"])
+    else
+      bin
+    end
+  end
+
+  def self.to_bin(x)
+    if erlang::is_binary(x)
+      x
+    else
+      erlang::iolist_to_binary(x)
+    end
+  end
+
+  def self.to_list(x)
+    if erlang::is_list(x)
+      x
+    else
+      erlang::binary_to_list(x)
+    end
+  end
+end

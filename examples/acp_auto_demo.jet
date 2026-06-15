@@ -1,0 +1,25 @@
+# Auto: a META-orchestrator that picks the SHAPE at
+# runtime. List candidate shapes with a `when:`; a router chooses which fits the
+# task, then runs it. The router is the HIGH-LEVERAGE decision (a wrong shape
+# wastes the whole run), so here it's SMART (Claude Code); the chosen shapes run
+# on local llama3.2 for speed. (For Claude-quality work too, set drives: at the
+# Auto level, or per shape; for all-local, set router: "ollama:..." instead.)
+#   jet acp-serve acp_auto_demo::Auto::handle examples/acp_auto_demo.jet
+module acp_auto_demo
+  agent Auto
+    runner Auto(router: "claude-code-acp", model: "ollama:qwen3.6:35b-a3b", shapes: [
+      {name: :Debate, when: "a contested or yes/no proposition to argue both sides of",
+       rounds: 2,
+       agents: [{name: "Pro", role: "Argue in favor, concretely."},
+                {name: "Con", role: "Argue against, concretely."}],
+       judge: {role: "Weigh both sides; give a balanced verdict in 2-3 sentences."}},
+      {name: :Fleet, when: "multi-perspective analysis of a single topic or decision",
+       reduce: "Weigh the perspectives; give one clear recommendation.",
+       members: [{name: "Risks", role: "Name the biggest risks, briefly."},
+                 {name: "Upside", role: "Name the biggest benefits, briefly."}]},
+      {name: :Pipeline, when: "a multi-step writing/transform task",
+       stages: [{name: "Outline", role: "3-bullet outline. Output only it."},
+                {name: "Draft", role: "Short draft from the outline."}]}])
+    ask handle(task)
+  end
+end

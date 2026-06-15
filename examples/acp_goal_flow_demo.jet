@@ -1,0 +1,21 @@
+# Goal wrapping Flow = "verify loop + dynamic DAG". Each ATTEMPT runs a whole Flow, which
+# at runtime GENERATES a dataflow DAG of agents for the task and runs the independent nodes
+# in parallel (supervised BEAM processes); Goal's cheap checker then verifies the acceptance
+# condition and, if unmet, runs a FRESH attempt (a newly generated DAG) with feedback, until
+# met or the round cap. Goal itself composes nothing -- Flow does the dynamic composition;
+# Goal is the verify-until-met layer on top.
+#
+# SLOW: a full Flow per round (a designer call + parallel nodes + a terminal node) + a check,
+# so max_rounds is kept low. Local Ollama.
+#   jet acp-serve acp_goal_flow_demo::Composer::handle examples/acp_goal_flow_demo.jet
+# Try: "Compare three caching strategies for a read-heavy API and recommend one."
+module acp_goal_flow_demo
+  agent Composer
+    runner Goal(accept: "compares at least three distinct options and ends with a clear, single recommendation",
+                via: {name: :Flow},
+                surface: true,
+                max_rounds: 2,
+                model: "ollama:qwen3.6:35b-a3b")
+    ask handle(task)
+  end
+end

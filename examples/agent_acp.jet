@@ -1,0 +1,15 @@
+# Drives an external ACP agent over stdio. Here a local mock; swap the runner
+# command for `claude-code-acp` to drive real Claude Code. See docs/agent_design.md.
+#   ./jet -r agent_acp::run examples/agent_acp.jet
+module agent_acp
+  agent Assistant
+    runner Acp(command: "node examples/mock_acp.js")
+    role "You are a helpful assistant."
+    expose ask(question) -> {answer: String}
+  end
+
+  def self.run()
+    a = agent_acp::Assistant.spawn()
+    io::format("ask => ~p~n", [a.ask("What is the BEAM?").await()])
+  end
+end

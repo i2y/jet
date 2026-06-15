@@ -1,0 +1,24 @@
+# One ACP agent, a FLEET behind it. `Panel` fans a topic out to four BEAM
+# sub-agents that run in parallel, each with its own lens, then synthesizes one
+# report. One member is rigged to crash -- the fleet isolates it and the other
+# three still deliver. In an ACP client you see a plan (the roster) + one tool call per
+# member (in_progress -> completed, or failed for the crashed one) + the report.
+# Convene-on-demand: the panel runs only when a turn needs fresh analysis; a
+# follow-up (translate, shorten, clarify) is answered by the lead alone.
+#   jet acp-serve acp_fleet_demo::Panel::review examples/acp_fleet_demo.jet
+module acp_fleet_demo
+  agent Panel
+    # An analysis "panel" is just ONE configuration of the general Fleet ensemble:
+    # member roles define the task, `reduce:` how the lead combines them, `ground:`
+    # opts into a Wikipedia lookup. (model = the fleet's default LLM.)
+    runner Fleet(model: "ollama:qwen3.6:35b-a3b",
+                 ground: :wikipedia,
+                 reduce: "Weigh the panel's perspectives and give one clear, specific recommendation in 3-4 sentences.",
+                 members: [
+      {name: "Risks",     role: "You are a risk analyst. In 2-3 sentences, name the biggest risks of the idea. Be specific."},
+      {name: "Upside",    role: "You are an optimist. In 2-3 sentences, name the biggest benefits of the idea."},
+      {name: "Skeptic",   role: "You are a hard skeptic. In 2-3 sentences, say why the idea might fail.", model: "ollama:qwen3.6:35b-a3b"},  # a member may use its own model
+      {name: "Flaky",     role: "(this one is rigged to crash, to show isolation)", crash: true}])
+    ask review(topic)
+  end
+end

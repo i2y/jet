@@ -1,0 +1,308 @@
+module jet_web
+  # Keyless web tools for agents: fetch(url) via Erlang httpc, and search(query) via
+  # DuckDuckGo's instant-answer API. Each returns a binary suitable as a tool result.
+  # Wire into an agent:
+  #   tool web_fetch(url: String)    do |u| jet_web::fetch(u)  end
+  #   tool web_search(query: String) do |q| jet_web::search(q) end
+  # These are plain local tools, so they also reach shape nodes (node_tools includes them).
+
+  def self.ensure_inets()
+    inets::start()     # idempotent: returns :ok or {:error, {:already_started, _}} -- ignored
+    ssl::start()
+    :ok
+  end
+
+  # GET a URL (follows redirects) and return "<code> <url>\n\n<body>", capped.
+  # HTML responses are converted to readable plain text.
+  def self.fetch(url)
+    ensure_inets()
+    u = erlang::binary_to_list(to_b(url))
+    match httpc::request(:get, {u, []}, [{:autoredirect, true}, {:timeout, 20000}], [{:body_format, :binary}])
+      case {:ok, {{_proto, code, _msg}, headers, body}}
+        content_type = get_content_type(headers)
+        processed_body = maybe_html_to_text(body, content_type)
+        cap(erlang::iolist_to_binary([erlang::integer_to_binary(code), " ", to_b(url), "\n\n", processed_body]), 20000)
+      case {:error, reason}
+        erlang::iolist_to_binary(["fetch error: ", io_lib::format("~p", [reason])])
+    end
+  end
+
+  # Extract Content-Type header value (lowercase).
+  def self.get_content_type(headers)
+    find_header(headers, "content-type")
+  end
+
+  def self.find_header(headers, name)
+    if headers == []
+      <<>>
+    else
+      h = lists::nth(1, headers)
+      rest = lists::nthtail(1, headers)
+      k = erlang::element(1, h)
+      v = erlang::element(2, h)
+      lower_k = string::lowercase(erlang::iolist_to_binary([k]))
+      if lower_k == erlang::iolist_to_binary([name])
+        erlang::iolist_to_binary([v])
+      else
+        find_header(rest, name)
+      end
+    end
+  end
+
+  # Convert HTML to plain text if the content appears to be HTML.
+  def self.maybe_html_to_text(body, content_type)
+    if is_html(body, content_type)
+      html_to_text(body)
+    else
+      body
+    end
+  end
+
+  # Detect if content is HTML based on Content-Type or body inspection.
+  def self.is_html(body, content_type)
+    ct_lower = string::lowercase(content_type)
+    html_match = erlang::apply(:binary, :match, [ct_lower, <<"text/html">>])
+    ct_is_html = html_match != :nomatch
+    if ct_is_html
+      true
+    else
+      # If Content-Type is JSON or plain text, not HTML
+      json_match = erlang::apply(:binary, :match, [ct_lower, <<"application/json">>])
+      text_match = erlang::apply(:binary, :match, [ct_lower, <<"text/plain">>])
+      ct_is_json = json_match != :nomatch
+      ct_is_text = text_match != :nomatch
+      if ct_is_json or ct_is_text
+        false
+      else
+        # Unknown or missing Content-Type: inspect body
+        looks_like_html(body)
+      end
+    end
+  end
+
+  # Check if body looks like HTML (starts with <, <!DOCTYPE, or <html).
+  def self.looks_like_html(body)
+    trimmed = trim_leading_whitespace(body)
+    lower = string::lowercase(trimmed)
+    starts_doctype = binary_starts_with(lower, <<"<!doctype">>)
+    starts_html = binary_starts_with(lower, <<"<html">>)
+    starts_head = binary_starts_with(lower, <<"<head">>)
+    starts_body = binary_starts_with(lower, <<"<body">>)
+    starts_doctype or starts_html or starts_head or starts_body
+  end
+
+  def self.trim_leading_whitespace(bin)
+    re::replace(bin, <<"^\\s+">>, <<>>, [{:return, :binary}])
+  end
+
+  def self.binary_starts_with(bin, prefix)
+    plen = erlang::byte_size(prefix)
+    blen = erlang::byte_size(bin)
+    if blen >= plen
+      binary::part(bin, 0, plen) == prefix
+    else
+      false
+    end
+  end
+
+  # Convert HTML to plain text:
+  # 1. Remove non-content blocks (head/title/script/style)
+  # 2. Insert newlines at block element boundaries
+  # 3. Strip all HTML tags
+  # 4. Decode HTML entities
+  # 5. Compress whitespace
+  def self.html_to_text(html)
+    s1 = remove_noncontent(html)
+    s2 = insert_block_breaks(s1)
+    s3 = strip_tags(s2)
+    s4 = decode_entities(s3)
+    s5 = compress_whitespace(s4)
+    s5
+  end
+
+  # Insert newlines before/after block-level elements so adjacent blocks don't concatenate.
+  # Handles: p, div, h1-h6, li, ul, ol, br, tr, td, th, table, section, article, header, footer, nav, aside, blockquote, pre, hr, dl, dt, dd, figure, figcaption, main, address, form, fieldset
+  def self.insert_block_breaks(html)
+    # Insert newline before opening block tags
+    t1 = re::replace(html, <<"<(p|div|h[1-6]|li|ul|ol|tr|td|th|table|section|article|header|footer|nav|aside|blockquote|pre|hr|dl|dt|dd|figure|figcaption|main|address|form|fieldset)([^>]*>)">>, <<"\n<\\1\\2">>, [:global, :caseless, {:return, :binary}])
+    # Insert newline after closing block tags
+    t2 = re::replace(t1, <<"</(p|div|h[1-6]|li|ul|ol|tr|td|th|table|section|article|header|footer|nav|aside|blockquote|pre|dl|dt|dd|figure|figcaption|main|address|form|fieldset)>">>, <<"</\\1>\n">>, [:global, :caseless, {:return, :binary}])
+    # Handle <br> and <br/> tags - replace with newline
+    t3 = re::replace(t2, <<"<br\\s*/?>">>, <<"\n">>, [:global, :caseless, {:return, :binary}])
+    # Handle <hr> and <hr/> tags - replace with newline
+    t4 = re::replace(t3, <<"<hr\\s*/?>">>, <<"\n">>, [:global, :caseless, {:return, :binary}])
+    t4
+  end
+
+  # Remove blocks whose TEXT is not body content: <head> (title/meta/link), a stray <title>
+  # (in case it's outside head), <script>, and <style> -- so none of it leaks into the output.
+  def self.remove_noncontent(html)
+    s1 = re::replace(html, <<"<head[^>]*>[\\s\\S]*?</head>">>, <<>>, [:global, :caseless, {:return, :binary}])
+    s2 = re::replace(s1, <<"<title[^>]*>[\\s\\S]*?</title>">>, <<>>, [:global, :caseless, {:return, :binary}])
+    s3 = re::replace(s2, <<"<script[^>]*>[\\s\\S]*?</script>">>, <<>>, [:global, :caseless, {:return, :binary}])
+    s4 = re::replace(s3, <<"<style[^>]*>[\\s\\S]*?</style>">>, <<>>, [:global, :caseless, {:return, :binary}])
+    s4
+  end
+
+  # Strip all HTML tags.
+  def self.strip_tags(html)
+    re::replace(html, <<"<[^>]*>">>, <<>>, [:global, {:return, :binary}])
+  end
+
+  # Decode common HTML entities.
+  def self.decode_entities(text)
+    t1 = binary::replace(text, <<"&nbsp;">>, <<" ">>, [:global])
+    t2 = binary::replace(t1, <<"&#160;">>, <<" ">>, [:global])
+    t3 = binary::replace(t2, <<"&amp;">>, <<"&">>, [:global])
+    t4 = binary::replace(t3, <<"&lt;">>, <<"<">>, [:global])
+    t5 = binary::replace(t4, <<"&gt;">>, <<">">>, [:global])
+    t6 = binary::replace(t5, <<"&quot;">>, <<"\"">>, [:global])
+    t7 = binary::replace(t6, <<"&#39;">>, <<"'">>, [:global])
+    t8 = binary::replace(t7, <<"&apos;">>, <<"'">>, [:global])
+    t9 = binary::replace(t8, <<"&#x27;">>, <<"'">>, [:global])
+    t10 = binary::replace(t9, <<"&mdash;">>, <<"--">>, [:global])
+    t11 = binary::replace(t10, <<"&ndash;">>, <<"-">>, [:global])
+    t12 = binary::replace(t11, <<"&hellip;">>, <<"...">>, [:global])
+    t13 = binary::replace(t12, <<"&copy;">>, <<"(c)">>, [:global])
+    t14 = binary::replace(t13, <<"&reg;">>, <<"(R)">>, [:global])
+    t15 = binary::replace(t14, <<"&trade;">>, <<"(TM)">>, [:global])
+    # Decode numeric entities &#NNN;
+    t16 = decode_numeric_entities(t15)
+    t16
+  end
+
+  # Decode numeric character references like &#65; -> A
+  def self.decode_numeric_entities(text)
+    match re::run(text, <<"&#([0-9]+);">>, [:global, {:capture, :all, :binary}])
+      case {:match, matches}
+        lists::foldl({|m, acc| replace_numeric_entity(acc, m)}, text, matches)
+      case :nomatch
+        text
+    end
+  end
+
+  def self.replace_numeric_entity(text, m)
+    if erlang::length(m) == 2
+      full = lists::nth(1, m)
+      num_bin = lists::nth(2, m)
+      num = erlang::binary_to_integer(num_bin)
+      if num >= 32 and num <= 126
+        char = erlang::list_to_binary([num])
+        binary::replace(text, full, char)
+      elsif num == 160
+        binary::replace(text, full, <<" ">>)
+      else
+        text
+      end
+    else
+      text
+    end
+  end
+
+  # Compress multiple whitespace chars into single space, and multiple newlines into double.
+  def self.compress_whitespace(text)
+    # Replace sequences of whitespace (excluding newline) with single space
+    t1 = re::replace(text, <<"[ \\t\\r]+">>, <<" ">>, [:global, {:return, :binary}])
+    # Replace 3+ newlines with 2 newlines
+    t2 = re::replace(t1, <<"\\n{3,}">>, <<"\n\n">>, [:global, {:return, :binary}])
+    # Trim leading/trailing whitespace from each line
+    t3 = trim_lines(t2)
+    # Trim leading/trailing whitespace from entire text
+    t4 = re::replace(t3, <<"^\\s+">>, <<>>, [{:return, :binary}])
+    t5 = re::replace(t4, <<"\\s+$">>, <<>>, [{:return, :binary}])
+    t5
+  end
+
+  def self.trim_lines(text)
+    lines = binary::split(text, <<"\n">>, [:global])
+    trimmed = lists::map({|line| trim_line(line)}, lines)
+    erlang::iolist_to_binary(lists::join(<<"\n">>, trimmed))
+  end
+
+  def self.trim_line(line)
+    t1 = re::replace(line, <<"^[ \\t]+">>, <<>>, [{:return, :binary}])
+    re::replace(t1, <<"[ \\t]+$">>, <<>>, [{:return, :binary}])
+  end
+
+  # Keyless search via DuckDuckGo instant-answer (no full web index; best for entities/terms).
+  def self.search(query)
+    ensure_inets()
+    qs = uri_string::compose_query([{"q", erlang::binary_to_list(to_b(query))},
+                                    {"format", "json"}, {"no_html", "1"}, {"no_redirect", "1"}, {"t", "jet"}])
+    url = erlang::binary_to_list(erlang::iolist_to_binary(["https://api.duckduckgo.com/?", qs]))
+    match httpc::request(:get, {url, []}, [{:autoredirect, true}, {:timeout, 20000}], [{:body_format, :binary}])
+      case {:ok, {{_proto, 200, _msg}, _headers, body}}
+        summarize(body)
+      case {:ok, {{_proto, code, _msg}, _headers, _b}}
+        erlang::iolist_to_binary(["search HTTP ", erlang::integer_to_binary(code)])
+      case {:error, reason}
+        erlang::iolist_to_binary(["search error: ", io_lib::format("~p", [reason])])
+    end
+  end
+
+  def self.summarize(body)
+    match jet_json_ffi::decode(body)
+      case {:ok, m}
+        out = erlang::iolist_to_binary([
+          labeled("Answer: ", to_b(maps::get(<<"Answer">>, m, <<>>))),
+          labeled("Abstract: ", to_b(maps::get(<<"AbstractText">>, m, <<>>))),
+          labeled("Definition: ", to_b(maps::get(<<"Definition">>, m, <<>>))),
+          related(maps::get(<<"RelatedTopics">>, m, []))])
+        if erlang::byte_size(out) == 0
+          <<"(no instant answer -- DuckDuckGo's IA API is limited; try a specific entity/term)">>
+        else
+          cap(clean(out), 6000)
+        end
+      case _
+        <<"(could not parse search response)">>
+    end
+  end
+
+  # DuckDuckGo encodes paragraph breaks in abstracts as the literal token "__###newline###__"
+  # (it's in their raw JSON, not an actual \n) -- turn it back into a real newline.
+  def self.clean(text)
+    binary::replace(text, <<"__###newline###__">>, <<10>>, [:global])
+  end
+
+  def self.related(topics)
+    lines = lists::sublist(lists::filtermap({|t| rel_line(t)}, topics), 5)
+    if lines == []
+      <<>>
+    else
+      erlang::iolist_to_binary(["Related:\n", lists::join(<<"\n">>, lines)])
+    end
+  end
+
+  def self.rel_line(t)
+    if erlang::is_map(t)
+      txt = to_b(maps::get(<<"Text">>, t, <<>>))
+      if txt == <<>>
+        false
+      else
+        {true, erlang::iolist_to_binary(["- ", txt])}
+      end
+    else
+      false
+    end
+  end
+
+  def self.labeled(label, val)
+    if val == <<>>
+      <<>>
+    else
+      erlang::iolist_to_binary([label, val, "\n"])
+    end
+  end
+
+  def self.cap(bin, n)
+    if erlang::byte_size(bin) > n
+      erlang::iolist_to_binary([binary::part(bin, 0, n), "\n...(truncated)"])
+    else
+      bin
+    end
+  end
+
+  def self.to_b(x)
+    jet_acp::to_text(x)
+  end
+end
