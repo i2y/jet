@@ -151,15 +151,24 @@ defmodule JcWeb.ChatLive do
     d = String.trim(dir)
     expanded = Path.expand(d)
 
-    if d != "" and File.dir?(expanded) do
-      id = socket.assigns.next_project
-      cd_to(expanded)
-      commit(
-        assign(socket,
-          projects: Map.put(socket.assigns.projects, id, %{id: id, name: Path.basename(expanded), dir: expanded}),
-          current_project: id, next_project: id + 1, current: nil, proj_error: nil))
-    else
-      {:noreply, assign(socket, proj_error: "no such directory: #{d}")}
+    cond do
+      d == "" ->
+        {:noreply, assign(socket, proj_error: "enter a directory path")}
+
+      File.regular?(expanded) ->
+        {:noreply, assign(socket, proj_error: "not a directory: #{d}")}
+
+      # an existing dir, or a new one we can create (open a project in a brand-new directory)
+      File.dir?(expanded) or File.mkdir_p(expanded) == :ok ->
+        id = socket.assigns.next_project
+        cd_to(expanded)
+        commit(
+          assign(socket,
+            projects: Map.put(socket.assigns.projects, id, %{id: id, name: Path.basename(expanded), dir: expanded}),
+            current_project: id, next_project: id + 1, current: nil, proj_error: nil))
+
+      true ->
+        {:noreply, assign(socket, proj_error: "could not create directory: #{d}")}
     end
   end
 

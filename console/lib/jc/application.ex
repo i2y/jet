@@ -7,6 +7,8 @@ defmodule Jc.Application do
 
   @impl true
   def start(_type, _args) do
+    augment_path()  # so a launched binary finds the user's CLI tools (claude, etc.) — see below
+
     # resolve the Jet repo root ONCE at boot (cwd is the console/ dir then; it changes per-thread
     # later) and cache it. Defaults to the parent of console/ (i.e. the cloned jet repo); override
     # with JET_ROOT. No machine-specific path is baked in.
@@ -35,6 +37,26 @@ defmodule Jc.Application do
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: Jc.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  # A launched binary often inherits a minimal PATH (no nvm / npm-global / ~/.local/bin), so CLI
+  # agents like `claude` aren't found — neither by detection (System.find_executable) nor when the
+  # backend spawns them. Merge the login shell's PATH (a sentinel isolates it from any profile
+  # output) so they resolve exactly as in the user's interactive terminal. Best-effort + harmless
+  # if the PATH is already complete (e.g. when started from a full shell).
+  defp augment_path do
+    sh = System.get_env("SHELL") || "/bin/sh"
+
+    with {out, 0} <- System.cmd(sh, ["-lc", "printf 'JCPATH=%s' \"$PATH\""], stderr_to_stdout: true),
+         [_, p] <- Regex.run(~r/JCPATH=(.+)/, out) do
+      extra = String.split(String.trim(p), ":", trim: true)
+      cur = String.split(System.get_env("PATH") || "", ":", trim: true)
+      System.put_env("PATH", Enum.join(Enum.uniq(cur ++ extra), ":"))
+    else
+      _ -> :ok
+    end
+  rescue
+    _ -> :ok
   end
 
   # native jet_claude reads JET_CONSOLE_MCP_BASE to build claude's --mcp-config (the permission

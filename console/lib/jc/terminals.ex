@@ -44,10 +44,11 @@ defmodule Jc.Terminals do
         # set the PTY winsize ONCE, BEFORE the shell starts (stty runs in the throwaway sh, then
         # exec replaces it with the shell on the same already-sized PTY) -- so nothing leaks into a
         # foreground program later. `script` gives the PTY; it has no winsize control of its own.
+        cmd = "stty cols #{c} rows #{r}; exec #{shell}"
+
         port =
-          Port.open({:spawn_executable, "/usr/bin/script"},
-            [:binary, :exit_status, {:cd, cwd},
-             args: ["-q", "/dev/null", "/bin/sh", "-c", "stty cols #{c} rows #{r}; exec #{shell}"]])
+          Port.open({:spawn_executable, script_bin()},
+            [:binary, :exit_status, {:cd, cwd}, args: script_args(cmd)])
 
         {:reply, "", %{s | terms: Map.put(s.terms, tid, %{port: port, buf: ""})}}
     end
@@ -116,6 +117,18 @@ defmodule Jc.Terminals do
     case :os.type() do
       {:unix, :darwin} -> "-f"   # BSD stty: operate on the given file/device
       _ -> "-F"                  # GNU stty (Linux)
+    end
+  end
+
+  defp script_bin, do: System.find_executable("script") || "/usr/bin/script"
+
+  # `script` gives us a PTY (it has no winsize control of its own). The invocation differs by OS:
+  # BSD (macOS) takes the command as trailing args after the typescript file; util-linux (Linux)
+  # takes it via -c, with the file LAST. The wrong syntax = a broken terminal on the other OS.
+  defp script_args(cmd) do
+    case :os.type() do
+      {:unix, :darwin} -> ["-q", "/dev/null", "/bin/sh", "-c", cmd]
+      _ -> ["-q", "-c", cmd, "/dev/null"]
     end
   end
 
