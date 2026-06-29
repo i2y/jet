@@ -307,7 +307,9 @@ module jet_claude
           jet_acp::emit_event({:text, t})
           erlang::iolist_to_binary([acc, t])
         case <<"thinking_delta">>
-          jet_acp::emit_event({:thought, maps::get(<<"thinking">>, delta, <<>>)})
+          # a distinct event from {:thought} (shape narration) so the UI can ACCUMULATE the many
+          # token-level thinking deltas into ONE block instead of one line each.
+          jet_acp::emit_event({:thinking, maps::get(<<"thinking">>, delta, <<>>)})
           acc
         case _
           acc

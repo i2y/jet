@@ -973,6 +973,15 @@ defmodule JcWeb.ChatLive do
 
   defp apply_event(blocks, {:thought, t}), do: blocks ++ [%{type: :thought, text: to_s(t)}]
 
+  # streamed model thinking: accumulate consecutive deltas into ONE block (like {:text}), so a long
+  # token-by-token thought doesn't become hundreds of near-empty 🤔 lines.
+  defp apply_event(blocks, {:thinking, t}) do
+    case List.last(blocks) do
+      %{type: :thinking} = b -> List.replace_at(blocks, -1, %{b | text: b.text <> to_s(t)})
+      _ -> blocks ++ [%{type: :thinking, text: to_s(t)}]
+    end
+  end
+
   defp apply_event(blocks, {:tool_call, info}) when is_map(info) do
     id = to_s(Map.get(info, :id) || Map.get(info, :title) || "tool")
     status = to_s(Map.get(info, :status) || "…")
@@ -1265,7 +1274,7 @@ defmodule JcWeb.ChatLive do
     <% cur = @current && @threads[@current] %>
     <% proj = @projects[@current_project] %>
     <% blocks = (cur && cur.blocks) || [] %>
-    <% conv = Enum.filter(blocks, &(&1.type in [:user, :agent, :thought, :marker, :edit, :shell])) %>
+    <% conv = Enum.filter(blocks, &(&1.type in [:user, :agent, :thought, :thinking, :marker, :edit, :shell])) %>
     <% tools = Enum.filter(blocks, &(&1.type == :tool)) %>
     <% plan = Enum.find(blocks, &(&1.type == :plan)) %>
     <div class={if @theme == :dark, do: "jc dark", else: "jc"} style="display:flex;height:100vh;font-family:ui-sans-serif,system-ui;color:var(--tx);background:var(--bg);font-size:14px">
@@ -1365,6 +1374,8 @@ defmodule JcWeb.ChatLive do
                 <div class="md" style="line-height:1.5"><%= raw(md(b.text)) %></div>
               <% :thought -> %>
                 <div style="color:var(--mut);font-style:italic;font-size:.88rem">🤔 <%= b.text %></div>
+              <% :thinking -> %>
+                <div style="color:var(--mut);font-style:italic;font-size:.82rem;white-space:pre-wrap;opacity:.75">🤔 <%= b.text %></div>
               <% :marker -> %>
                 <div style="text-align:center;color:var(--mut);font-size:.78rem;margin:.3rem 0"><%= b.text %></div>
               <% :edit -> %>
