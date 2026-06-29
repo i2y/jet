@@ -52,8 +52,19 @@ module jet_goal
   end
 
   # split the prompt at an acceptance marker (English/Japanese) -> {goal, accept | nil}.
+  # Markers are tried in order; the first that splits wins, so the longer/more-specific Japanese
+  # forms ("受け入れ条件は…", "受け入れ条件：…") come before the bare ones, and the full-width
+  # colon "：" is matched as well as the half-width ":" (people naturally type either).
   def self.split_accept(raw)
-    try_markers(raw, [<<"受け入れ:">>, <<"Accept:">>, <<"accept:">>, <<"ACCEPT:">>, <<"Done when:">>, <<"DONE WHEN:">>])
+    # markers are UTF-8 binaries (a Jet "string" is a UTF-8 *byte* charlist, so <<"...">> lays those
+    # bytes into a binary that matches the binary prompt). The old list had only "受け入れ:"; people
+    # naturally write "受け入れ条件は…" / "受け入れ条件：…" (with 条件, full- or half-width colon).
+    try_markers(raw, [
+      <<"受け入れ条件は">>, <<"受け入れ条件は、">>, <<"受け入れ条件：">>, <<"受け入れ条件:">>, <<"受け入れ条件">>,
+      <<"受入れ条件は">>, <<"受入条件は">>, <<"受け入れ基準：">>, <<"受け入れ基準:">>,
+      <<"受け入れ：">>, <<"受け入れ:">>,
+      <<"Acceptance criteria:">>, <<"Acceptance:">>, <<"Accept:">>, <<"accept:">>, <<"ACCEPT:">>,
+      <<"Done when:">>, <<"DONE WHEN:">>])
   end
 
   def self.try_markers(raw, markers)
@@ -233,18 +244,26 @@ module jet_goal
     role = "You are a STRICT acceptance checker. Decide if the acceptance condition is FULLY met by the work shown, with concrete evidence. Reply with EXACTLY the word MET (nothing else) if and only if it is fully satisfied. Otherwise reply with a short, specific list of what is still missing or failing. Do not be lenient: if the required evidence (e.g. passing test output) is not shown, it is NOT met."
     input = erlang::iolist_to_binary(["Acceptance condition:\n", accept, "\n\nWork to check:\n", work, "\n\nReply MET, or what is still missing."])
     id = erlang::iolist_to_binary(["check-", erlang::integer_to_binary(round)])
-    lbl = erlang::iolist_to_binary(["✓ acceptance check ", erlang::integer_to_binary(round)])
+    lbl = erlang::iolist_to_binary(["acceptance check ", erlang::integer_to_binary(round)])
     jet_acp::emit_trace(id, lbl, "running")
     out = jet_backend::run_silent(checker, role, input)
-    jet_acp::emit_trace(id, lbl, "ok")
+    # reflect the VERDICT in the span (green only when actually MET), not just "the check ran".
+    status = if met?(out)
+      "ok"
+    else
+      "rejected"
+    end
+    jet_acp::emit_trace(id, lbl, status)
     out
   end
 
-  # MET only if the verdict *starts with* "met" (so "not met..." is a rejection).
+  # MET iff the first word is "met" -- tolerant of leading symbols/markup the checker may add
+  # ("✓ MET", "**MET**", "MET."), but a rejection ("not met...", "missing...") never starts that
+  # way, and "method"/"metadata" are excluded by the trailing word boundary.
   def self.met?(verdict)
     t = erlang::iolist_to_binary(string::trim(string::lowercase(jet_backend::to_bin(verdict))))
-    match binary::split(t, <<"met">>)
-      case [<<>>, _rest]
+    match erlang::apply(:re, :run, [t, <<"^[^a-z]*met([^a-z]|$)">>, [{:capture, :none}]])
+      case :match
         true
       case _
         false
