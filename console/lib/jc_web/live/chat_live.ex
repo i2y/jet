@@ -269,6 +269,48 @@ defmodule JcWeb.ChatLive do
     commit(assign(socket, threads: threads, terminals: Map.delete(socket.assigns.terminals, tid), current: current, renaming: nil))
   end
 
+  # remove a project from the list. Its threads are closed (agents stopped, worktrees discarded,
+  # terminals closed); the project's FOLDER ON DISK is left untouched.
+  def handle_event("remove_project", %{"id" => id}, socket) do
+    pid = String.to_integer(id)
+    dir = socket.assigns.projects[pid][:dir]
+
+    doomed = socket.assigns.threads |> Map.values() |> Enum.filter(&(&1.project_id == pid))
+
+    Enum.each(doomed, fn t ->
+      stop_pids(t)
+      if Map.get(t, :worktree), do: Jc.Worktree.discard(dir, t.worktree)
+      if Map.has_key?(socket.assigns.terminals, t.id), do: Jc.Terminals.close(t.id)
+    end)
+
+    doomed_ids = Enum.map(doomed, & &1.id)
+    threads = Map.drop(socket.assigns.threads, doomed_ids)
+    terminals = Map.drop(socket.assigns.terminals, doomed_ids)
+    projects = Map.delete(socket.assigns.projects, pid)
+
+    current_project =
+      if socket.assigns.current_project == pid do
+        case by_id(projects) do
+          [p | _] -> p.id
+          [] -> nil
+        end
+      else
+        socket.assigns.current_project
+      end
+
+    current =
+      if socket.assigns.current in doomed_ids,
+        do: first_thread_of(threads, current_project),
+        else: socket.assigns.current
+
+    cd_to(if current_project, do: projects[current_project][:dir])
+
+    commit(
+      assign(socket,
+        projects: projects, threads: threads, terminals: terminals,
+        current_project: current_project, current: current, proj_error: nil))
+  end
+
   def handle_event("stop", _p, socket) do
     cur = socket.assigns.current
     t = socket.assigns.threads[cur]
@@ -1377,10 +1419,16 @@ defmodule JcWeb.ChatLive do
         </div>
         <div style="padding:.4rem .55rem;font-size:.72rem;color:var(--mut);text-transform:uppercase;letter-spacing:.04em">Projects</div>
         <div style="padding:0 .25rem">
-          <button :for={p <- by_id(@projects)} phx-click="select_project" phx-value-id={p.id}
-            style={"display:block;width:100%;text-align:left;border:0;border-radius:.4rem;padding:.3rem .55rem;cursor:pointer;background:#{if p.id == @current_project, do: "var(--sel2)", else: "transparent"}"}>
-            📁 <%= p.name %>
-            <div style="font-size:.66rem;color:var(--mut);font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><%= p.dir %></div></button>
+          <div :for={p <- by_id(@projects)} style="display:flex;align-items:stretch;gap:.1rem">
+            <button phx-click="select_project" phx-value-id={p.id}
+              style={"flex:1;min-width:0;text-align:left;border:0;border-radius:.4rem;padding:.3rem .55rem;cursor:pointer;background:#{if p.id == @current_project, do: "var(--sel2)", else: "transparent"}"}>
+              📁 <%= p.name %>
+              <div style="font-size:.66rem;color:var(--mut);font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><%= p.dir %></div></button>
+            <button phx-click="remove_project" phx-value-id={p.id}
+              data-confirm={"Remove project #{p.name} from the list? (its threads close; the folder on disk is kept)"}
+              title="Remove from list (keeps the folder)"
+              style="flex:none;border:0;background:transparent;color:var(--mut);cursor:pointer;padding:0 .4rem;border-radius:.4rem;font-size:.8rem">✕</button>
+          </div>
           <form phx-submit="new_project" style="display:flex;gap:.25rem;padding:.25rem .3rem">
             <input name="dir" placeholder="path, or owner/repo to clone" autocomplete="off" style="flex:1;min-width:0;padding:.25rem;border:1px solid var(--bd2);border-radius:.3rem;font-size:.76rem"/>
             <button type="submit" title="Open folder as a project" style="padding:.25rem .45rem;border:1px solid var(--bd2);border-radius:.3rem;background:var(--card);cursor:pointer">+</button>
