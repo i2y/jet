@@ -149,7 +149,10 @@ defmodule JcWeb.ChatLive do
 
   def handle_event("new_project", %{"dir" => dir}, socket) do
     d = String.trim(dir)
-    expanded = Path.expand(d)
+    # resolve a RELATIVE path against a stable base (the user's home), NOT the BEAM cwd — the console
+    # mutates cwd per-thread via File.cd! (node-global), so a relative path would otherwise be created
+    # inside whatever project is currently open. Absolute paths and "~/…" are unaffected.
+    expanded = Path.expand(d, System.user_home() || Jc.AgentStore.jet_root())
 
     cond do
       d == "" ->
@@ -1322,7 +1325,7 @@ defmodule JcWeb.ChatLive do
             📁 <%= p.name %>
             <div style="font-size:.66rem;color:var(--mut);font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><%= p.dir %></div></button>
           <form phx-submit="new_project" style="display:flex;gap:.25rem;padding:.25rem .3rem">
-            <input name="dir" placeholder="open folder: /path…" autocomplete="off" style="flex:1;min-width:0;padding:.25rem;border:1px solid var(--bd2);border-radius:.3rem;font-size:.76rem"/>
+            <input name="dir" placeholder="open/create: ~/path or /abs" autocomplete="off" style="flex:1;min-width:0;padding:.25rem;border:1px solid var(--bd2);border-radius:.3rem;font-size:.76rem"/>
             <button type="submit" title="Open folder as a project" style="padding:.25rem .45rem;border:1px solid var(--bd2);border-radius:.3rem;background:var(--card);cursor:pointer">+</button>
           </form>
           <div :if={@proj_error} style="color:#d04437;font-size:.7rem;padding:0 .35rem"><%= @proj_error %></div>
