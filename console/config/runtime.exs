@@ -26,19 +26,28 @@ if config_env() == :prod do
   # Point the Jet runtime at the bundled copy inside the release (priv/jet), unless overridden.
   System.put_env("JET_ROOT", System.get_env("JET_ROOT") || Path.join(:code.priv_dir(:jc), "jet"))
 
-  # The secret key base is used to sign/encrypt cookies and other secrets.
-  # A default value is used in config/dev.exs and config/test.exs but you
-  # want to use a different value for prod and you most likely don't want
-  # to check this value into version control, so we use an environment
-  # variable instead.
+  # A distributable binary shouldn't make the user set SECRET_KEY_BASE just to launch — generate
+  # one on first run and persist it next to the saved settings, so sessions survive restarts. An
+  # explicit SECRET_KEY_BASE (e.g. a shared/hosted deploy) still wins.
   secret_key_base =
     System.get_env("SECRET_KEY_BASE") ||
-      raise """
-      environment variable SECRET_KEY_BASE is missing.
-      You can generate one by calling: mix phx.gen.secret
-      """
+      (
+        secret_path =
+          Path.join(to_string(:filename.basedir(:user_config, ~c"jet_console")), "secret_key_base")
 
-  host = System.get_env("PHX_HOST") || "example.com"
+        case File.read(secret_path) do
+          {:ok, s} when byte_size(s) >= 64 ->
+            s
+
+          _ ->
+            s = Base.url_encode64(:crypto.strong_rand_bytes(48))
+            File.mkdir_p!(Path.dirname(secret_path))
+            File.write!(secret_path, s)
+            s
+        end
+      )
+
+  host = System.get_env("PHX_HOST") || "localhost"
 
   config :jc, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
@@ -52,6 +61,8 @@ if config_env() == :prod do
       else: {127, 0, 0, 1}
 
   config :jc, JcWeb.Endpoint,
+    # the binary's job is to serve — default the HTTP server ON (set PHX_SERVER=false to only boot)
+    server: System.get_env("PHX_SERVER") != "false",
     url: [host: host, port: 443, scheme: "https"],
     http: [ip: bind_ip],
     secret_key_base: secret_key_base
