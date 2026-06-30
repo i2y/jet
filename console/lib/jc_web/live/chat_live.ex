@@ -149,29 +149,80 @@ defmodule JcWeb.ChatLive do
 
   def handle_event("new_project", %{"dir" => dir}, socket) do
     d = String.trim(dir)
-    # resolve a RELATIVE path against a stable base (the user's home), NOT the BEAM cwd — the console
-    # mutates cwd per-thread via File.cd! (node-global), so a relative path would otherwise be created
-    # inside whatever project is currently open. Absolute paths and "~/…" are unaffected.
-    expanded = Path.expand(d, System.user_home() || Jc.AgentStore.jet_root())
 
     cond do
       d == "" ->
-        {:noreply, assign(socket, proj_error: "enter a directory path")}
+        {:noreply, assign(socket, proj_error: "enter a directory path or owner/repo")}
 
-      File.regular?(expanded) ->
-        {:noreply, assign(socket, proj_error: "not a directory: #{d}")}
-
-      # an existing dir, or a new one we can create (open a project in a brand-new directory)
-      File.dir?(expanded) or File.mkdir_p(expanded) == :ok ->
-        id = socket.assigns.next_project
-        cd_to(expanded)
-        commit(
-          assign(socket,
-            projects: Map.put(socket.assigns.projects, id, %{id: id, name: Path.basename(expanded), dir: expanded}),
-            current_project: id, next_project: id + 1, current: nil, proj_error: nil))
+      # `owner/repo` or a GitHub URL -> clone it with `gh` and open the clone as a project
+      ref = clone_ref(d) ->
+        if gh_path() do
+          start_clone(socket, ref)
+        else
+          {:noreply, assign(socket, proj_error: "install the GitHub CLI (gh) to clone #{ref}, or enter a directory path")}
+        end
 
       true ->
-        {:noreply, assign(socket, proj_error: "could not create directory: #{d}")}
+        # resolve a RELATIVE path against a stable base (the user's home), NOT the BEAM cwd — the
+        # console mutates cwd per-thread via File.cd! (node-global), so a relative path would
+        # otherwise be created inside whatever project is currently open. Absolute / "~/…" unaffected.
+        expanded = Path.expand(d, System.user_home() || Jc.AgentStore.jet_root())
+
+        cond do
+          File.regular?(expanded) ->
+            {:noreply, assign(socket, proj_error: "not a directory: #{d}")}
+
+          # an existing dir, or a new one we can create (open a project in a brand-new directory)
+          File.dir?(expanded) or File.mkdir_p(expanded) == :ok ->
+            add_project(socket, expanded)
+
+          true ->
+            {:noreply, assign(socket, proj_error: "could not create directory: #{d}")}
+        end
+    end
+  end
+
+  # add `dir` as a new project, make it current, persist.
+  defp add_project(socket, dir) do
+    id = socket.assigns.next_project
+    cd_to(dir)
+
+    commit(
+      assign(socket,
+        projects: Map.put(socket.assigns.projects, id, %{id: id, name: Path.basename(dir), dir: dir}),
+        current_project: id, next_project: id + 1, current: nil, proj_error: nil))
+  end
+
+  # A GitHub repo reference typed into "new project" -> the arg for `gh repo clone` (a github URL or
+  # the bare owner/repo shorthand), or nil for an ordinary path. The shorthand is exactly one slash
+  # and no leading "/", "~" or "." — so "~/a/b" and "/a/b" stay local directory paths.
+  defp clone_ref(d) do
+    cond do
+      Regex.match?(~r{^(https?://|git@)\S+}, d) and String.contains?(d, "github") -> d
+      # owner/repo: owner starts with an alnum/underscore (so "./x", "../x", "-x/y" stay local paths)
+      Regex.match?(~r{^\w[\w.-]*/[\w.-]+$}, d) -> d
+      true -> nil
+    end
+  end
+
+  defp gh_path, do: System.find_executable("gh")
+
+  # clone in the background (so the UI never freezes) into ~/<repo>, then message the result back.
+  defp start_clone(socket, ref) do
+    base = System.user_home() || Jc.AgentStore.jet_root()
+    name = ref |> String.split(["/", ":"], trim: true) |> List.last() |> String.replace_suffix(".git", "")
+    dest = Path.join(base, name)
+    me = self()
+
+    if File.exists?(dest) do
+      {:noreply, assign(socket, proj_error: "#{dest} already exists — open it as a directory instead")}
+    else
+      Task.start(fn ->
+        res = System.cmd(gh_path() || "gh", ["repo", "clone", ref, dest], stderr_to_stdout: true)
+        send(me, {:clone_done, ref, dest, res})
+      end)
+
+      {:noreply, assign(socket, proj_error: "cloning #{ref} → #{dest} …")}
     end
   end
 
@@ -552,6 +603,12 @@ defmodule JcWeb.ChatLive do
   end
 
   def handle_info(:refresh_catalog, socket), do: {:noreply, assign(socket, agents: AgentStore.catalog())}
+
+  # a background `gh repo clone` finished: open the clone on success, else show gh's error
+  def handle_info({:clone_done, _ref, dest, {_out, 0}}, socket), do: add_project(socket, dest)
+
+  def handle_info({:clone_done, ref, _dest, {out, _code}}, socket),
+    do: {:noreply, assign(socket, proj_error: "gh clone #{ref} failed: #{String.trim(String.slice(to_string(out), 0, 300))}")}
 
   defp new_agent_form do
     %{"key" => "", "label" => "", "type" => "simple", "backend" => "drives",
@@ -1325,7 +1382,7 @@ defmodule JcWeb.ChatLive do
             📁 <%= p.name %>
             <div style="font-size:.66rem;color:var(--mut);font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><%= p.dir %></div></button>
           <form phx-submit="new_project" style="display:flex;gap:.25rem;padding:.25rem .3rem">
-            <input name="dir" placeholder="open/create: ~/path or /abs" autocomplete="off" style="flex:1;min-width:0;padding:.25rem;border:1px solid var(--bd2);border-radius:.3rem;font-size:.76rem"/>
+            <input name="dir" placeholder="path, or owner/repo to clone" autocomplete="off" style="flex:1;min-width:0;padding:.25rem;border:1px solid var(--bd2);border-radius:.3rem;font-size:.76rem"/>
             <button type="submit" title="Open folder as a project" style="padding:.25rem .45rem;border:1px solid var(--bd2);border-radius:.3rem;background:var(--card);cursor:pointer">+</button>
           </form>
           <div :if={@proj_error} style="color:#d04437;font-size:.7rem;padding:0 .35rem"><%= @proj_error %></div>
