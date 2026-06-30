@@ -774,7 +774,7 @@ defmodule JcWeb.ChatLive do
             _ -> {"(could not read #{name})", :text}
           end
 
-        mode = if ext in [".md", ".markdown"] and kind == :text, do: :preview, else: :source
+        mode = if ext in [".md", ".markdown", ".html", ".htm"] and kind == :text, do: :preview, else: :source
         %{f | file: path, content: content, ext: ext, kind: kind, size: size, mode: mode, gen: f.gen + 1, saved: nil}
       end
 
@@ -1640,7 +1640,7 @@ defmodule JcWeb.ChatLive do
               <strong style="font-family:ui-monospace,monospace;font-size:.84rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><%= (@files.file && Path.relative_to(@files.file, @files.root)) || "(select a file)" %></strong>
               <div style="display:flex;gap:.7rem;align-items:center">
                 <span :if={@files.saved} style="color:var(--ok-tx);font-size:.8rem"><%= @files.saved %></span>
-                <button :if={@files.file && @files.ext in [".md", ".markdown"]} phx-click="toggle_file_mode" title="Toggle rendered preview / source" style="border:1px solid var(--bd);border-radius:.3rem;background:var(--card);color:var(--tx);cursor:pointer;font-size:.76rem;padding:.1rem .5rem"><%= if @files.mode == :preview, do: "✎ Source", else: "👁 Preview" %></button>
+                <button :if={@files.file && @files.ext in [".md", ".markdown", ".html", ".htm"]} phx-click="toggle_file_mode" title="Toggle rendered preview / source" style="border:1px solid var(--bd);border-radius:.3rem;background:var(--card);color:var(--tx);cursor:pointer;font-size:.76rem;padding:.1rem .5rem"><%= if @files.mode == :preview, do: "✎ Source", else: "👁 Preview" %></button>
                 <button phx-click="close_files" style="border:0;background:none;cursor:pointer">Close ✕</button>
               </div>
             </div>
@@ -1658,6 +1658,8 @@ defmodule JcWeb.ChatLive do
                   <div>📦 File too large to display — <%= human_size(@files.size) %></div>
                   <div style="font-size:.78rem">Open it from the 🖥 terminal instead (e.g. <code style="background:var(--code);padding:.05rem .3rem;border-radius:.25rem">less <%= @files.file && Path.basename(@files.file) %></code>)</div>
                 </div>
+              <% @files.mode == :preview and @files.ext in [".html", ".htm"] -> %>
+                <iframe id={"filehtml-#{@files.gen}"} sandbox="" referrerpolicy="no-referrer" srcdoc={@files.content} style="flex:1;width:100%;border:1px solid var(--bd2);border-radius:.4rem;background:#fff"></iframe>
               <% @files.mode == :preview -> %>
                 <div class="md" id={"filemd-#{@files.gen}"} phx-hook="Rich" style="flex:1;overflow-y:auto;line-height:1.55;padding:.2rem .5rem"><%= raw(md(@files.content)) %></div>
               <% true -> %>
