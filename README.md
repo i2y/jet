@@ -338,12 +338,17 @@ Runnable: [`examples/acp_demo.jet`](examples/acp_demo.jet) ·
 
 The same agents run in **[Jet Console](console/)** — a Phoenix LiveView web app, pure BEAM
 (**no Node, no Electron**): projects, **parallel** threads, a markdown conversation, an embedded
-terminal, and a plan + tool-activity panel. Pick a backend per thread (a local model **or** any
-ACP agent), build agents with a no-code form, and isolate a thread in its own git worktree.
+terminal, and a live plan + tool-activity panel. Pick a backend per thread (a local model, any
+ACP agent, **or** the Claude Code CLI driven directly), build agents with a no-code form, and
+isolate a thread in its own git worktree.
+
+![Jet Console — a Forge agent on the native Claude CLI driving a Pipeline team, with the live plan + tool-activity panel on the right, a markdown conversation, and a clean project/thread sidebar](docs/img/console-hero.png)
 
 ```sh
 cd console && mix setup && mix phx.server   # → http://localhost:4000
 ```
+
+More screenshots — the [parallel-threads board, the no-code agent builder, the file viewer, and the terminal](console/README.md#screenshots).
 
 ### Collaboration shapes — swap the topology, keep the interface
 

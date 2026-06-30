@@ -1,8 +1,10 @@
 # Jet Console — Phoenix LiveView frontend
 
-An **editor-less** web UI for Jet agents — projects, threads, an ACP **or** local backend per
-thread, a markdown conversation, and a plan + tool-activity sidebar.
+An **editor-less** web UI for Jet agents — projects, threads, a local model / an ACP agent / the
+Claude Code CLI per thread, a markdown conversation, and a live plan + tool-activity sidebar.
 Pure BEAM: **no Node, no Electron** (Bandit + esbuild/tailwind standalone binaries).
+
+![Jet Console — a Forge agent on the native Claude CLI driving a Pipeline team, with the live plan + tool-activity panel on the right](../docs/img/console-hero.png)
 
 This dir is the **complete, runnable app** — the whole Phoenix shell + the LiveView, the vendored
 browser JS, and the agents are committed here (it's an **opt-in** component of the Jet repo: a UI
@@ -25,6 +27,28 @@ Local models are unset by default — open **Settings (🔌)** and pick an insta
 (it auto-detects what you have). The internal app module is `Jc`/`:jc`.
 
 Set `JET_PROJECT_DIR` to the folder you want the agents to work in (defaults to the server cwd).
+
+## Screenshots
+
+**Parallel threads — a board of agents working at once**, each its own BEAM process with its own
+backend and its own live plan/tool structure.
+
+![The parallel-threads board — Verified Coder and two Forge runs, each with its round/team structure and status](../docs/img/console-board.png)
+
+**File viewer with rendered Markdown** (also HTML in a sandboxed iframe, images, and
+syntax-highlighted source) — browse the project (or a thread's git worktree); toggle 👁 Preview / ✎ Source.
+
+![The file viewer — the project tree on the left and a rendered README.md preview](../docs/img/console-files.png)
+
+**No-code agent builder** — compose / edit / delete agents in the browser; **Save** recompiles the
+`.jet` file with the `jet` escript and hot-loads the new beam into the picker (no restart).
+
+![The Agents panel — a no-code builder, backend settings, and a raw .jet editor in one tabbed panel](../docs/img/console-builder.png)
+
+**Embedded terminal, per thread** — a PTY-backed shell docked below the conversation, opened in
+that thread's cwd (project or git worktree) and surviving a browser reload.
+
+![A per-thread terminal docked below the conversation, in the project's directory](../docs/img/console-terminal.png)
 
 ## How it works
 
