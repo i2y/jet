@@ -270,6 +270,71 @@ via the same `resolve_pool`/`at`/`route_pick`; a third iterative shape adds it i
 exploits the doer/checker asymmetry (§ 6.5 Goal): the heavy DOER is escalated/routed while a cheap
 CHECKER gates each round. Backends stay the user's choice — no model is assumed anywhere.
 
+## 6.7 Adding your own shape
+
+A shape is **one module with a `turn/4` function, wired in with one `dispatch/4` case** — no
+parser, keyword, or AST change (the `runner Name(...)` DSL resolves the name generically). The
+whole contract:
+
+**1. Write `src/jet_<name>.jet` with `turn(config, method, args, schema)`** — read the runner
+args, build the prompt, orchestrate over `jet_backend`, return the coerced result:
+
+```ruby
+module jet_pair
+  # Pair: a drafter writes, then a reviser improves it once.   runner Pair(model: "ollama:…")
+  def self.turn(config, method, args, schema)
+    jet_http_ffi::ensure_started()
+    opts    = jet_backend::opts(config)                        # the runner(...) args, as a map
+    model   = maps::get(:model, opts, nil)                     # the default member backend —
+    drives  = maps::get(:drives, opts, nil)                    # a local model OR an ACP agent
+    input   = jet_backend::to_bin(jet_acp::build_prompt(config, method, args))
+    backend = jet_backend::resolve_lead(model, drives, nil)    # -> {:ollama, m} | {:acp, cmd}
+
+    draft = jet_backend::run_silent(backend, "Draft an answer to the task below.", input)
+    final = jet_backend::run_streaming(backend,
+              "Improve the draft below; reply with ONLY the improved answer.", draft)
+
+    jet_backend::coerce(final, schema)   # `ask` -> validated to the schema; `task` -> a TurnResult
+  end
+end
+```
+
+**2. Register it — one line in `jet_agent::dispatch/4`** (`src/jet_agent.jet`), beside the others:
+
+```ruby
+case :Pair
+  jet_pair::turn(config, method, args, schema)
+```
+
+**3. Use it** — the name is resolved from the config, so nothing else changes:
+
+```ruby
+agent Buddy
+  runner Pair(model: "ollama:qwen3.6:35b-a3b")
+  ask answer(question)
+end
+```
+
+Everything else comes free from the substrate:
+
+- **Run a member** — `jet_backend::resolve_lead(model, drives, lead)` (or `resolve/4` per member)
+  turns a `model:`/`drives:` spec into a `{:ollama, m}` | `{:acp, cmd}` backend;
+  `run_silent(backend, role, input)` runs it and returns text (no streaming, for internal steps);
+  `run_streaming(…)` also streams `{:text}` to the client; `run_in(…, workspace)` sandboxes an ACP
+  agent to a folder. `coerce(text, schema)` yields the `ask` value or the `task` `TurnResult`.
+- **Show progress** — `jet_acp::emit_trace(id, label, "running"|"ok"|"rejected")` adds a node to the
+  RUN (plan + tool-activity) panel; `jet_acp::emit_event({:text|:thought|:tool_call|:plan})` streams
+  into the conversation.
+- **Parallel + crash-isolated** — run members concurrently with `erlang::spawn_monitor(fn -> … end)`
+  and gather on the `{:DOWN, …}` monitors; a member that crashes is isolated and the rest still
+  deliver (see `jet_fleet` / `jet_flow`). Supervision is free on the BEAM.
+- **Cost-aware pools** — accept `models:` + `select:` and call `jet_backend::resolve_pool(opts)` for
+  `:escalate` / `:route` (§6.6; see `jet_goal`).
+
+Model a new shape on the smallest existing one — **`jet_pipeline.jet`** (~75 lines, sequential) — or
+on `jet_fleet` / `jet_flow` for parallel and LLM-generated topologies. Keep the runner
+**domain-neutral**: structure only, the deliverable is whatever the task needs.
+
 ## 7. Why existing Jet constructs already fit
 
 | existing | role in `agent` |

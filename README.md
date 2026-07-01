@@ -422,6 +422,10 @@ Runnable: [Pipeline](examples/acp_pipeline_demo.jet) · [Refine](examples/acp_re
 [Architect](examples/acp_architect_demo.jet) · [Flow](examples/acp_flow_demo.jet) ·
 [Goal](examples/acp_goal_demo.jet) · [Codegen](examples/acp_codegen_demo.jet).
 
+**Add your own shape** — a `turn/4` module + one `dispatch/4` case (the `runner Name(...)` DSL
+resolves the name generically, so no parser change): see
+[Adding your own shape](docs/agent_design.md#67-adding-your-own-shape).
+
 Jet also speaks **MCP**, both directions. As a **client**, an agent **consumes**
 external MCP servers it declares with `mcp "…"` — their tools become callable mid-turn
 ([`examples/agent_mcp_demo.jet`](examples/agent_mcp_demo.jet)). As a **server**,
