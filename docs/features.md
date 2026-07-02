@@ -1,3 +1,5 @@
+**English** | [日本語](features.ja.md)
+
 # Jet — Feature Guide
 
 Jet is a dynamically-typed, OOP-functional language with Ruby-like syntax that compiles to BEAM
@@ -393,6 +395,8 @@ graph LR
 
 ### Each shape
 
+> Each block below shows only the shape's `runner` line — drop it into an `agent … / ask · task … / end` (see [§2](#2-the-agent-system)) to run it.
+
 **Fleet** — N members analyze the same task in parallel; a lead synthesizes (mixture-of-agents).
 
 ```mermaid
@@ -464,8 +468,9 @@ graph LR
 ```
 
 ```jet
-runner Goal(drives: "claude", max_rounds: 4,
-  accept: "gleam test passes, shown with the real terminal output")
+runner Goal(drives: "claude-code-acp", max_rounds: 4,
+  accept: "the tests pass, shown with the real terminal output")
+# or wrap another shape to verify it:  Goal(via: {name: :Flow}, accept: "…", max_rounds: 3)
 ```
 
 **Flow** — a designer generates a dataflow graph; independent nodes run in parallel, a sink combines.
@@ -478,21 +483,28 @@ graph LR
 ```
 
 ```jet
-runner Flow(model: "ollama:qwen3.6:35b-a3b")   # the designer writes the graph for the task
+runner Flow(drives: "claude-code-acp")   # you write no graph — the designer builds the DAG per task
 ```
 
 **Auto** — a router picks one of your pre-configured shapes at runtime (each with a `when:` hint).
 
 ```jet
 runner Auto(router: "claude-code-acp", model: "ollama:qwen3.6:35b-a3b", shapes: [
-  {name: :Debate,   when: "a yes/no proposition to argue", rounds: 2, agents: [...], judge: {...}},
-  {name: :Pipeline, when: "a multi-step transform",        stages: [...]}])
+  {name: :Debate, when: "a yes/no proposition to argue both sides of",
+   rounds: 2,
+   agents: [{name: "Pro", role: "Argue in favor, concretely."},
+            {name: "Con", role: "Argue against, concretely."}],
+   judge: {role: "Weigh both sides; give a balanced verdict."}},
+  {name: :Fleet, when: "multi-perspective analysis of one topic",
+   members: [{name: "Risks",  role: "Name the biggest risks."},
+             {name: "Upside", role: "Name the biggest benefits."}],
+   reduce: "Weigh the perspectives; give one clear recommendation."}])
 ```
 
 **Architect** — a designer writes the team (shape + roles) for *this* task, then runs it.
 
 ```jet
-runner Architect(drives: "claude-code-acp")
+runner Architect(drives: "claude-code-acp")   # you write no team — it designs the shape + roles per task
 ```
 
 **Codegen** — parallel implementations, then pick the best. It is `Fleet` with `workspace:
