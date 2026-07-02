@@ -17,6 +17,8 @@
 module Llm
 
   # --- Synchronous chat ---
+  # Transient failures (429 / 5xx / transport) retry with bounded backoff
+  # (jet_plan::retry); terminal errors (4xx, bad key, decode) return typed as-is.
   def self.chat(provider, messages, opts)
     jet_http_ffi::ensure_started()
     model = LlmAdapter::require_model(opts)
@@ -25,6 +27,23 @@ module Llm
     headers = LlmAdapter::build_headers(provider, opts)
     body = LlmAdapter::build_body(provider, model, max_tokens, messages, opts)
     json = jet_json_ffi::encode(body)
+    match jet_plan::retry({|| chat_once(url, headers, json)}, maps::new())
+      case {:ok, parsed}
+        jet_usage::from_response(provider, parsed)   # meter tokens (usage block)
+        result = LlmAdapter::extract_response(provider, parsed)
+        tool_calls = maps::get(:tool_calls, result)
+        if tool_calls == []
+          maps::get(:text, result)
+        else
+          result
+        end
+      case err
+        err
+    end
+  end
+
+  # one POST -> {:ok, parsed_body} | {:error, typed_reason}
+  def self.chat_once(url, headers, json)
     match jet_http_ffi::post(url, headers, json)
       case {:ok, response}
         status = maps::get(:status, response)
@@ -32,14 +51,7 @@ module Llm
         if status >= 200 and status < 300
           match jet_json_ffi::decode(resp_body)
             case {:ok, parsed}
-              jet_usage::from_response(provider, parsed)   # meter tokens (usage block)
-              result = LlmAdapter::extract_response(provider, parsed)
-              tool_calls = maps::get(:tool_calls, result)
-              if tool_calls == []
-                maps::get(:text, result)
-              else
-                result
-              end
+              {:ok, parsed}
             case {:error, reason}
               {:error, {:json_decode, reason}}
           end

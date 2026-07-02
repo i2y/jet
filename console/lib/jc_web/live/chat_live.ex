@@ -1055,10 +1055,10 @@ defmodule JcWeb.ChatLive do
   def handle_info({:jet_event_tag, tid, ev}, socket),
     do: {:noreply, update_thread(socket, tid, fn t -> %{t | blocks: apply_event(t.blocks, ev)} end)}
 
-  def handle_info({:jet_done_tag, tid, _r}, socket) do
+  def handle_info({:jet_done_tag, tid, r}, socket) do
     socket =
       update_thread(socket, tid, fn t ->
-        %{t | running: false, blocks: stamp_usage(t.blocks, Map.get(t, :turn_usage))}
+        %{t | running: false, blocks: t.blocks |> stamp_usage(Map.get(t, :turn_usage)) |> maybe_error_block(r)}
       end)
 
     commit(maybe_notify(socket, tid, :finished))
@@ -1161,6 +1161,14 @@ defmodule JcWeb.ChatLive do
   end
 
   defp stamp_usage(blocks, _), do: blocks
+
+  # a turn that ended in a typed error used to end SILENTLY (the done result was
+  # discarded) -- surface it as a red block so retries-exhausted / crashed turns
+  # are visible in the conversation.
+  defp maybe_error_block(blocks, r) when is_tuple(r) and tuple_size(r) >= 2 and elem(r, 0) == :error,
+    do: blocks ++ [%{type: :error, text: "turn failed: " <> inspect(Tuple.delete_at(r, 0), pretty: true, limit: 12, printable_limit: 300)}]
+
+  defp maybe_error_block(blocks, _), do: blocks
 
   defp usage_add(total, u) do
     %{input: (total[:input] || 0) + num(u[:input]),
@@ -1575,6 +1583,8 @@ defmodule JcWeb.ChatLive do
                 <div style="color:var(--mut);font-style:italic;font-size:.82rem;white-space:pre-wrap;opacity:.75">🤔 <%= b.text %></div>
               <% :marker -> %>
                 <div style="text-align:center;color:var(--mut);font-size:.78rem;margin:.3rem 0"><%= b.text %></div>
+              <% :error -> %>
+                <div style="border:1px solid #d04437;border-radius:.5rem;padding:.45rem .7rem;color:#d04437;font-size:.85rem;white-space:pre-wrap">⚠️ <%= b.text %></div>
               <% :edit -> %>
                 <div style="border:1px solid var(--bd);border-radius:.5rem;margin:.2rem 0;overflow:hidden">
                   <div style="background:var(--panel);padding:.3rem .6rem;font-family:ui-monospace,monospace;font-size:.8rem">📝 <%= b.path %></div>

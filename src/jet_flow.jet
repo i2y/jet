@@ -473,7 +473,7 @@ module jet_flow
     flow_node_put(id, jet_acp::trace_node(flabel, "running"), flabel)   # terminal node: its tools nest under it
     plan_mark(id, <<"in_progress">>)
     final = if tools == []
-      out = jet_backend::run_streaming(backend, frole, input)   # final: writes the real files
+      out = jet_backend::run_streaming_soft(backend, frole, input)   # final: writes the real files
       if out == <<>>
         recovered = final_retry(backend, frole, input)   # streamed nothing -> retry/replan
         if recovered != <<>>
@@ -548,7 +548,7 @@ module jet_flow
   def self.answer_followup(backend, topic, schema)
     role = "You are the lead of a team, mid-conversation. Answer the user's most recent message using the conversation so far and your tools (they can read anything the team already produced). Reply in the user's language. Be concise."
     user = erlang::iolist_to_binary(["Conversation:\n", topic, "\n\nAnswer the user's most recent message now."])
-    text = jet_backend::run_streaming(backend, role, user)
+    text = jet_backend::run_streaming_soft(backend, role, user)
     out = if text == <<>>
       jet_acp::emit_event({:text, <<"(no response)">>})
       <<"(no response)">>

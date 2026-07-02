@@ -38,6 +38,81 @@ module jet_plan
     end
   end
 
+  # --- transient-failure retry (bounded exponential backoff) --------------------
+  # The error taxonomy for backend calls: which {:error, reason} values are worth
+  # retrying (rate limits, 5xx, transport hiccups) vs terminal (bad key, 4xx,
+  # decode failures). Reasons follow the typed shapes Llm.jet / jet_llm produce.
+
+  def self.retryable?(reason)
+    match reason
+      case {:api_error, status, _body}
+        (status == 429) or (status >= 500)
+      case {:http_error, _r}
+        true
+      case :timeout
+        true
+      case {:timeout, _}
+        true
+      case _
+        false
+    end
+  end
+
+  # Run `run.()` (-> {:ok, ...} | {:error, reason} | any value) up to `attempts`
+  # times, sleeping base_ms * factor^(n-1) (capped at cap_ms) between tries; only
+  # a retryable {:error, reason} retries. Emits a {:thought, ...} per retry so the
+  # wait is visible instead of a silent stall.
+  #   opts: {attempts: 3, base_ms: 1000, factor: 2, cap_ms: 30000} (all optional)
+  def self.retry(run, opts)
+    retry_loop(run, maps::get(:attempts, opts, 3), maps::get(:base_ms, opts, 1000),
+               maps::get(:factor, opts, 2), maps::get(:cap_ms, opts, 30000), 1)
+  end
+
+  def self.retry_loop(run, attempts, base, factor, cap, n)
+    out = run.()
+    match out
+      case {:error, reason}
+        if (n < attempts) and retryable?(reason)
+          jet_acp::emit_event({:thought, erlang::iolist_to_binary(["(retrying after ", describe_err(reason),
+            " -- attempt ", erlang::integer_to_binary(n + 1), "/", erlang::integer_to_binary(attempts), ")"])})
+          timer::sleep(backoff_ms(base, factor, cap, n))
+          retry_loop(run, attempts, base, factor, cap, n + 1)
+        else
+          out
+        end
+      case _
+        out
+    end
+  end
+
+  def self.backoff_ms(base, factor, cap, n)
+    ms = base * pow_int(factor, n - 1)
+    if ms > cap
+      cap
+    else
+      ms
+    end
+  end
+
+  def self.pow_int(b, e)
+    if e <= 0
+      1
+    else
+      b * pow_int(b, e - 1)
+    end
+  end
+
+  def self.describe_err(reason)
+    match reason
+      case {:api_error, status, _}
+        erlang::iolist_to_binary(["HTTP ", erlang::integer_to_binary(status)])
+      case {:http_error, r}
+        erlang::iolist_to_binary(io_lib::format("~P", [r, 3]))
+      case _
+        erlang::iolist_to_binary(io_lib::format("~P", [reason, 3]))
+    end
+  end
+
   # --- revisable plan-state: an ordered list of steps, each {id, status, attempts}.
   # status flows pending -> in_progress -> completed | failed; a failed step can be
   # re-marked and retried in place (the "revisable" part). ---

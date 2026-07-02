@@ -108,7 +108,7 @@ module jet_fleet
     backend = jet_backend::resolve(maps::get(:drives, m, nil), maps::get(:model, m, nil),
                                    maps::get(:drives, opts, nil), maps::get(:model, opts, nil))
     role = to_bin(maps::get(:role, m, <<"Do the task and answer the user directly, in their language.">>))
-    text = jet_backend::run_streaming(backend, role, to_bin(topic))
+    text = jet_backend::run_streaming_soft(backend, role, to_bin(topic))
     out = if text == <<>>
       jet_acp::emit_event({:text, <<"(no response)">>})
       <<"(no response)">>
@@ -231,7 +231,7 @@ module jet_fleet
     role = "You are the lead engineer. Several team members each implemented the SAME task in isolation; their diffs are below. Compare them and pick the SINGLE best implementation. State the winner, explain briefly why it wins, then show that winner's diff verbatim. Reply in the user's language."
     user = erlang::iolist_to_binary(["Task: ", topic, "\n\nCandidate implementations:\n", digest,
                                      "\n\nPick the best, justify, and show its diff."])
-    text = jet_backend::run_streaming(backend, role, user)   # emits the answer once
+    text = jet_backend::run_streaming_soft(backend, role, user)   # emits the answer once
     if text == <<>>
       jet_acp::emit_event({:text, digest})
       digest
@@ -257,7 +257,7 @@ module jet_fleet
   def self.answer_directly(backend, topic, schema)
     role = "You are the lead of an analyst panel, mid-conversation. Answer the user's most recent message using the conversation so far (it already holds your panel's earlier analysis). Reply in the user's language. Be concise and direct."
     user = erlang::iolist_to_binary(["Conversation:\n", topic, "\n\nAnswer the user's most recent message now."])
-    text = jet_backend::run_streaming(backend, role, user)   # emits the answer once
+    text = jet_backend::run_streaming_soft(backend, role, user)   # emits the answer once
     out = if text == <<>>
       jet_acp::emit_event({:text, <<"(no response)">>})
       <<"(no response)">>
@@ -470,7 +470,7 @@ module jet_fleet
                                      "\n\nYour members' outputs:\n",
                                      digest_of(members, results),
                                      "\n\nNow produce the result for the user's most recent message, in their language."])
-    text = jet_backend::run_streaming(backend, reduce_role(reduce), user)   # emits the answer ONCE
+    text = jet_backend::run_streaming_soft(backend, reduce_role(reduce), user)   # emits the answer ONCE
     if text == <<>>
       fb = fallback_report(members, results)
       jet_acp::emit_event({:text, fb})

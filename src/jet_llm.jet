@@ -163,6 +163,7 @@ module jet_llm
           erlang::put(:__ollama_acc__,
                       erlang::iolist_to_binary([erlang::get(:__ollama_acc__), delta]))
         end
+        jet_usage::from_ollama(obj)   # the final ("done") line carries the eval counts
       case _
         :ok
     end
@@ -218,20 +219,43 @@ module jet_llm
     end
   end
 
-  # POST /api/chat -> {:ok, message_map} | {:error, reason}
+  # POST /api/chat -> {:ok, message_map} | {:error, typed_reason}. A non-2xx now
+  # surfaces the server's error text (an unknown model used to decode into an
+  # EMPTY reply); transient failures retry with backoff (local server: short).
   def self.ollama_post(body)
+    jet_plan::retry({|| ollama_post_once(body)}, {attempts: 3, base_ms: 500})
+  end
+
+  def self.ollama_post_once(body)
     match jet_http_ffi::post_plain(erlang::iolist_to_binary([jet_settings::ollama_url(), "/api/chat"]),
                                    [{<<"content-type">>, <<"application/json">>}],
                                    jet_json_ffi::encode(body))
       case {:ok, resp}
-        match jet_json_ffi::decode(maps::get(:body, resp))
-          case {:ok, decoded}
-            {:ok, maps::get(<<"message">>, decoded, maps::new())}
-          case _
-            {:error, :ollama_decode_failed}
+        status = maps::get(:status, resp, 200)
+        if (status >= 200) and (status < 300)
+          match jet_json_ffi::decode(maps::get(:body, resp))
+            case {:ok, decoded}
+              jet_usage::from_ollama(decoded)   # meter tokens (eval counts)
+              {:ok, maps::get(<<"message">>, decoded, maps::new())}
+            case _
+              {:error, :ollama_decode_failed}
+          end
+        else
+          {:error, {:api_error, status, ollama_err_text(maps::get(:body, resp, <<>>))}}
         end
       case {:error, reason}
-        {:error, reason}
+        {:error, {:http_error, reason}}
+    end
+  end
+
+  # ollama puts its message in {"error": "..."} -- extract it so "model not found"
+  # reads as itself, not as a JSON blob.
+  def self.ollama_err_text(body)
+    match jet_json_ffi::decode(body)
+      case {:ok, m}
+        maps::get(<<"error">>, m, body)
+      case _
+        body
     end
   end
 

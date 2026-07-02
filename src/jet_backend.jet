@@ -76,10 +76,20 @@ module jet_backend
     router = route_router(opts, doers)
     role = "You are a model ROUTER. Given a task and a numbered list of available models -- each with a tier and any capability notes (strengths, language, context size, tools) -- reply with ONLY the index number of the model best suited to the task. Match the task's needs (domain, language, length, tool use) to the models' stated capabilities; among models that are adequate, prefer the CHEAPEST tier. Output just the number, nothing else."
     input = erlang::iolist_to_binary(["Task:\n", to_bin(task), "\n\nModels:\n", route_menu(doers, 0), "\nReply with only the best index number."])
-    chosen = lists::nth(parse_index(run_silent(router, role, input), erlang::length(doers)) + 1, doers)
+    chosen = lists::nth(parse_index(route_run(router, role, input), erlang::length(doers)) + 1, doers)
     jet_acp::emit_event({:thought, erlang::iolist_to_binary(["Routed to ", label_of(chosen), " for this task."])})
     jet_acp::emit_trace(:route, erlang::iolist_to_binary(["🧭 routed → ", label_of(chosen)]), "ok")
     chosen
+  end
+
+  # the routing call itself may fail (backend down) -- degrade to <<>> so
+  # parse_index falls back to the cheapest (first) entry, as documented.
+  def self.route_run(router, role, input)
+    try
+      run_silent(router, role, input)
+    catch _e
+      <<>>
+    end
   end
 
   # the router backend: explicit `router:` wins, else the cheapest (first) pool model.
@@ -239,6 +249,24 @@ module jet_backend
     end
   end
 
+  # run_streaming, degraded: a raised backend error becomes <<>> so the caller's
+  # existing empty-answer fallback (plain report / digest / "(no response)") kicks
+  # in instead of killing the turn. For parent-process FINAL calls only, where the
+  # members' work already exists and losing it to a synthesis hiccup wastes it.
+  def self.run_streaming_soft(backend, role, input)
+    try
+      run_streaming(backend, role, input)
+    catch e
+      jet_acp::emit_event({:thought, erlang::iolist_to_binary(["(final call failed: ", err_text(e),
+                                                               " -- falling back)"])})
+      <<>>
+    end
+  end
+
+  def self.err_text(e)
+    erlang::iolist_to_binary(io_lib::format("~P", [e.get(:reason), 4]))
+  end
+
   # run a backend with a per-call workspace (cwd) -- used by code shapes so a
   # member edits in its OWN git worktree. Ollama has no fs, so workspace is moot
   # there; an ACP agent gets it as the session root.
@@ -267,8 +295,12 @@ module jet_backend
                                 messages: [{role: "system", content: role}, {role: "user", content: to_bin(input)}]})
       case {:ok, msg}
         to_bin(maps::get(<<"content">>, msg, <<>>))
-      case _
-        <<>>
+      case {:error, reason}
+        # retries exhausted: raise TYPED instead of returning <<>> -- an empty
+        # string used to masquerade as a member's "opinion" downstream. A member
+        # process crash-isolates (monitor DOWN -> a failed slot); parent-process
+        # final calls go through run_streaming_soft and fall back gracefully.
+        erlang::error({:jet_backend_error, reason})
     end
   end
 
@@ -358,10 +390,14 @@ module jet_backend
   # shorten, clarify, tiny follow-up) -> NO; a genuinely NEW request -> YES. Two single-
   # axis YES/NO calls are more reliable than one. `router` is the routing backend.
   def self.is_substantive_request?(router, topic)
-    if has_prior_answer?(topic)
-      not refinement?(router, topic)
-    else
-      not chitchat?(router, latest_message(topic))
+    try
+      if has_prior_answer?(topic)
+        not refinement?(router, topic)
+      else
+        not chitchat?(router, latest_message(topic))
+      end
+    catch _e
+      true   # router backend down -> treat as substantive; the shape's own calls surface the real error
     end
   end
 
