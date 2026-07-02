@@ -550,6 +550,14 @@ module jet_runtime
     end
   end
 
+  # Cancel hook: stop the agent's in-flight turn (if any) without killing the
+  # agent. Graceful for connection-owned turns (ACP session/cancel, claude
+  # interrupt) and shape collect loops; a short watchdog hard-kills a native
+  # worker that can't see the message (blocked in a gun receive).
+  def self.handle_call(:__jet_cancel__, _from, self_obj)
+    {:reply, jet_agent::cancel_turn(self_obj), self_obj}
+  end
+
   # handle_call is invoked in response to gen_server::call.
   # The method receives the current self object and returns
   # {:__jet_actor_return__, Reply, NewSelf}; untagged results (e.g. mixin
@@ -614,8 +622,8 @@ module jet_runtime
                   else
                     c3
                   end
-                  erlang::spawn(:jet_agent, :run_turn, [caller, ref, c4, m, a, s, k])
-                  {:reply, jet_agent::AsyncResult.new(ref), ns3}
+                  tpid = erlang::spawn(:jet_agent, :run_turn, [caller, ref, c4, m, a, s, k])
+                  {:reply, jet_agent::AsyncResult.new(ref), jet_agent::remember_turn(ns3, tpid, caller, ref)}
               end
             case _
               {:reply, reply, new_self}

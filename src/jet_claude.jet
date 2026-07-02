@@ -170,6 +170,8 @@ module jet_claude
       case :__close__
         unregister_token(token)
         jet_port_ffi::close(port)
+      case :__cancel_turn__
+        connection_loop(port, agent_pid, token)   # stale cancel (turn already over) -- drop it
       case {p, {:exit_status, _st}} if p == port
         unregister_token(token)
         :closed
@@ -204,12 +206,18 @@ module jet_claude
   def self.run_turn_on_port(port, prompt, _schema)
     erlang::put(:__acp_idle_ticks__, 0)
     erlang::erase(:__claude_streamed__)   # track whether THIS message's text already streamed as deltas
+    erlang::erase(:__claude_cancelled__)
     send_user(port, prompt)
     await(port, <<>>, <<>>)
   end
 
   def self.send_user(port, prompt)
     msg = {type: <<"user">>, message: {role: <<"user">>, content: [{type: <<"text">>, text: to_bin(prompt)}]}}
+    jet_port_ffi::send_input(port, erlang::iolist_to_binary([jet_json_ffi::encode(msg), "\n"]))
+  end
+
+  def self.send_interrupt(port)
+    msg = {type: <<"control_request">>, request_id: <<"jet_cancel">>, request: {subtype: <<"interrupt">>}}
     jet_port_ffi::send_input(port, erlang::iolist_to_binary([jet_json_ffi::encode(msg), "\n"]))
   end
 
@@ -229,6 +237,13 @@ module jet_claude
           case {:native_permission, req, reply_to}
             # claude paused for a tool permission -> raise the 🔐, answer it, then keep reading
             reply_to ! {:native_permission_decision, ask_user(req)}
+            await(port, buf, acc)
+          case :__cancel_turn__
+            # the CLI accepts a control_request interrupt mid-turn (verified on
+            # 2.1.198): it stops generating and still emits the turn's `result`
+            # (with usage/cost), which ends this await through the normal path.
+            erlang::put(:__claude_cancelled__, true)
+            send_interrupt(port)
             await(port, buf, acc)
         after 60000
           idle_tick(port, buf, acc)
@@ -325,7 +340,9 @@ module jet_claude
   # text was already emitted incrementally via {:text,..}, so this is the once-only return value.
   def self.finish(ev, acc)
     jet_usage::from_claude_result(ev)   # meter the CLI-reported cost/tokens/wall time
-    if maps::get(<<"is_error">>, ev, false) == true
+    if erlang::get(:__claude_cancelled__) == true
+      {:error, :cancelled}
+    elsif maps::get(<<"is_error">>, ev, false) == true
       {:error, :claude_error, to_bin(maps::get(<<"result">>, ev, <<>>))}
     else
       text = maps::get(<<"result">>, ev, nil)

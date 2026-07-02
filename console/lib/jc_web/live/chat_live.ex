@@ -320,11 +320,22 @@ defmodule JcWeb.ChatLive do
     cur = socket.assigns.current
     t = socket.assigns.threads[cur]
 
-    if t == nil do
-      {:noreply, socket}
-    else
-      stop_pids(t)
-      commit(update_thread(socket, cur, fn x -> %{x | running: false, run_pid: nil, agent: nil} end))
+    cond do
+      t == nil ->
+        {:noreply, socket}
+
+      is_pid(t.agent) and Process.alive?(t.agent) ->
+        # graceful cancel: the turn ends through its normal done path (partial text,
+        # usage badge, trace marks land) and the agent + its session SURVIVE for the
+        # next message. If nothing ends within 8s, fall back to the old hard kill.
+        pid = t.agent
+        Task.start(fn -> :jet_console.cancel(pid) end)
+        Process.send_after(self(), {:cancel_hard, cur}, 8000)
+        {:noreply, socket}
+
+      true ->
+        stop_pids(t)
+        commit(update_thread(socket, cur, fn x -> %{x | running: false, run_pid: nil, agent: nil} end))
     end
   end
 
@@ -1073,6 +1084,19 @@ defmodule JcWeb.ChatLive do
       else: {:noreply, socket}
   end
 
+  # the graceful cancel didn't end the turn in time -> old sledgehammer path
+  # (kills the turn AND the agent; it re-spawns on the next send).
+  def handle_info({:cancel_hard, tid}, socket) do
+    case socket.assigns.threads[tid] do
+      %{running: true} = t ->
+        stop_pids(t)
+        commit(update_thread(socket, tid, fn x -> %{x | running: false, run_pid: nil, agent: nil} end))
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
   def handle_info(_msg, socket), do: {:noreply, socket}
 
   defp update_thread(socket, tid, fun) do
@@ -1164,7 +1188,10 @@ defmodule JcWeb.ChatLive do
 
   # a turn that ended in a typed error used to end SILENTLY (the done result was
   # discarded) -- surface it as a red block so retries-exhausted / crashed turns
-  # are visible in the conversation.
+  # are visible in the conversation. A user-initiated cancel gets a quiet marker.
+  defp maybe_error_block(blocks, {:error, :cancelled}),
+    do: blocks ++ [%{type: :marker, text: "■ stopped"}]
+
   defp maybe_error_block(blocks, r) when is_tuple(r) and tuple_size(r) >= 2 and elem(r, 0) == :error,
     do: blocks ++ [%{type: :error, text: "turn failed: " <> inspect(Tuple.delete_at(r, 0), pretty: true, limit: 12, printable_limit: 300)}]
 

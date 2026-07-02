@@ -194,6 +194,8 @@ module jet_acp
         connection_loop(port, sid, next_id + 1, buf2, agent_pid)
       case :__close__
         jet_port_ffi::close(port)
+      case :__cancel_turn__
+        connection_loop(port, sid, next_id, buf, agent_pid)   # stale cancel (turn already over) -- drop it
       case {p, {:exit_status, _st}} if p == port
         :closed
       case {:DOWN, _mref, :process, dp, _reason} if dp == agent_pid
@@ -203,6 +205,7 @@ module jet_acp
 
   def self.run_prompt(port, sid, id, prompt, schema, kind, buf)
     reset_collect()
+    erlang::put(:__acp_sid__, sid)   # for a mid-turn session/cancel (see await)
     send_req(port, id, "session/prompt", prompt_params(sid, prompt))
     match await(port, buf, id, <<>>)
       case {:response, r, rest, acc}
@@ -457,6 +460,13 @@ module jet_acp
             await(port, erlang::iolist_to_binary([buf, data]), await_id, acc)
           case {p, {:exit_status, st}} if p == port
             {:closed, st, acc}
+          case :__cancel_turn__
+            # per the ACP spec the agent still answers the in-flight session/prompt
+            # (stopReason cancelled) -- notify and keep reading; the normal response
+            # path (or the idle backstop, for agents that ignore cancel) ends the turn.
+            send_msg(port, {jsonrpc: "2.0", method: "session/cancel",
+                            params: {sessionId: erlang::get(:__acp_sid__)}})
+            await(port, buf, await_id, acc)
         after 60000     # 1-min heartbeat tick instead of one silent 5-min wait
           idle_tick(port, buf, await_id, acc)
         end

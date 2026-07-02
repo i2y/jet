@@ -94,6 +94,12 @@ module jet_console
   # like run_to_raw, but every message carries `tag` (e.g. a thread id) so a multi-thread
   # frontend can route concurrent agents' streams: {:jet_event_tag, tag, ev} then
   # {:jet_done_tag, tag, result}.
+  # cancel a thread's in-flight turn (the Console Stop button): graceful -- the
+  # turn ends through its normal done path and the agent + session survive.
+  def self.cancel(apid)
+    jet_agent::cancel(apid)
+  end
+
   def self.run_to_tagged(apid, method, args, sink, tag)
     ar = jet_runtime::call_method(apid, method, args)
     result = ar.stream({|ev| forward_tagged(sink, tag, ev)})

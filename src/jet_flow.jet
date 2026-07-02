@@ -32,7 +32,12 @@ module jet_flow
       reason = jet_backend::to_bin(maps::get(<<"reason">>, design, <<>>))
       {nodes, sink} = ensure_sink(norm_nodes(maps::get(<<"nodes">>, design, [])))
       announce(nodes, sink, reason)                       # show the generated topology
-      jet_backend::coerce(execute(nodes, sink, topic, model, drives, tools, skills_block), schema)
+      match execute(nodes, sink, topic, model, drives, tools, skills_block)
+        case {:error, :cancelled}
+          {:error, :cancelled}
+        case out
+          jet_backend::coerce(out, schema)
+      end
     else
       # chitchat / a refinement of the prior answer -> continue directly, no new graph.
       jet_acp::emit_event({:thought, <<"Continuing the conversation (no new graph needed)...">>})
@@ -240,7 +245,13 @@ module jet_flow
       else
         ready
       end
-      run_waves(nodes, sink, task, model, drives, maps::merge(done, run_wave(wave, task, model, drives, done)), tools, skills_block)
+      wave_out = run_wave(wave, task, model, drives, done)
+      if maps::get(:__cancelled__, wave_out, false)
+        jet_acp::emit_event({:text, <<"(cancelled -- stopping the graph)">>})
+        {:error, :cancelled}
+      else
+        run_waves(nodes, sink, task, model, drives, maps::merge(done, wave_out), tools, skills_block)
+      end
     end
   end
 
@@ -394,6 +405,11 @@ module jet_flow
         case {{:flow_progress, nid}, {:item, ev}}
           forward_progress(nid, ev)                # surface a running node's tool_calls, namespaced
           collect(remaining, mons, results)
+        case :__cancel_turn__
+          # user cancel: kill the wave's pending nodes and flag the result --
+          # run_waves stops (no later waves, no final node).
+          maps::put(:__cancelled__, true,
+                    lists::foldl({|pid, acc| flow_cancel_one(pid, mons, acc)}, results, maps::keys(mons)))
       after 45000
         # nodes run in their OWN processes, so a long node (e.g. a whole build) emits
         # nothing on the main stream -- which would idle-time-out the turn and kill it
@@ -434,6 +450,15 @@ module jet_flow
   def self.pair_id(kv)
     {_pid, {id, _mref}} = kv
     id
+  end
+
+  def self.flow_cancel_one(pid, mons, results)
+    id = node_name(pid, mons)
+    erlang::demonitor(node_mref(pid, mons), [:flush])
+    erlang::exit(pid, :kill)
+    flow_done(id, "error")
+    plan_mark(id, <<"completed">>)
+    maps::put(id, <<"(cancelled)">>, results)
   end
 
   def self.node_mref(pid, mons)

@@ -54,8 +54,8 @@ module jet_acp_server
         router_loop(st)
       case {:rpc, rmethod, params, from}
         router_loop(send_request(rmethod, params, from, st))
-      case {:turn_done, sid, user_msg, answer, reqid}
-        send_result(reqid, {stopReason: "end_turn"})
+      case {:turn_done, sid, user_msg, answer, reqid, stop}
+        send_result(reqid, {stopReason: stop})
         append_to_session(sid, user_msg, answer, st)   # append in the router (serialized); jet_memory snapshots
         router_loop(st)
       case :stdin_closed
@@ -104,6 +104,11 @@ module jet_acp_server
                    prompt_text(maps::get(<<"prompt">>, params, [])),
                    st)
       case <<"session/cancel">>
+        # a notification (no reply): forward to the session's agent from a one-off
+        # process (the router must not block); the in-flight session/prompt still
+        # completes through the normal turn_done path, with stopReason "cancelled".
+        params = maps::get(<<"params">>, msg, maps::new())
+        cancel_session(maps::get(<<"sessionId">>, params, nil), st)
         st
       case _
         if id == nil
@@ -156,7 +161,25 @@ module jet_acp_server
   def self.turn_proc(router, reqid, sid, conv, user_msg, apid, method)
     ar = jet_runtime::call_method(apid, method, [conv])
     response = jet_runtime::call_method(ar, :stream, [{|ev| route_event(router, sid, ev)}])
-    router ! {:turn_done, sid, user_msg, response_text(response), reqid}
+    router ! {:turn_done, sid, user_msg, response_text(response), reqid, stop_reason(response)}
+  end
+
+  def self.stop_reason(response)
+    match response
+      case {:error, :cancelled}
+        "cancelled"
+      case _
+        "end_turn"
+    end
+  end
+
+  def self.cancel_session(sid, st)
+    match maps::get(sid, maps::get(:sessions, st), nil)
+      case {apid, _mem}
+        erlang::spawn({|| jet_agent::cancel(apid)})
+      case _
+        :ok
+    end
   end
 
   def self.route_event(router, sid, ev)

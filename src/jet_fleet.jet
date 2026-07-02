@@ -72,12 +72,18 @@ module jet_fleet
              model: model, drives: drives, topic: topic, facts: facts}
       mons = spawn_all(members, model, drives, topic, facts, parent)   # fan out (parallel)
       results = collect(maps::size(mons), mons, maps::new(), ctx)  # gather; crash-isolated + self-healing
-      sid = jet_acp::next_trace_id()
-      slabel = erlang::iolist_to_binary(["🧬 synthesis · ", jet_backend::bk_label(model, drives)])
-      jet_acp::emit_trace(sid, slabel, "running")
-      report = synthesize(lead_backend_of(opts), maps::get(:reduce, opts, nil), topic, members, results)
-      jet_acp::emit_trace(sid, slabel, "ok")
-      coerce(report, schema)            # synthesize already emitted the answer once
+      if maps::get(:__cancelled__, results, false)
+        jet_acp::emit_event({:text, erlang::iolist_to_binary(["(cancelled -- partial results)\n\n",
+          fallback_report(members, maps::remove(:__cancelled__, results))])})
+        {:error, :cancelled}
+      else
+        sid = jet_acp::next_trace_id()
+        slabel = erlang::iolist_to_binary(["🧬 synthesis · ", jet_backend::bk_label(model, drives)])
+        jet_acp::emit_trace(sid, slabel, "running")
+        report = synthesize(lead_backend_of(opts), maps::get(:reduce, opts, nil), topic, members, results)
+        jet_acp::emit_trace(sid, slabel, "ok")
+        coerce(report, schema)            # synthesize already emitted the answer once
+      end
     end
   end
 
@@ -179,14 +185,20 @@ module jet_fleet
     # worktree members never respawn (a retry would re-enter a half-edited tree)
     results = collect(maps::size(mons), mons, maps::new(),
                       {ring: [erlang::node()], retry: 0, model: model, drives: drives, topic: topic, facts: <<>>})
-    sections = lists::map({|m| wt_section(m, results, wts)}, members)   # {name, summary, diff}
-    sid = jet_acp::next_trace_id()
-    slabel = erlang::iolist_to_binary(["🧬 synthesis · ", jet_backend::bk_label(model, drives)])
-    jet_acp::emit_trace(sid, slabel, "running")
-    report = synthesize_code(lead_backend_of(opts), topic, sections)   # emits the answer once
-    jet_acp::emit_trace(sid, slabel, "ok")
-    cleanup_worktrees(wts)                                 # always clean up the worktrees
-    coerce(report, schema)
+    if maps::get(:__cancelled__, results, false)
+      cleanup_worktrees(wts)
+      jet_acp::emit_event({:text, <<"(cancelled -- worktrees cleaned up)">>})
+      {:error, :cancelled}
+    else
+      sections = lists::map({|m| wt_section(m, results, wts)}, members)   # {name, summary, diff}
+      sid = jet_acp::next_trace_id()
+      slabel = erlang::iolist_to_binary(["🧬 synthesis · ", jet_backend::bk_label(model, drives)])
+      jet_acp::emit_trace(sid, slabel, "running")
+      report = synthesize_code(lead_backend_of(opts), topic, sections)   # emits the answer once
+      jet_acp::emit_trace(sid, slabel, "ok")
+      cleanup_worktrees(wts)                                 # always clean up the worktrees
+      coerce(report, schema)
+    end
   end
 
   def self.make_worktrees(members)
@@ -442,10 +454,28 @@ module jet_fleet
           else
             collect(remaining, mons, results, ctx)
           end
+        case :__cancel_turn__
+          # user cancel: kill every pending member (works cross-node), record the
+          # slots, and hand back a flagged result -- the caller skips synthesis
+          # (never spend a fresh LLM call after a cancel) and returns promptly.
+          maps::put(:__cancelled__, true, cancel_pending(mons, results, ctx))
       after 60000
         collect_tick(remaining, mons, results, ctx)
       end
     end
+  end
+
+  def self.cancel_pending(mons, results, ctx)
+    lists::foldl({|pid, acc| cancel_one(pid, mons, acc, ctx)}, results, maps::keys(mons))
+  end
+
+  def self.cancel_one(pid, mons, results, ctx)
+    name = member_name(pid, mons)
+    erlang::demonitor(member_mref(pid, mons), [:flush])
+    erlang::exit(pid, :kill)
+    member_fail(member_m(pid, mons), ctx)
+    jet_acp::emit_event({:tool_call, {id: name, status: "failed", output: <<"(cancelled)">>}})
+    maps::put(name, {:failed, :cancelled}, results)
   end
 
   def self.handle_down(remaining, mons, results, ctx, pid, reason)

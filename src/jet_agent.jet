@@ -76,6 +76,60 @@ module jet_agent
     end
   end
 
+  # --- cancellation -----------------------------------------------------------
+
+  # cancel an agent's in-flight turn from outside (Console Stop, ACP
+  # session/cancel, or user code): jet_agent::cancel(pid) -> :ok | :no_turn.
+  # The agent process and its session SURVIVE; only the turn ends (with
+  # {:error, :cancelled}). No `.cancel()` method sugar -- a user agent may
+  # define its own `cancel`.
+  def self.cancel(apid)
+    gen_server::call(apid, :__jet_cancel__, 10000)
+  end
+
+  # runs inside the agent gen_server (jet_runtime's :__jet_cancel__ clause).
+  def self.cancel_turn(self_obj)
+    st = erlang::element(3, self_obj)
+    conn = maps::get(:__acp_conn__, st, nil)
+    tpid = maps::get(:__turn_pid__, st, nil)
+    if (conn != nil) and erlang::is_process_alive(conn)
+      conn ! :__cancel_turn__          # ACP/claude conn: graceful (session/cancel | interrupt)
+      :ok
+    elsif (tpid != nil) and erlang::is_process_alive(tpid)
+      tpid ! :__cancel_turn__          # shape collect loops handle this gracefully...
+      erlang::spawn(:jet_agent, :cancel_watchdog, [tpid, maps::get(:__turn_ref__, st, nil)])
+      :ok
+    else
+      :no_turn
+    end
+  end
+
+  # ...but a worker blocked inside gun's selective receive never sees the
+  # graceful message -- after a few seconds kill it and complete the caller's
+  # future ourselves, so nothing waits out the 600s await timeout.
+  def self.cancel_watchdog(tpid, tref)
+    timer::sleep(4000)
+    if erlang::is_process_alive(tpid)
+      erlang::exit(tpid, :kill)
+      match tref
+        case {caller, ref}
+          caller ! {ref, {:done, {:error, :cancelled}}}
+        case _
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  # stash the native turn worker's pid + reply address in agent state, so
+  # cancel_turn can reach it (mirrors how :__acp_conn__ lives in state).
+  def self.remember_turn(self_obj, tpid, caller, ref)
+    st = erlang::element(3, self_obj)
+    erlang::setelement(3, self_obj,
+      maps::put(:__turn_pid__, tpid, maps::put(:__turn_ref__, {caller, ref}, st)))
+  end
+
   # a structured description of an agent's COMPOSITION (its declared runner shape + key params),
   # for the Console's agent-structure visualizer. Pure: reads the static config, runs nothing.
   def self.describe(config)
