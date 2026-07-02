@@ -68,10 +68,10 @@ module jet_fleet
       members = assign_nodes(members, ring)                   # round-robin; members get :on (their node)
       members = lists::map({|m| add_node(m, model, drives)}, members)   # one trace node per member (running)
       parent = erlang::self()
-      erlang::put(:__fleet_usage__, maps::new())              # fresh per-member metering for this fan-out
+      ctx = {ring: ring, retry: maps::get(:retry, opts, default_retry(ring)),
+             model: model, drives: drives, topic: topic, facts: facts}
       mons = spawn_all(members, model, drives, topic, facts, parent)   # fan out (parallel)
-      results = collect(maps::size(mons), mons, maps::new())  # gather, crash-isolated
-      lists::foreach({|m| jet_acp::emit_trace(maps::get(:node, m, nil), done_label(m, model, drives), "ok")}, members)
+      results = collect(maps::size(mons), mons, maps::new(), ctx)  # gather; crash-isolated + self-healing
       sid = jet_acp::next_trace_id()
       slabel = erlang::iolist_to_binary(["🧬 synthesis · ", jet_backend::bk_label(model, drives)])
       jet_acp::emit_trace(sid, slabel, "running")
@@ -174,11 +174,11 @@ module jet_fleet
     jet_acp::emit_event({:plan, plan_of(members)})
     members = lists::map({|m| add_node(m, model, drives)}, members)   # one trace node per member (running)
     parent = erlang::self()
-    erlang::put(:__fleet_usage__, maps::new())             # fresh per-member metering for this fan-out
     wts = make_worktrees(members)                          # name -> worktree path (or :no_wt)
     mons = spawn_wt_all(members, model, drives, topic, wts, parent)
-    results = collect(maps::size(mons), mons, maps::new()) # name -> the member's summary text
-    lists::foreach({|m| jet_acp::emit_trace(maps::get(:node, m, nil), done_label(m, model, drives), "ok")}, members)
+    # worktree members never respawn (a retry would re-enter a half-edited tree)
+    results = collect(maps::size(mons), mons, maps::new(),
+                      {ring: [erlang::node()], retry: 0, model: model, drives: drives, topic: topic, facts: <<>>})
     sections = lists::map({|m| wt_section(m, results, wts)}, members)   # {name, summary, diff}
     sid = jet_acp::next_trace_id()
     slabel = erlang::iolist_to_binary(["🧬 synthesis · ", jet_backend::bk_label(model, drives)])
@@ -213,7 +213,7 @@ module jet_fleet
     wt = maps::get(name, wts, :no_wt)
     {pid, mref} = erlang::spawn_monitor({|| jet_fleet::member_proc_wt(parent, name, role, backend, topic, wt)})
     jet_acp::emit_event({:tool_call, {id: name, title: name, kind: "edit", status: "in_progress"}})
-    maps::put(pid, {name, mref}, mons)
+    maps::put(pid, {name, mref, m}, mons)
   end
 
   # a worktree member edits real files, so steer it away from the failure mode we
@@ -319,7 +319,7 @@ module jet_fleet
     {pid, mref} = erlang::spawn_monitor(member_node(m), :jet_fleet, :member_remote,
                                         [parent, name, role, backend, topic, facts, crash])
     jet_acp::emit_event({:tool_call, {id: name, title: name, kind: "think", status: "in_progress"}})
-    maps::put(pid, {name, mref}, mons)
+    maps::put(pid, {name, mref, m}, mons)
   end
 
   # remote-safe member entry: the worker node's gun may not be started yet (its
@@ -403,30 +403,119 @@ module jet_fleet
     end
   end
 
-  # --- gather: a done message completes a slot; a DOWN fails one. Either way the
-  # count drops, so one crashed member can't stall the fleet. ---
+  # --- gather: a done message completes a slot; a DOWN either RESPAWNS the member
+  # (on a surviving node, up to `retry:` times -- self-healing) or fails its slot.
+  # Either way the count converges, so a crashed member can't stall the fleet. ---
 
-  def self.collect(remaining, mons, results)
+  # nodes: present -> members respawn once by default; local fleets keep the
+  # original record-the-crash behavior unless retry: is set explicitly.
+  def self.default_retry(ring)
+    if erlang::length(ring) > 1
+      1
+    else
+      0
+    end
+  end
+
+  def self.collect(remaining, mons, results, ctx)
     if remaining <= 0
       results
     else
       receive
         case {:fleet_done, pid, name, out, u}
-          erlang::put(:__fleet_idle__, 0)                        # progress -> reset the idle heartbeat
-          erlang::demonitor(member_mref(pid, mons), [:flush])    # no stray DOWN after a clean finish
-          jet_usage::note_member(name, u)                        # fold the member's tokens into this turn
-          remember_usage(name, u)
-          jet_acp::emit_event({:tool_call, {id: name, status: "completed", output: out}})
-          collect(remaining - 1, maps::remove(pid, mons), maps::put(name, out, results))
+          if maps::is_key(pid, mons)
+            erlang::put(:__fleet_idle__, 0)                        # progress -> reset the idle heartbeat
+            erlang::demonitor(member_mref(pid, mons), [:flush])    # no stray DOWN after a clean finish
+            jet_usage::note_member(name, u)                        # fold the member's tokens into this turn
+            member_ok(pid, mons, ctx, u)                           # per-arrival trace ok (accurate duration)
+            jet_acp::emit_event({:tool_call, {id: name, status: "completed", output: out}})
+            collect(remaining - 1, maps::remove(pid, mons), maps::put(name, out, results), ctx)
+          else
+            # a stale done (the slot was already respawned or abandoned) -- ignore;
+            # touching mons here would demonitor(nil) and crash the collector.
+            collect(remaining, mons, results, ctx)
+          end
         case {:DOWN, _mref, :process, pid, reason}
-          erlang::put(:__fleet_idle__, 0)
-          name = member_name(pid, mons)
-          jet_acp::emit_event({:tool_call, {id: name, status: "failed", output: crash_message(reason)}})
-          collect(remaining - 1, maps::remove(pid, mons), maps::put(name, {:failed, reason}, results))
+          if maps::is_key(pid, mons)
+            erlang::put(:__fleet_idle__, 0)
+            handle_down(remaining, mons, results, ctx, pid, reason)
+          else
+            collect(remaining, mons, results, ctx)
+          end
       after 60000
-        collect_tick(remaining, mons, results)
+        collect_tick(remaining, mons, results, ctx)
       end
     end
+  end
+
+  def self.handle_down(remaining, mons, results, ctx, pid, reason)
+    name = member_name(pid, mons)
+    m = member_m(pid, mons)
+    attempt = maps::get(:attempt, m, 1)
+    if attempt <= maps::get(:retry, ctx, 0)
+      respawn(remaining, maps::remove(pid, mons), results, ctx, m, name, reason, attempt)
+    else
+      jet_acp::emit_event({:tool_call, {id: name, status: "failed", output: crash_message(reason)}})
+      member_fail(m, ctx)
+      collect(remaining - 1, maps::remove(pid, mons), maps::put(name, {:failed, reason}, results), ctx)
+    end
+  end
+
+  # re-run a lost member -- on the next ALIVE node when the fleet spans nodes (a
+  # whole-node kill re-homes its members), in place for a local fleet. The same
+  # tool_call id / trace node are re-marked running, so the UI slot just resets.
+  def self.respawn(remaining, mons, results, ctx, m, name, reason, attempt)
+    m2 = maps::put(:attempt, attempt + 1, move_node(m, ctx))
+    jet_acp::emit_event({:thought, erlang::iolist_to_binary([name, " lost (", reason_text(reason),
+      ") -- respawning", where_text(m2), ", attempt ", erlang::integer_to_binary(attempt + 1), "/",
+      erlang::integer_to_binary(maps::get(:retry, ctx, 0) + 1)])})
+    jet_acp::emit_trace(maps::get(:node, m2, nil),
+                        node_label(m2, maps::get(:model, ctx, nil), maps::get(:drives, ctx, nil)), "running")
+    mons2 = spawn_one(m2, maps::get(:model, ctx, nil), maps::get(:drives, ctx, nil),
+                      maps::get(:topic, ctx, nil), maps::get(:facts, ctx, <<>>), erlang::self(), mons)
+    collect(remaining, mons2, results, ctx)     # remaining unchanged: the slot is live again
+  end
+
+  # a local member stays local (label untouched); a placed member moves to a node
+  # that is alive RIGHT NOW, preferring one different from where it just died.
+  def self.move_node(m, ctx)
+    match maps::get(:on, m, nil)
+      case nil
+        m
+      case cur
+        maps::put(:on, pick_other(jet_cluster::alive(maps::get(:ring, ctx, [erlang::node()])), cur), m)
+    end
+  end
+
+  def self.pick_other(ring, cur)
+    match lists::filter({|n| n != cur}, ring)
+      case []
+        erlang::hd(lists::append(ring, [erlang::node()]))
+      case others
+        erlang::hd(others)
+    end
+  end
+
+  def self.where_text(m)
+    match maps::get(:on, m, nil)
+      case nil
+        <<>>
+      case n
+        erlang::iolist_to_binary([" on ", erlang::atom_to_binary(n, :utf8)])
+    end
+  end
+
+  # mark a member's trace node at ITS arrival (accurate per-member duration; the
+  # old batch pass at fan-out end stamped every member with the same wall time).
+  def self.member_ok(pid, mons, ctx, u)
+    m = member_m(pid, mons)
+    jet_acp::emit_trace(maps::get(:node, m, nil),
+      jet_usage::decorate(node_label(m, maps::get(:model, ctx, nil), maps::get(:drives, ctx, nil)), u), "ok")
+  end
+
+  def self.member_fail(m, ctx)
+    jet_acp::emit_trace(maps::get(:node, m, nil),
+      node_label(m, maps::get(:model, ctx, nil), maps::get(:drives, ctx, nil)), "fail")
   end
 
   # No member finished for another minute. Surface a heartbeat (how many are still working)
@@ -436,14 +525,14 @@ module jet_fleet
   # cleaned, and Goal can re-attempt. (Each member's own DRIVE already caps ~10 min in
   # jet_acp::await; this is the backstop for a member wedged ABOVE the drive, e.g. in diff
   # capture -- the silent hang that left a stray worktree and never reached Goal's Check.)
-  def self.collect_tick(remaining, mons, results)
+  def self.collect_tick(remaining, mons, results, ctx)
     ticks = collect_idle() + 1
     erlang::put(:__fleet_idle__, ticks)
     if ticks >= collect_cap()
-      abandon_pending(mons, results)
+      abandon_pending(mons, results, ctx)
     else
       jet_acp::emit_event({:thought, erlang::iolist_to_binary(["(", erlang::integer_to_binary(remaining), " member(s) still working, ", erlang::integer_to_binary(ticks), " min with no new result…)"])})
-      collect(remaining, mons, results)
+      collect(remaining, mons, results, ctx)
     end
   end
 
@@ -462,46 +551,32 @@ module jet_fleet
 
   # record every still-pending member (left in mons) as a timeout, so collect's caller
   # proceeds with whatever finished instead of waiting forever.
-  def self.abandon_pending(mons, results)
-    lists::foldl({|pid, acc| abandon_one(pid, mons, acc)}, results, maps::keys(mons))
+  def self.abandon_pending(mons, results, ctx)
+    lists::foldl({|pid, acc| abandon_one(pid, mons, acc, ctx)}, results, maps::keys(mons))
   end
 
-  def self.abandon_one(pid, mons, results)
+  def self.abandon_one(pid, mons, results, ctx)
     name = member_name(pid, mons)
     erlang::demonitor(member_mref(pid, mons), [:flush])
+    member_fail(member_m(pid, mons), ctx)
     jet_acp::emit_event({:tool_call, {id: name, status: "failed",
       output: erlang::iolist_to_binary(["(member timed out -- no result after ", erlang::integer_to_binary(collect_cap()), " min)"])}})
     maps::put(name, {:failed, :timeout}, results)
   end
 
-  # per-member usage, stashed so the final trace-label pass can decorate each node.
-  def self.remember_usage(name, u)
-    erlang::put(:__fleet_usage__, maps::put(name, u, fleet_usage()))
-  end
-
-  def self.fleet_usage()
-    match erlang::get(:__fleet_usage__)
-      case :undefined
-        maps::new()
-      case x
-        x
-    end
-  end
-
-  # a member's completion label: its node label plus a token suffix when metered.
-  def self.done_label(m, model, drives)
-    base = node_label(m, model, drives)
-    jet_usage::decorate(base, maps::get(to_bin(maps::get(:name, m, <<"member">>)), fleet_usage(), nil))
-  end
-
   def self.member_mref(pid, mons)
-    {_name, mref} = maps::get(pid, mons, {nil, nil})
+    {_name, mref, _m} = maps::get(pid, mons, {nil, nil, nil})
     mref
   end
 
   def self.member_name(pid, mons)
-    {name, _mref} = maps::get(pid, mons, {<<"?">>, nil})
+    {name, _mref, _m} = maps::get(pid, mons, {<<"?">>, nil, nil})
     name
+  end
+
+  def self.member_m(pid, mons)
+    {_name, _mref, m} = maps::get(pid, mons, {nil, nil, maps::new()})
+    m
   end
 
   # --- reduce: a REAL synthesis. A lead agent integrates the panel's notes into
@@ -608,6 +683,8 @@ module jet_fleet
   # drop the stacktrace dump. Anything else is shown compactly.
   def self.reason_text(reason)
     match reason
+      case :noconnection
+        <<"its node went down">>
       case {kind, trace} if erlang::is_atom(kind) and erlang::is_list(trace)
         erlang::atom_to_binary(kind, :utf8)
       case _
