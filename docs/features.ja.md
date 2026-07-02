@@ -325,6 +325,24 @@ end
 
 Jet は MCP を**サーバ**としても話します（`jet_mcp::handle` が `tools/list` / `tools/call` に応答）。
 
+### 計測と制御
+
+すべてのターンは**計測されます**: トークン数 — バックエンドが実額を報告する場合はコストも
+（ネイティブ `claude` CLI は報告します）— が `{:usage, …}` イベントとして流れ、Console には
+返信ごとのバッジ（`↑1.2k ↓460 tok · $0.04 · 12.4s`）、ヘッダのスレッド累計 `Σ`、実行ツリーの
+member 別トークン数、完了した各ステップの所要時間として表示されます。価格テーブルは意図的に
+持ちません: Ollama はトークンのみ、（usage を報告しない）ACP ドライブは何も表示しません。
+
+実行中のターンは**エージェントを殺さずにキャンセルできます**: Console の Stop ボタン、ACP の
+`session/cancel`、コードからの `jet_agent::cancel(pid)` のいずれもターンを `{:error, :cancelled}`
+で終わらせます — 部分結果は残り、shape は合成をスキップし（キャンセル後に LLM をもう1回呼ばない）、
+**同じ**エージェント（同じセッション・同じ記憶）が次のメッセージに応えます。
+
+失敗は**型付きで、リトライされます**: 一時的なバックエンド障害（429 / 5xx / 通信断）は指数
+バックオフつきでリトライされ `(retrying after HTTP 429 — 2/3)` という thought が見えます。
+恒久的なエラーは `{:api_error, 404, "model 'x' not found"}` のようにデータとして表面化し
+（沈黙の空文字に化けません）、Console は失敗したターンを赤いエラーブロックで描画します。
+
 ---
 
 ## 3. コラボレーション shape — マルチエージェントのパターン
@@ -381,6 +399,33 @@ runner Fleet(model: "ollama:qwen3.6:35b-a3b",
             {name: "Skeptic", role: "Say why it might fail."}],
   reduce: "Weigh the perspectives; give one clear recommendation.")
 ```
+
+フリートは**マシンを跨ぐ**ことも、自己修復することも、並列数を絞ることもできます:
+
+```jet
+runner Fleet(model: "ollama:qwen3.6:35b-a3b",
+  nodes: ["b@host2"],   # member を BEAM ノード群にラウンドロビン配置（ラベルに "@b" が付く）
+  retry: 2,             # 自己修復: 失われた member — ノードごと死んでも — 生存ノードで respawn
+  max_parallel: 2,      # 同時に走る member を最大2つに（Flow の wave にも効く）
+  members: [{name: "Risks", role: "…"}, {name: "Upside", role: "…"}],
+  reduce: "…")
+```
+
+- 各ワーカーは**同じ Jet チェックアウトから**起動します: `JET_NODE_NAME=b ./jet -r
+  jet_cluster::serve src/jet_cluster.jet`（ノード名と OS pid を印字するので、その pid を
+  `kill -9` すれば治癒の様子が見られます）。到達不能・ビルド不一致のノードは通知つきで除外され、
+  フリートはローカルで続行します。
+- 各ノードは**それぞれの** `JET_OLLAMA_URL` を読むので、マシンごとに自分の Ollama を使えます。
+  ACP/claude ドライブはその member が走るノードにインストールが必要。`workspace: :worktree` は
+  ローカルファイルシステムを編集するため1ノードに留まります。
+- `retry:` のデフォルトは `nodes:` 指定時 1、それ以外 0 — 従来の `crash: true` 隔離デモは
+  明示しない限りこれまでどおり failed になります。
+- **セキュリティ**: Erlang 分散は cookie 認証（`JET_COOKIE`）のみで非暗号化です。信頼できる
+  ネットワーク / VPN 限定で使い、epmd（ポート 4369）を決してインターネットに公開しないこと。
+
+実行可能: [`examples/fleet_dist.jet`](../examples/fleet_dist.jet)（素の actor を2ノードに分散、
+ノードごと kill → re-home）· [`examples/acp_fleet_dist_demo.jet`](../examples/acp_fleet_dist_demo.jet)
+（LLM パネル版）。
 
 **Pipeline** — 逐次的なステージ。各ステージの出力が次に渡る（`implement → test → review`）。
 

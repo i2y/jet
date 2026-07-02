@@ -229,6 +229,15 @@ multi-agent collaboration patterns are **also just runners**, built on a shared 
 | `Flow` | runtime dataflow-graph generation | `jet_flow` |
 | `Goal` | self-verifying loop until acceptance | `jet_goal` |
 
+Run-wide Fleet/Flow options: **`nodes:`** places members across BEAM nodes round-robin
+(`jet_cluster` starts distribution at runtime, md5-handshakes each worker, and drops
+unreachable/skewed ones; members spawn via the MFA form so no fun crosses nodes);
+**`retry:`** respawns a lost member — including a whole dead node's members, re-homed onto
+survivors — up to N times (default 1 with `nodes:`, else 0); **`max_parallel:`** caps
+fan-out concurrency by chunking. Every turn meters usage (`jet_usage`, `{:usage, …}`
+events; members carry totals home in their done messages) and is cancellable without
+killing the agent (`jet_agent::cancel/1` → graceful per-owner delivery + a 4s watchdog).
+
 `Auto`/`Architect`/`Flow` decide the topology **at runtime** (the MetaGen/Maestro
 direction — LLM-driven, not RL-trained); on the BEAM each generated node is supervised, so a
 hallucinated/crashing node is isolated, not fatal — a blind spot of the LLM-multi-agent

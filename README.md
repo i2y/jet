@@ -29,7 +29,13 @@ end
 
 ![10,000 supervised agents, crash-isolated](fleet.gif)
 
-Runnable: [`examples/pitch.jet`](examples/pitch.jet) (the first GIF) · [`examples/fleet.jet`](examples/fleet.jet) (the fleet).
+…and the fleet spans **machines**: split the same supervised fleet across two BEAM nodes, kill the *whole worker node* mid-flight, and the supervisor re-homes its agents onto the survivor. No k8s, no queue, no sidecar — Erlang distribution + monitors, driven from Jet.
+
+![a fleet spanning two nodes heals a whole-node kill](fleet_dist.gif)
+
+The LLM `Fleet` runner does the same: `nodes: ["b@host"], retry: 2` places members across nodes and respawns lost ones on survivors — see [docs/features.md](docs/features.md).
+
+Runnable: [`examples/pitch.jet`](examples/pitch.jet) (the first GIF) · [`examples/fleet.jet`](examples/fleet.jet) (the fleet) · [`examples/fleet_dist.jet`](examples/fleet_dist.jet) (two nodes, self-healing).
 
 And those agents run **inside your editor**: `jet acp-serve` exposes one over
 [ACP](https://agentclientprotocol.com), so any ACP client drives it

@@ -1,0 +1,26 @@
+# The Fleet runner ACROSS MACHINES: same panel as acp_fleet_demo, but the
+# members are placed round-robin over this node + the worker nodes in `nodes:`
+# (labels show who ran where: "Risks @b"). `retry: 2` makes it SELF-HEALING --
+# kill a worker node mid-run and its members respawn on a survivor; the panel
+# still delivers. Each node runs its own Ollama (JET_OLLAMA_URL is read on the
+# executing node).
+#
+#   worker:  ./jet -r jet_cluster::serve examples/acp_fleet_dist_demo.jet   (JET_NODE_NAME=b)
+#   serve:   jet acp-serve acp_fleet_dist_demo::Panel::review examples/acp_fleet_dist_demo.jet
+#
+# Replace b@YOURHOST with the node name the worker prints. Distribution is
+# cookie-authenticated and unencrypted -- trusted networks / VPN only.
+module acp_fleet_dist_demo
+  agent Panel
+    runner Fleet(model: "ollama:qwen3.6:35b-a3b",
+                 nodes: ["b@YOURHOST"],
+                 retry: 2,
+                 reduce: "Weigh the panel's perspectives and give one clear, specific recommendation in 3-4 sentences.",
+                 members: [
+      {name: "Risks",     role: "You are a risk analyst. In 2-3 sentences, name the biggest risks of the idea. Be specific."},
+      {name: "Upside",    role: "You are an optimist. In 2-3 sentences, name the biggest benefits of the idea."},
+      {name: "Skeptic",   role: "You are a hard skeptic. In 2-3 sentences, say why the idea might fail."},
+      {name: "Ops",       role: "You are an SRE. In 2-3 sentences, assess the operational burden."}])
+    ask review(topic)
+  end
+end

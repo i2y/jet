@@ -353,6 +353,24 @@ end
 
 Jet also speaks MCP as a **server** (`jet_mcp::handle` answers `tools/list` / `tools/call`).
 
+### Metering & control
+
+Every turn is **metered**: token counts — and real cost, when the backend reports it (the native
+`claude` CLI does) — flow as `{:usage, …}` events and appear in the Console as a per-reply badge
+(`↑1.2k ↓460 tok · $0.04 · 12.4s`), a per-thread `Σ` total in the header, per-member token counts
+in the run tree, and a duration on every finished step. There is deliberately no price table:
+Ollama meters tokens only, and ACP drives (which report no usage) simply show nothing.
+
+A running turn can be **cancelled without killing the agent**: the Console Stop button, ACP
+`session/cancel`, or `jet_agent::cancel(pid)` from code all end the turn with `{:error, :cancelled}`
+— partial results land, shapes skip their synthesis instead of spending one more LLM call, and the
+*same* agent (same session, same memory) answers the next message.
+
+Failures are **typed and retried**: transient backend errors (429 / 5xx / transport) retry with
+exponential backoff and a visible `(retrying after HTTP 429 — 2/3)` thought; terminal errors
+surface as data — e.g. `{:api_error, 404, "model 'x' not found"}` — instead of degrading into a
+silent empty reply, and the Console renders a failed turn as a red error block.
+
 ---
 
 ## 3. Collaboration shapes (multi-agent patterns)
@@ -412,6 +430,32 @@ runner Fleet(model: "ollama:qwen3.6:35b-a3b",
             {name: "Skeptic", role: "Say why it might fail."}],
   reduce: "Weigh the perspectives; give one clear recommendation.")
 ```
+
+A fleet can also span **machines**, heal itself, and cap its concurrency:
+
+```jet
+runner Fleet(model: "ollama:qwen3.6:35b-a3b",
+  nodes: ["b@host2"],   # place members across BEAM nodes, round-robin (labels show "@b")
+  retry: 2,             # self-healing: a lost member — or a whole dead node — respawns on a survivor
+  max_parallel: 2,      # at most 2 members run at once (also works on Flow's waves)
+  members: [{name: "Risks", role: "…"}, {name: "Upside", role: "…"}],
+  reduce: "…")
+```
+
+- Start each worker **from the same Jet checkout**: `JET_NODE_NAME=b ./jet -r jet_cluster::serve
+  src/jet_cluster.jet` (it prints its node name and OS pid — `kill -9` that pid to watch the fleet
+  heal). Unreachable or version-skewed nodes are dropped with a note; the fleet then runs locally.
+- Each node reads its **own** `JET_OLLAMA_URL`, so every machine can run its own Ollama; an
+  ACP/claude drive must be installed on whichever node runs that member. `workspace: :worktree`
+  stays on one node (it edits the local filesystem).
+- `retry:` defaults to 1 when `nodes:` is set, 0 otherwise — so the classic `crash: true`
+  isolation demo still fails visibly unless you ask for healing.
+- **Security**: Erlang distribution is cookie-authenticated (`JET_COOKIE`) and unencrypted — use it
+  on trusted networks / a VPN only, and never expose epmd (port 4369) to the internet.
+
+Runnable: [`examples/fleet_dist.jet`](../examples/fleet_dist.jet) (raw actors across two nodes,
+whole-node kill → re-home) · [`examples/acp_fleet_dist_demo.jet`](../examples/acp_fleet_dist_demo.jet)
+(the LLM panel version).
 
 **Pipeline** — sequential stages; each stage's output feeds the next (`implement → test → review`).
 

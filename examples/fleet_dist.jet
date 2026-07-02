@@ -1,0 +1,112 @@
+# THE distributed flagship: ONE fleet of supervised agents spanning TWO BEAM
+# nodes. Kill the whole worker node mid-flight and the supervisor re-homes its
+# agents onto the survivor -- the fleet never goes down. No k8s, no queue, no
+# sidecar infra: Erlang distribution + monitors, driven from Jet.
+#
+#   terminal 1:  ./jet -r fleet_dist::worker examples/fleet_dist.jet
+#   terminal 2:  ./jet -r fleet_dist::run    examples/fleet_dist.jet
+#
+# (run/0 halts the worker node itself, so one command demos the healing; you
+#  can equally `kill -9` the OS pid the worker prints. Two machines: start the
+#  worker with JET_NODE_NAME=b@<ip>, set JET_WORKER_NODE=b@<ip> for run/0, and
+#  share a JET_COOKIE -- cookie-authenticated, unencrypted: trusted networks only.)
+module fleet_dist
+  actor Agent                          # a stateful agent (a supervised process)
+    def initialize(id)  @id = id  end
+    def on_message(_)  erlang::error(:boom)  end
+  end
+
+  def self.c(code, s)  [27] ++ "[" ++ code ++ "m" ++ s ++ [27] ++ "[0m"  end   # ANSI
+
+  # terminal 1: boot the expendable worker node (prints its name + OS pid).
+  def self.worker()
+    jet_cluster::serve("b")
+  end
+
+  # spawn agents ON THIS NODE -- rpc'd ONCE per node, not once per agent.
+  def self.launch_local(ids)
+    lists::map({|i| {fleet_dist::Agent.spawn(i), i}}, ids)
+  end
+
+  def self.run()
+    logger::set_primary_config(:level, :critical)   # mute OTP crash reports
+    jet_cluster::ensure_origin(maps::new())
+    b = worker_node()
+    if net_adm::ping(b) == :pong
+      demo(b)
+    else
+      io::format("worker node ~p is not up -- start it first:~n  ./jet -r fleet_dist::worker examples/fleet_dist.jet~n", [b])
+    end
+  end
+
+  # "b" on this host, or JET_WORKER_NODE for the two-machine variant.
+  def self.worker_node()
+    match os::getenv("JET_WORKER_NODE")
+      case false
+        match binary::split(erlang::atom_to_binary(erlang::node(), :utf8), <<"@">>)
+          case [_, host]
+            erlang::binary_to_atom(erlang::iolist_to_binary(["b@", host]), :utf8)
+          case _
+            erlang::binary_to_atom(<<"b">>, :utf8)
+        end
+      case v
+        erlang::list_to_atom(v)
+    end
+  end
+
+  def self.demo(b)
+    n = 6000
+    io::format("  spawning ~p supervised agents across 2 nodes...~n", [n])
+    sup = erlang::spawn(:fleet_dist, :start, [erlang::self(), n, b])
+    receive
+      case {:up, here, there}
+        io::format(c("36", "  fleet up: ~p agents -- ~p on ~p, ~p on ~p") ++ "~n",
+                   [here + there, here, erlang::node(), there, b])
+    end
+    timer::sleep(800)
+    io::format(c("31", "  killing the WHOLE worker node ~p...") ++ "~n", [b])
+    rpc::cast(b, :erlang, :halt, [])                # the entire remote VM dies
+    timer::sleep(3000)
+    sup ! {:report, erlang::self()}
+    receive
+      case {:fleet, size, rehomed}
+        io::format(c("32", "  [supervisor] node down -> re-homed ~p agents onto ~p") ++ "~n",
+                   [rehomed, erlang::node()])
+        io::format(c("32", "  fleet = ~p agents, intact -- a whole machine died and the fleet healed.") ++ "~n",
+                   [size])
+    end
+  end
+
+  # the supervisor: half the fleet here, half on the worker; monitor every agent
+  # (monitors are distribution-transparent). A dead node shows up as one
+  # :noconnection DOWN per remote agent -> respawn each on THIS surviving node.
+  def self.start(parent, n, b)
+    half = erlang::div(n, 2)
+    local = launch_local(lists::seq(1, half))
+    remote = rpc::call(b, :fleet_dist, :launch_local, [lists::seq(half + 1, n)])
+    pids = index(lists::append(local, remote))
+    parent ! {:up, erlang::length(local), erlang::length(remote)}
+    loop(pids, 0)
+  end
+
+  def self.index(pairs)
+    lists::foldl(do |pair, acc|
+      {pid, id} = pair
+      erlang::monitor(:process, pid)
+      maps::put(pid, id, acc)
+    end, maps::new(), pairs)
+  end
+
+  def self.loop(pids, rehomed)
+    receive
+      case {:DOWN, _ref, :process, dead, _why}
+        id = maps::get(dead, pids, 0)
+        np = fleet_dist::Agent.spawn(id)            # re-home on the survivor
+        erlang::monitor(:process, np)
+        loop(maps::put(np, id, maps::remove(dead, pids)), rehomed + 1)
+      case {:report, caller}
+        caller ! {:fleet, maps::size(pids), rehomed}
+        loop(pids, rehomed)
+    end
+  end
+end
