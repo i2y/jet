@@ -659,8 +659,26 @@ module jet_acp
 
   # dynamic-trace span for the Console's execution visualizer: a shape runner reports a step
   # (id is stable so status updates in place). status = "running" | "ok" | "fail" | a custom verb.
+  # Timing is centralized here: the first sighting records t0, and every non-running update
+  # carries :ms (elapsed since t0) -- emitters stay untouched, consumers Map.get(:ms).
   def self.emit_trace(id, label, status)
-    emit_event({:trace, {id: id, parent: cur_parent(), label: label, status: status}})
+    emit_event({:trace, with_ms(id, status, {id: id, parent: cur_parent(), label: label, status: status})})
+  end
+
+  def self.with_ms(id, status, span)
+    if status == "running"
+      if erlang::get({:__trace_t0__, id}) == :undefined
+        erlang::put({:__trace_t0__, id}, erlang::monotonic_time(:millisecond))
+      end
+      span
+    else
+      match erlang::get({:__trace_t0__, id})
+        case :undefined
+          span
+        case t0
+          maps::put(:ms, erlang::monotonic_time(:millisecond) - t0, span)
+      end
+    end
   end
 
   # the trace tree is built from PARENT links: a shape sets the current parent around a sub-run so

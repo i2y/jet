@@ -47,7 +47,11 @@ defmodule JcWeb.ChatLive do
   defp normalize_threads(base), do: base
 
   defp normalize_thread(t),
-    do: Map.merge(%{running: false, run_pid: nil, carry: false, worktree: nil, agent: nil}, t)
+    do:
+      Map.merge(
+        %{running: false, run_pid: nil, carry: false, worktree: nil, agent: nil, turn_usage: nil, usage_total: %{}},
+        t
+      )
 
   defp fresh_state(agents, conn) do
     default = default_backend(agents)
@@ -73,7 +77,8 @@ defmodule JcWeb.ChatLive do
 
   defp new_thread(id, project_id, backend, spawn?) do
     %{id: id, project_id: project_id, title: "New thread", backend: backend, blocks: [],
-      running: false, run_pid: nil, carry: false, worktree: nil, agent: if(spawn?, do: do_spawn(backend), else: nil)}
+      running: false, run_pid: nil, carry: false, worktree: nil, turn_usage: nil, usage_total: %{},
+      agent: if(spawn?, do: do_spawn(backend), else: nil)}
   end
 
   # where a thread's agent runs: its isolated git worktree if set, else the project folder.
@@ -464,7 +469,7 @@ defmodule JcWeb.ChatLive do
         Jc.TurnBuffer.start_turn(cur)   # route the turn's events through a buffer so a reload can reconnect
         run_pid = :erlang.spawn(:jet_console, :run_to_tagged, [t.agent, :chat, [prompt], Jc.TurnBuffer.target(), cur])
         title = if t.title == "New thread", do: String.slice(msg, 0, 32), else: t.title
-        t = %{t | running: true, run_pid: run_pid, title: title, blocks: t.blocks ++ [%{type: :user, text: msg}]}
+        t = %{t | running: true, run_pid: run_pid, title: title, turn_usage: nil, blocks: t.blocks ++ [%{type: :user, text: msg}]}
         commit(assign(socket, threads: Map.put(socket.assigns.threads, cur, t), traces: Map.put(socket.assigns.traces, cur, [])))
       end
     end
@@ -1034,11 +1039,28 @@ defmodule JcWeb.ChatLive do
     end
   end
 
+  # a turn's token/cost aggregate ({:usage, scope: :turn} from jet_usage) -> remember it for
+  # the reply badge and fold it into the thread's running total. Per-call events pass through.
+  def handle_info({:jet_event_tag, tid, {:usage, u}}, socket) when is_map(u) do
+    if Map.get(u, :scope) == :turn do
+      {:noreply,
+       update_thread(socket, tid, fn t ->
+         %{t | turn_usage: u, usage_total: usage_add(Map.get(t, :usage_total) || %{}, u)}
+       end)}
+    else
+      {:noreply, socket}
+    end
+  end
+
   def handle_info({:jet_event_tag, tid, ev}, socket),
     do: {:noreply, update_thread(socket, tid, fn t -> %{t | blocks: apply_event(t.blocks, ev)} end)}
 
   def handle_info({:jet_done_tag, tid, _r}, socket) do
-    socket = update_thread(socket, tid, fn t -> %{t | running: false} end)
+    socket =
+      update_thread(socket, tid, fn t ->
+        %{t | running: false, blocks: stamp_usage(t.blocks, Map.get(t, :turn_usage))}
+      end)
+
     commit(maybe_notify(socket, tid, :finished))
   end
 
@@ -1127,6 +1149,53 @@ defmodule JcWeb.ChatLive do
   defp to_s(x) when is_list(x), do: List.to_string(x)
   defp to_s(x), do: inspect(x)
 
+  # --- usage metering (tokens / cost / model time) --------------------------
+
+  # attach the turn's usage to the reply it belongs to (the last agent block) so the
+  # badge persists with the conversation (blocks survive ThreadStore restarts).
+  defp stamp_usage(blocks, u) when is_map(u) do
+    case List.last(blocks) do
+      %{type: :agent} = b -> List.replace_at(blocks, -1, Map.put(b, :usage, u))
+      _ -> blocks
+    end
+  end
+
+  defp stamp_usage(blocks, _), do: blocks
+
+  defp usage_add(total, u) do
+    %{input: (total[:input] || 0) + num(u[:input]),
+      output: (total[:output] || 0) + num(u[:output]),
+      cost_usd: (total[:cost_usd] || 0) + num(u[:cost_usd]),
+      duration_ms: (total[:duration_ms] || 0) + num(u[:duration_ms])}
+  end
+
+  defp num(v) when is_number(v), do: v
+  defp num(_), do: 0
+
+  # "↑1.2k ↓460 tok · $0.0421 · 12.4s" -- omits whatever the backend didn't report;
+  # "" when nothing was metered (e.g. an ACP drive), so callers can hide the badge.
+  defp usage_line(u) when is_map(u) do
+    tok =
+      case {num(u[:input]), num(u[:output])} do
+        {0, 0} -> nil
+        {i, o} -> "↑#{tok_s(i)} ↓#{tok_s(o)} tok"
+      end
+
+    cost = if num(u[:cost_usd]) > 0, do: "$#{:erlang.float_to_binary(num(u[:cost_usd]) * 1.0, decimals: 4)}"
+    dur = if num(u[:duration_ms]) > 0, do: dur_s(num(u[:duration_ms]))
+    [tok, cost, dur] |> Enum.reject(&is_nil/1) |> Enum.join(" · ")
+  end
+
+  defp usage_line(_), do: ""
+
+  defp tok_s(n) when n >= 10_000, do: "#{div(n, 1000)}k"
+  defp tok_s(n) when n >= 1_000, do: "#{Float.round(n / 1000, 1)}k"
+  defp tok_s(n), do: "#{n}"
+
+  defp dur_s(ms) when ms >= 60_000, do: "#{div(ms, 60_000)}m#{rem(div(ms, 1000), 60)}s"
+  defp dur_s(ms) when ms >= 1_000, do: "#{Float.round(ms / 1000, 1)}s"
+  defp dur_s(ms), do: "#{ms}ms"
+
   # the recent conversation, inlined so a just-switched agent continues with context.
   defp context_preamble(blocks) do
     convo =
@@ -1164,7 +1233,7 @@ defmodule JcWeb.ChatLive do
 
   # accumulate a shape runner's live trace spans, updating a span in place by its id
   defp upsert_trace(list, span) do
-    entry = %{id: span.id, parent: Map.get(span, :parent, nil), label: to_s(span.label), status: to_s(span.status), kind: Map.get(span, :kind, :struct)}
+    entry = %{id: span.id, parent: Map.get(span, :parent, nil), label: to_s(span.label), status: to_s(span.status), kind: Map.get(span, :kind, :struct), ms: Map.get(span, :ms)}
 
     if Enum.any?(list, &(&1.id == entry.id)),
       do: Enum.map(list, fn e -> if e.id == entry.id, do: entry, else: e end),
@@ -1192,6 +1261,15 @@ defmodule JcWeb.ChatLive do
     Enum.flat_map(nodes, fn n -> [{n, depth} | trace_dfs(Map.get(children, n.id, []), children, depth + 1)] end)
   end
 
+  # a span's elapsed time (:ms rides trace updates since jet_acp times each span);
+  # "" for running spans, tool leaves, and traces persisted before the field existed.
+  defp trace_ms(e) do
+    case Map.get(e, :ms) do
+      ms when is_integer(ms) and ms > 0 -> " (" <> dur_s(ms) <> ")"
+      _ -> ""
+    end
+  end
+
   defp trace_icon("running"), do: "⏳"
   defp trace_icon("accepted"), do: "✅"
   defp trace_icon("rejected"), do: "↻"
@@ -1212,7 +1290,7 @@ defmodule JcWeb.ChatLive do
 
   defp trace_mermaid(trace) do
     idx = trace |> Enum.with_index() |> Map.new(fn {e, i} -> {e.id, "t#{i}"} end)
-    nodes = trace |> Enum.with_index() |> Enum.map(fn {e, i} -> ~s(  t#{i}["#{mq(trace_icon(e.status) <> " " <> trunc40(e.label))}"]) end)
+    nodes = trace |> Enum.with_index() |> Enum.map(fn {e, i} -> ~s(  t#{i}["#{mq(trace_icon(e.status) <> " " <> trunc40(e.label) <> trace_ms(e))}"]) end)
 
     edges =
       Enum.flat_map(trace, fn e ->
@@ -1470,6 +1548,7 @@ defmodule JcWeb.ChatLive do
               </select>
             </form>
             <span>· 📁 <%= proj && proj.dir %></span>
+            <span :if={cur && usage_line(Map.get(cur, :usage_total) || %{}) != ""} title="thread total: tokens in/out · cost · model time">· Σ <%= usage_line(Map.get(cur, :usage_total)) %></span>
             <%= if cur do %>
               <% wt = Map.get(cur, :worktree) %>
               <%= if wt do %>
@@ -1489,6 +1568,7 @@ defmodule JcWeb.ChatLive do
                 <div style="align-self:flex-end;background:#0b66c3;color:#fff;padding:.45rem .7rem;border-radius:.8rem;max-width:80%;white-space:pre-wrap"><%= b.text %></div>
               <% :agent -> %>
                 <div class="md" style="line-height:1.5"><%= raw(md(b.text)) %></div>
+                <div :if={usage_line(Map.get(b, :usage)) != ""} title="this reply: tokens in/out · cost · model time" style="color:var(--mut);font-size:.72rem;margin-top:.15rem"><%= usage_line(Map.get(b, :usage)) %></div>
               <% :thought -> %>
                 <div style="color:var(--mut);font-style:italic;font-size:.88rem">🤔 <%= b.text %></div>
               <% :thinking -> %>
@@ -1560,7 +1640,7 @@ defmodule JcWeb.ChatLive do
           <%= if done?(it.status), do: "☑", else: "☐" %> <%= it.title %></div>
         <div style="font-size:.72rem;color:var(--mut);text-transform:uppercase;letter-spacing:.04em;margin:.8rem 0 .3rem">Run <span style="text-transform:none;font-size:.68rem">(structure + tools · 🧬 for graph)</span></div>
         <div :if={Map.get(@traces, @current, []) == []} style="color:var(--mut);font-size:.85rem">—</div>
-        <div :for={{e, d} <- trace_tree_order(Map.get(@traces, @current, []))} style={"font-size:.8rem;font-family:ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:.08rem 0;padding-left:#{d * 0.8}rem"}><%= trace_icon(e.status) %> <%= e.label %></div>
+        <div :for={{e, d} <- trace_tree_order(Map.get(@traces, @current, []))} style={"font-size:.8rem;font-family:ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:.08rem 0;padding-left:#{d * 0.8}rem"}><%= trace_icon(e.status) %> <%= e.label %><span style="color:var(--mut)"><%= trace_ms(e) %></span></div>
         </div>
       </aside>
 
@@ -1870,7 +1950,7 @@ defmodule JcWeb.ChatLive do
               <span :if={t.worktree} style="color:#2ea043;flex-shrink:0">🌳 <%= t.worktree.branch %></span>
             </div>
             <div :if={Map.get(@traces, t.id, []) != []} style="border-top:1px solid var(--bd);padding-top:.35rem;max-height:8.5rem;overflow:hidden">
-              <div :for={{e, d} <- trace_tree_order(Map.get(@traces, t.id, []))} style={"font-size:.72rem;font-family:ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:#{d * 0.7}rem"}><%= trace_icon(e.status) %> <%= e.label %></div>
+              <div :for={{e, d} <- trace_tree_order(Map.get(@traces, t.id, []))} style={"font-size:.72rem;font-family:ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:#{d * 0.7}rem"}><%= trace_icon(e.status) %> <%= e.label %><span style="color:var(--mut)"><%= trace_ms(e) %></span></div>
             </div>
           </div>
         </div>
