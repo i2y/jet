@@ -1,0 +1,176 @@
+module jet_cluster
+  # Runtime Erlang distribution for the agent layer. The jet escript boots
+  # NON-distributed; this module turns distribution on when a shape asks for it
+  # (`nodes:` on the runner) and resolves the placement ring. v1 conventions:
+  #   - node names are STRINGS ("b@host" -- Jet atoms can't contain '@');
+  #     a name containing '.' selects longnames, else shortnames
+  #   - every worker runs FROM THE SAME JET CHECKOUT (same escript/stdlib
+  #     beams + gun); convene verifies with a module-md5 handshake and DROPS
+  #     mismatched nodes loudly instead of failing mid-run
+  #   - cookie: `cookie:` opt or JET_COOKIE env; unset -> ~/.erlang.cookie.
+  #     Distribution is cookie-authenticated and UNENCRYPTED: trusted networks
+  #     or a VPN only; never expose epmd (4369) / the dist port to the internet
+  #   - the ORIGIN always participates and cannot be killed (the collector
+  #     lives there); worker nodes are the expendable ones
+
+  # resolve the runner's nodes: option to a live placement ring.
+  # absent -> [this node]: exactly the local behavior, no distribution started.
+  def self.ring(opts)
+    match maps::get(:nodes, opts, nil)
+      case nil
+        [erlang::node()]
+      case spec
+        if ensure_origin(opts) == :ok
+          {ring, dropped} = resolve(spec)
+          report_dropped(dropped)
+          ring
+        else
+          [erlang::node()]
+        end
+    end
+  end
+
+  # ensure THIS vm is distributed (idempotent); returns :ok | :error.
+  def self.ensure_origin(opts)
+    r = if erlang::is_alive()
+      :ok
+    else
+      os::cmd("epmd -daemon")
+      match net_kernel::start(origin_name(), {name_domain: domain_of(origin_name())})
+        case {:ok, _pid}
+          :ok
+        case err
+          jet_acp::emit_event({:thought, erlang::iolist_to_binary(["(could not start distribution: ",
+            jet_backend::to_bin(err), " -- running on this node only)"])})
+          :error
+      end
+    end
+    if r == :ok
+      set_cookie(opts)
+    end
+    r
+  end
+
+  def self.origin_name()
+    match os::getenv("JET_NODE_NAME")
+      case false
+        erlang::binary_to_atom(erlang::iolist_to_binary(["jet_", os::getpid()]), :utf8)
+      case name
+        erlang::list_to_atom(name)
+    end
+  end
+
+  # ping + same-build handshake for each wanted node -> {ring, dropped}.
+  # :connected uses whatever is already in erlang::nodes().
+  def self.resolve(spec)
+    wanted = if spec == :connected
+      erlang::nodes()
+    else
+      lists::map({|s| node_atom(s)}, spec)
+    end
+    good = lists::filter({|n| usable?(n)}, wanted)
+    {[erlang::node(), *good], lists::subtract(wanted, good)}
+  end
+
+  # reachable AND running the same jet_fleet build (md5) -- a version-skewed
+  # worker would crash on the remote MFA spawn, so drop it up front.
+  def self.usable?(n)
+    if net_adm::ping(n) == :pong
+      rpc::call(n, :jet_fleet, :module_info, [:md5]) == jet_fleet::module_info(:md5)
+    else
+      false
+    end
+  end
+
+  def self.report_dropped(dropped)
+    lists::foreach({|n| jet_acp::emit_event({:thought, erlang::iolist_to_binary(["(node ",
+      erlang::atom_to_binary(n, :utf8),
+      " unreachable or running a different Jet build -- continuing without it)"])})}, dropped)
+  end
+
+  def self.node_atom(s)
+    erlang::binary_to_atom(jet_backend::to_bin(s), :utf8)
+  end
+
+  def self.domain_of(name)
+    match binary::split(erlang::atom_to_binary(name, :utf8), <<".">>)
+      case [_only]
+        :shortnames
+      case _
+        :longnames
+    end
+  end
+
+  def self.set_cookie(opts)
+    c = cookie_of(opts)
+    if c == nil
+      :ok
+    else
+      erlang::set_cookie(c)
+    end
+  end
+
+  def self.cookie_of(opts)
+    match maps::get(:cookie, opts, nil)
+      case nil
+        match os::getenv("JET_COOKIE")
+          case false
+            nil
+          case v
+            erlang::list_to_atom(v)
+        end
+      case v
+        erlang::binary_to_atom(jet_backend::to_bin(v), :utf8)
+    end
+  end
+
+  # --- worker boot ------------------------------------------------------------
+
+  # boot a WORKER node from the same checkout and wait for fleets:
+  #   JET_NODE_NAME=b ./jet -r jet_cluster::serve src/jet_cluster.jet
+  # Prints its node + OS pid (the self-healing demo kill -9s that pid).
+  def self.serve()
+    serve(worker_name())
+  end
+
+  def self.serve(name)
+    os::cmd("epmd -daemon")
+    a = node_atom(name)
+    match net_kernel::start(a, {name_domain: domain_of(a)})
+      case {:ok, _}
+        set_cookie(maps::new())
+        jet_http_ffi::ensure_started()
+        io::format("worker node ~p up (os pid ~s) -- waiting for fleet members; kill it to test healing~n",
+                   [erlang::node(), os::getpid()])
+        timer::sleep(:infinity)
+      case err
+        io::format("could not start worker node ~p: ~p~n", [a, err])
+    end
+  end
+
+  def self.worker_name()
+    match os::getenv("JET_NODE_NAME")
+      case false
+        "jet_worker"
+      case v
+        v
+    end
+  end
+
+  # --- ring helpers -----------------------------------------------------------
+
+  def self.pick(ring, i)
+    lists::nth(erlang::rem(i, erlang::length(ring)) + 1, ring)
+  end
+
+  # "b@host" -> "b" (for compact "@b" member labels)
+  def self.short(node)
+    erlang::hd(binary::split(erlang::atom_to_binary(node, :utf8), <<"@">>))
+  end
+
+  # the ring members still up right now (origin + currently connected nodes)
+  def self.alive(ring)
+    up = [erlang::node(), *erlang::nodes()]
+    lists::filter({|n| lists::member(n, up)}, ring)
+  end
+end

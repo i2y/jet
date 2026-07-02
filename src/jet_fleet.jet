@@ -64,6 +64,8 @@ module jet_fleet
         <<>>
       end
       jet_acp::emit_event({:plan, plan_of(members)})          # the roster, as a checklist
+      ring = jet_cluster::ring(opts)                          # nodes: -> a multi-node placement ring ([here] otherwise)
+      members = assign_nodes(members, ring)                   # round-robin; members get :on (their node)
       members = lists::map({|m| add_node(m, model, drives)}, members)   # one trace node per member (running)
       parent = erlang::self()
       erlang::put(:__fleet_usage__, maps::new())              # fresh per-member metering for this fan-out
@@ -82,7 +84,38 @@ module jet_fleet
   # a trace node per member (parallel members can't thread the parent across processes, so each
   # member node updates running -> ok from the PARENT once collect gathers it).
   def self.node_label(m, model, drives)
-    erlang::iolist_to_binary(["🔭 ", to_bin(maps::get(:name, m, <<"member">>)), " · ", jet_backend::bk_label(maps::get(:model, m, model), maps::get(:drives, m, drives))])
+    base = erlang::iolist_to_binary(["🔭 ", to_bin(maps::get(:name, m, <<"member">>)), " · ", jet_backend::bk_label(maps::get(:model, m, model), maps::get(:drives, m, drives))])
+    match maps::get(:on, m, nil)
+      case nil
+        base
+      case n
+        erlang::iolist_to_binary([base, " @", jet_cluster::short(n)])
+    end
+  end
+
+  # pre-assign each member its node (round-robin over the ring). Single-node rings
+  # assign nothing, so labels and spawns are byte-identical to the local behavior.
+  def self.assign_nodes(members, ring)
+    if erlang::length(ring) <= 1
+      members
+    else
+      {out, _} = lists::foldl({|m, acc| assign_one(m, ring, acc)}, {[], 0}, members)
+      lists::reverse(out)
+    end
+  end
+
+  def self.assign_one(m, ring, acc)
+    {out, i} = acc
+    {[maps::put(:on, jet_cluster::pick(ring, i), m), *out], i + 1}
+  end
+
+  def self.member_node(m)
+    match maps::get(:on, m, nil)
+      case nil
+        erlang::node()
+      case n
+        n
+    end
   end
 
   def self.add_node(m, model, drives)
@@ -135,6 +168,9 @@ module jet_fleet
     members = maps::get(:members, opts, [])
     model = maps::get(:model, opts, nil)
     drives = maps::get(:drives, opts, nil)
+    if maps::get(:nodes, opts, nil) != nil
+      jet_acp::emit_event({:thought, <<"(workspace: :worktree edits this node's filesystem -- running all members locally)">>})
+    end
     jet_acp::emit_event({:plan, plan_of(members)})
     members = lists::map({|m| add_node(m, model, drives)}, members)   # one trace node per member (running)
     parent = erlang::self()
@@ -278,9 +314,19 @@ module jet_fleet
     role = to_bin(maps::get(:role, m, <<"You are a concise analyst.">>))
     crash = maps::get(:crash, m, false)
     backend = jet_backend::resolve(maps::get(:drives, m, nil), maps::get(:model, m, nil), drives, model)
-    {pid, mref} = erlang::spawn_monitor({|| jet_fleet::member_proc(parent, name, role, backend, topic, facts, crash)})
+    # MFA spawn (not a closure): funs are md5-checked across nodes, plain args are
+    # not -- the same call shape works for the local node and a remote worker.
+    {pid, mref} = erlang::spawn_monitor(member_node(m), :jet_fleet, :member_remote,
+                                        [parent, name, role, backend, topic, facts, crash])
     jet_acp::emit_event({:tool_call, {id: name, title: name, kind: "think", status: "in_progress"}})
     maps::put(pid, {name, mref}, mons)
+  end
+
+  # remote-safe member entry: the worker node's gun may not be started yet (its
+  # vm never ran a turn) -- ensure it, then run the normal member body.
+  def self.member_remote(parent, name, role, backend, topic, facts, crash)
+    jet_http_ffi::ensure_started()
+    member_proc(parent, name, role, backend, topic, facts, crash)
   end
 
   # a sub-agent: run its lens over the topic, report back. Its backend is EITHER a
