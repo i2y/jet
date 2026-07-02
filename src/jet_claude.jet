@@ -162,7 +162,9 @@ module jet_claude
     receive
       case {:turn, caller, ref, prompt, schema, _kind}
         erlang::put(:__acp_stream__, {caller, ref})
+        jet_usage::reset()                     # per-turn metering in this persistent process
         result = run_turn_on_port(port, prompt, schema)
+        jet_usage::emit_turn_total()
         caller ! {ref, {:done, result}}
         connection_loop(port, agent_pid, token)
       case :__close__
@@ -322,6 +324,7 @@ module jet_claude
   # final text: the authoritative `result` field, else whatever streamed (acc). The assistant
   # text was already emitted incrementally via {:text,..}, so this is the once-only return value.
   def self.finish(ev, acc)
+    jet_usage::from_claude_result(ev)   # meter the CLI-reported cost/tokens/wall time
     if maps::get(<<"is_error">>, ev, false) == true
       {:error, :claude_error, to_bin(maps::get(<<"result">>, ev, <<>>))}
     else

@@ -185,7 +185,9 @@ module jet_acp
       case {:turn, caller, ref, prompt, schema, kind}
         wire("TRC ", "conn:turn-received")
         erlang::put(:__acp_stream__, {caller, ref})
+        jet_usage::reset()                     # per-turn metering in this persistent process
         {result, buf2} = run_prompt(port, sid, next_id, prompt, schema, kind, buf)
+        jet_usage::emit_turn_total()
         wire("TRC ", "conn:run_prompt-done")
         caller ! {ref, {:done, result}}
         wire("TRC ", "conn:sent-done")

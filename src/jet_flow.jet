@@ -311,6 +311,17 @@ module jet_flow
     end
   end
 
+  # like flow_done/2, with the node's token count folded into the completion label.
+  def self.flow_done_u(id, status, u)
+    match maps::get(id, flow_nodes(), nil)
+      case nil
+        :ok
+      case pair
+        {tid, label} = pair
+        jet_acp::emit_trace(tid, jet_usage::decorate(label, u), status)
+    end
+  end
+
   # an intermediate node's output is consumed as TEXT by downstream nodes; any external
   # change it makes (files, commands) is never passed on, and parallel nodes share one
   # workspace, so doing the real work in an intermediate node just makes them collide.
@@ -335,7 +346,8 @@ module jet_flow
     # nodes. Its TEXT chunks are dropped there (they're the node's result, delivered
     # below as {:flow_done}, not part of the user's answer).
     erlang::put(:__acp_stream__, {parent, {:flow_progress, id}})
-    parent ! {:flow_done, erlang::self(), id, node_attempt(backend, role, input)}
+    # the node's usage total rides in-band (its own accumulator can't reach the parent)
+    parent ! {:flow_done, erlang::self(), id, node_attempt(backend, role, input), jet_usage::turn_total()}
   end
 
   # a node now RETRIES (up to 3) on a transient crash/empty result instead of failing the
@@ -368,9 +380,10 @@ module jet_flow
       results
     else
       receive
-        case {:flow_done, pid, id, out}
+        case {:flow_done, pid, id, out, u}
           erlang::demonitor(node_mref(pid, mons), [:flush])
-          flow_done(id, "ok")
+          jet_usage::note_member(id, u)          # fold the node's tokens into this turn
+          flow_done_u(id, "ok", u)
           plan_mark(id, <<"completed">>)
           collect(remaining - 1, maps::remove(pid, mons), maps::put(id, out, results))
         case {:DOWN, _mref, :process, pid, reason}

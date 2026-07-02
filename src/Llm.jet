@@ -32,6 +32,7 @@ module Llm
         if status >= 200 and status < 300
           match jet_json_ffi::decode(resp_body)
             case {:ok, parsed}
+              jet_usage::from_response(provider, parsed)   # meter tokens (usage block)
               result = LlmAdapter::extract_response(provider, parsed)
               tool_calls = maps::get(:tool_calls, result)
               if tool_calls == []
@@ -75,6 +76,7 @@ module Llm
               match jet_json_ffi::decode(event_data)
                 case {:ok, parsed}
                   chunk = LlmAdapter::extract_stream_event(provider, parsed)
+                  jet_usage::from_stream_chunk(provider, chunk)   # meter tokens (stream usage events)
                   callback.(chunk)
                 case {:error, _}
                   :ok
@@ -91,6 +93,7 @@ module Llm
                 match jet_json_ffi::decode(event_data)
                   case {:ok, parsed}
                     chunk = LlmAdapter::extract_stream_event(provider, parsed)
+                    jet_usage::from_stream_chunk(provider, chunk)   # meter tokens (stream usage events)
                     callback.(chunk)
                   case {:error, _}
                     :ok

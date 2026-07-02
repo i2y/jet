@@ -1,0 +1,256 @@
+module jet_usage
+  # Token/cost metering -- the one place usage numbers are captured, accumulated,
+  # and surfaced. Every backend call reports here; the numbers then flow two ways:
+  #   - a {:usage, map} event per call (plus one whole-turn aggregate) on the same
+  #     event bus as {:text}/{:trace} -- consumers that don't know it ignore it;
+  #   - a per-process accumulator, so a turn entry point emits ONE total and a
+  #     shape member carries its total back to the parent in its done message.
+  # The map: {input:, output:, cost_usd:, duration_ms:, model:, source:, scope:, member:}
+  # -- tokens always; cost_usd only when the backend reports real dollars (no
+  # price table: a hardcoded $/token map goes stale, same policy as no default
+  # model); scope: :call = one API call, :turn = the whole-turn aggregate.
+
+  # record one call's usage: tag {scope: :call}, fold it into this process's turn
+  # accumulator, and emit it. `m` may carry :member when a shape re-reports a member.
+  def self.note(m)
+    m2 = maps::put(:scope, :call, m)
+    erlang::put(:__usage_acc__, fold(acc(), m2))
+    jet_acp::emit_event({:usage, m2})
+  end
+
+  # a member's turn total (carried in-band in its done message -- a member runs in
+  # its OWN process, where neither the accumulator nor the event stream reaches the
+  # parent) -> fold into the parent's turn and surface it tagged with the member.
+  def self.note_member(name, u)
+    if erlang::is_map(u) and (maps::size(u) > 0)
+      note(maps::put(:member, name, u))
+    else
+      :ok
+    end
+  end
+
+  def self.acc()
+    match erlang::get(:__usage_acc__)
+      case :undefined
+        maps::new()
+      case x
+        x
+    end
+  end
+
+  def self.reset()
+    erlang::put(:__usage_acc__, maps::new())
+  end
+
+  # this process's accumulated total so far (empty map when nothing was metered).
+  def self.turn_total()
+    acc()
+  end
+
+  # the whole-turn aggregate, emitted exactly once by the turn entry points just
+  # before {:done, result}; silent when nothing was metered (e.g. pure-ACP turns,
+  # whose protocol reports no usage).
+  def self.emit_turn_total()
+    t = acc()
+    if maps::size(t) == 0
+      :ok
+    else
+      jet_acp::emit_event({:usage, maps::put(:scope, :turn, t)})
+    end
+  end
+
+  # sum the numbers; keep the latest model/source; :scope/:member never accumulate.
+  def self.fold(total, m)
+    t1 = add(total, :input, maps::get(:input, m, 0))
+    t2 = add(t1, :output, maps::get(:output, m, 0))
+    t3 = add(t2, :duration_ms, maps::get(:duration_ms, m, nil))
+    t4 = addf(t3, :cost_usd, maps::get(:cost_usd, m, nil))
+    keep(keep(t4, :model, maps::get(:model, m, nil)), :source, maps::get(:source, m, nil))
+  end
+
+  def self.add(total, k, v)
+    if erlang::is_integer(v) and (v > 0)
+      maps::put(k, maps::get(k, total, 0) + v, total)
+    else
+      total
+    end
+  end
+
+  # cost is a float; sums like add/3 but accepts any positive number.
+  def self.addf(total, k, v)
+    if erlang::is_number(v) and (v > 0)
+      maps::put(k, maps::get(k, total, 0) + v, total)
+    else
+      total
+    end
+  end
+
+  def self.keep(total, k, v)
+    if v == nil
+      total
+    else
+      maps::put(k, v, total)
+    end
+  end
+
+  # --- capture points (each is a no-op when the payload carries no usage) ---
+
+  # hosted providers, non-streaming: the decoded response body's "usage" block.
+  def self.from_response(provider, parsed)
+    u = maps::get(<<"usage">>, parsed, nil)
+    if erlang::is_map(u)
+      match provider
+        case :openai
+          note({input: int_at(u, <<"prompt_tokens">>), output: int_at(u, <<"completion_tokens">>),
+                model: maps::get(<<"model">>, parsed, nil), source: :openai})
+        case _
+          note({input: int_at(u, <<"input_tokens">>), output: int_at(u, <<"output_tokens">>),
+                model: maps::get(<<"model">>, parsed, nil), source: :claude})
+      end
+    else
+      :ok
+    end
+  end
+
+  # hosted providers, streaming: usage rides specific stream events. claude:
+  # message_start carries the input tokens, message_delta the final output count.
+  # openai: the last chunk (empty choices; needs stream_options include_usage).
+  def self.from_stream_chunk(provider, chunk)
+    if erlang::is_map(chunk)
+      data = maps::get(:data, chunk, nil)
+      if erlang::is_map(data)
+        from_stream_data(provider, maps::get(:type, chunk, nil), data)
+      else
+        :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  def self.from_stream_data(:openai, _kind, data)
+    u = maps::get(<<"usage">>, data, nil)
+    if erlang::is_map(u)
+      note({input: int_at(u, <<"prompt_tokens">>), output: int_at(u, <<"completion_tokens">>),
+            model: maps::get(<<"model">>, data, nil), source: :openai})
+    else
+      :ok
+    end
+  end
+
+  def self.from_stream_data(_provider, kind, data)
+    if kind == :message_delta
+      u = maps::get(<<"usage">>, data, nil)
+      if erlang::is_map(u)
+        note({input: 0, output: int_at(u, <<"output_tokens">>), source: :claude})
+      else
+        :ok
+      end
+    elsif maps::get(<<"type">>, data, nil) == <<"message_start">>
+      msg = maps::get(<<"message">>, data, maps::new())
+      u = maps::get(<<"usage">>, msg, nil)
+      if erlang::is_map(u)
+        note({input: int_at(u, <<"input_tokens">>), output: 0,
+              model: maps::get(<<"model">>, msg, nil), source: :claude})
+      else
+        :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  # ollama /api/chat: the final ("done": true) object carries the eval counts --
+  # both a non-streaming response body and a stream's last NDJSON line. A no-op
+  # for every other line, so callers can feed every decoded object through here.
+  def self.from_ollama(obj)
+    ec = maps::get(<<"eval_count">>, obj, nil)
+    if erlang::is_integer(ec)
+      note({input: int_at(obj, <<"prompt_eval_count">>), output: ec,
+            duration_ms: ns_to_ms(maps::get(<<"total_duration">>, obj, nil)),
+            model: maps::get(<<"model">>, obj, nil), source: :ollama})
+    else
+      :ok
+    end
+  end
+
+  # the claude CLI's final `result` event: real dollars + tokens + wall time.
+  # Cache reads/writes count into input -- the badge reflects context actually sent.
+  def self.from_claude_result(ev)
+    u = maps::get(<<"usage">>, ev, nil)
+    if erlang::is_map(u)
+      note({input: int_at(u, <<"input_tokens">>) + int_at(u, <<"cache_read_input_tokens">>) + int_at(u, <<"cache_creation_input_tokens">>),
+            output: int_at(u, <<"output_tokens">>),
+            cost_usd: num_at(ev, <<"total_cost_usd">>),
+            duration_ms: maps::get(<<"duration_ms">>, ev, nil),
+            model: maps::get(<<"model">>, ev, nil), source: :claude_cli})
+    else
+      :ok
+    end
+  end
+
+  def self.int_at(m, k)
+    v = maps::get(k, m, 0)
+    if erlang::is_integer(v)
+      v
+    else
+      0
+    end
+  end
+
+  def self.num_at(m, k)
+    v = maps::get(k, m, nil)
+    if erlang::is_number(v)
+      v
+    else
+      nil
+    end
+  end
+
+  def self.ns_to_ms(v)
+    if erlang::is_integer(v)
+      erlang::div(v, 1000000)
+    else
+      nil
+    end
+  end
+
+  # --- display ---
+
+  # append a token suffix to a trace label ("Researcher · 1.2k↑ 460↓"); the label
+  # unchanged when nothing was metered (e.g. an ACP member).
+  def self.decorate(label, u)
+    if erlang::is_map(u)
+      suffix = fmt(u)
+      if suffix == <<>>
+        label
+      else
+        erlang::iolist_to_binary([label, " · ", suffix])
+      end
+    else
+      label
+    end
+  end
+
+  # a compact label suffix: "1.2k↑ 460↓" (tokens in/out); <<>> when nothing to show.
+  def self.fmt(u)
+    i = maps::get(:input, u, 0)
+    o = maps::get(:output, u, 0)
+    if (i == 0) and (o == 0)
+      <<>>
+    else
+      erlang::iolist_to_binary([k(i), "↑ ", k(o), "↓"])
+    end
+  end
+
+  def self.k(n)
+    if n >= 10000
+      erlang::iolist_to_binary([erlang::integer_to_binary(erlang::div(n, 1000)), "k"])
+    elsif n >= 1000
+      erlang::iolist_to_binary([erlang::integer_to_binary(erlang::div(n, 1000)), ".",
+                                erlang::integer_to_binary(erlang::div(erlang::rem(n, 1000), 100)), "k"])
+    else
+      erlang::integer_to_binary(n)
+    end
+  end
+end

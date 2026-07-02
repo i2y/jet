@@ -89,7 +89,10 @@ module LlmAdapter
     end
     body = match maps::find(:stream, opts)
       case {:ok, true}
-        maps::put(<<"stream">>, true, body)
+        # include_usage: the stream's final chunk (empty choices) then carries the
+        # token counts -- it lands in the harmless {type: :other} branch for callers.
+        maps::put(<<"stream_options">>, {<<"include_usage">> => true},
+                  maps::put(<<"stream">>, true, body))
       case _
         body
     end

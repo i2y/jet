@@ -66,9 +66,10 @@ module jet_fleet
       jet_acp::emit_event({:plan, plan_of(members)})          # the roster, as a checklist
       members = lists::map({|m| add_node(m, model, drives)}, members)   # one trace node per member (running)
       parent = erlang::self()
+      erlang::put(:__fleet_usage__, maps::new())              # fresh per-member metering for this fan-out
       mons = spawn_all(members, model, drives, topic, facts, parent)   # fan out (parallel)
       results = collect(maps::size(mons), mons, maps::new())  # gather, crash-isolated
-      lists::foreach({|m| jet_acp::emit_trace(maps::get(:node, m, nil), node_label(m, model, drives), "ok")}, members)
+      lists::foreach({|m| jet_acp::emit_trace(maps::get(:node, m, nil), done_label(m, model, drives), "ok")}, members)
       sid = jet_acp::next_trace_id()
       slabel = erlang::iolist_to_binary(["🧬 synthesis · ", jet_backend::bk_label(model, drives)])
       jet_acp::emit_trace(sid, slabel, "running")
@@ -137,10 +138,11 @@ module jet_fleet
     jet_acp::emit_event({:plan, plan_of(members)})
     members = lists::map({|m| add_node(m, model, drives)}, members)   # one trace node per member (running)
     parent = erlang::self()
+    erlang::put(:__fleet_usage__, maps::new())             # fresh per-member metering for this fan-out
     wts = make_worktrees(members)                          # name -> worktree path (or :no_wt)
     mons = spawn_wt_all(members, model, drives, topic, wts, parent)
     results = collect(maps::size(mons), mons, maps::new()) # name -> the member's summary text
-    lists::foreach({|m| jet_acp::emit_trace(maps::get(:node, m, nil), node_label(m, model, drives), "ok")}, members)
+    lists::foreach({|m| jet_acp::emit_trace(maps::get(:node, m, nil), done_label(m, model, drives), "ok")}, members)
     sections = lists::map({|m| wt_section(m, results, wts)}, members)   # {name, summary, diff}
     sid = jet_acp::next_trace_id()
     slabel = erlang::iolist_to_binary(["🧬 synthesis · ", jet_backend::bk_label(model, drives)])
@@ -195,7 +197,7 @@ module jet_fleet
     else
       jet_backend::run_in(backend, role, topic, wt)
     end
-    parent ! {:fleet_done, erlang::self(), name, result}
+    parent ! {:fleet_done, erlang::self(), name, result, jet_usage::turn_total()}
   end
 
   def self.wt_section(m, results, wts)
@@ -289,7 +291,9 @@ module jet_fleet
     if crash
       erlang::error(:member_crashed)
     else
-      parent ! {:fleet_done, erlang::self(), name, run_member(backend, role, topic, facts)}
+      # the member's usage total rides in-band: this process's accumulator (and its
+      # event stream) can't reach the parent, so the done message carries it home.
+      parent ! {:fleet_done, erlang::self(), name, run_member(backend, role, topic, facts), jet_usage::turn_total()}
     end
   end
 
@@ -361,9 +365,11 @@ module jet_fleet
       results
     else
       receive
-        case {:fleet_done, pid, name, out}
+        case {:fleet_done, pid, name, out, u}
           erlang::put(:__fleet_idle__, 0)                        # progress -> reset the idle heartbeat
           erlang::demonitor(member_mref(pid, mons), [:flush])    # no stray DOWN after a clean finish
+          jet_usage::note_member(name, u)                        # fold the member's tokens into this turn
+          remember_usage(name, u)
           jet_acp::emit_event({:tool_call, {id: name, status: "completed", output: out}})
           collect(remaining - 1, maps::remove(pid, mons), maps::put(name, out, results))
         case {:DOWN, _mref, :process, pid, reason}
@@ -420,6 +426,26 @@ module jet_fleet
     jet_acp::emit_event({:tool_call, {id: name, status: "failed",
       output: erlang::iolist_to_binary(["(member timed out -- no result after ", erlang::integer_to_binary(collect_cap()), " min)"])}})
     maps::put(name, {:failed, :timeout}, results)
+  end
+
+  # per-member usage, stashed so the final trace-label pass can decorate each node.
+  def self.remember_usage(name, u)
+    erlang::put(:__fleet_usage__, maps::put(name, u, fleet_usage()))
+  end
+
+  def self.fleet_usage()
+    match erlang::get(:__fleet_usage__)
+      case :undefined
+        maps::new()
+      case x
+        x
+    end
+  end
+
+  # a member's completion label: its node label plus a token suffix when metered.
+  def self.done_label(m, model, drives)
+    base = node_label(m, model, drives)
+    jet_usage::decorate(base, maps::get(to_bin(maps::get(:name, m, <<"member">>)), fleet_usage(), nil))
   end
 
   def self.member_mref(pid, mons)

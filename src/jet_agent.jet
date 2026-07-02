@@ -27,11 +27,13 @@ module jet_agent
         caller ! {ref, {:item, {:commands, []}}}
         caller ! {ref, {:done, :ok}}
       case _
+        jet_usage::reset()                     # per-turn metering (this worker process)
         result = try
           dispatch(config, method, args, schema, kind)
         catch e
           {:error, :agent_turn_crashed, e.get(:class), e.get(:reason)}
         end
+        jet_usage::emit_turn_total()           # one whole-turn aggregate, before done
         caller ! {ref, {:done, result}}
     end
   end
