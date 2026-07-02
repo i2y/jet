@@ -22,6 +22,7 @@ module jet_flow
     tools = lists::append(node_tools(config), jet_llm::skill_tools(cat, skills_dir))   # local + MCP + the `skill` tool
     skills_block = erlang::iolist_to_binary(jet_skills::catalog_block(cat))             # skills catalog for the terminal node's prompt
     erlang::put(:__approve_agent__, maps::get(:__agent__, config, nil))                 # gate node tool calls via the agent's `approve`
+    erlang::put(:__flow_maxpar__, maps::get(:max_parallel, opts, nil))                  # concurrency cap for each wave
     designer = jet_backend::resolve_lead(model, drives, maps::get(:designer, opts, nil))
     router = jet_backend::resolve(nil, model, drives, nil)   # cheap local model if set, else the agent
     topic = jet_backend::to_bin(jet_acp::build_prompt(config, method, args))
@@ -269,10 +270,34 @@ module jet_flow
   end
 
   # one wave: spawn a monitored BEAM process per ready node, gather (crash-isolated).
+  # max_parallel: caps concurrency by splitting the wave into chunks.
   def self.run_wave(wave, task, model, drives, done)
-    parent = erlang::self()
-    mons = lists::foldl({|n, acc| spawn_node(n, task, model, drives, done, parent, acc)}, maps::new(), wave)
-    collect(maps::size(mons), mons, maps::new())
+    run_wave_chunks(jet_fleet::chunks_of(wave, flow_maxpar()), task, model, drives, done, maps::new())
+  end
+
+  def self.run_wave_chunks(chunks, task, model, drives, done, acc)
+    match chunks
+      case []
+        acc
+      case [chunk, *rest]
+        parent = erlang::self()
+        mons = lists::foldl({|n, a| spawn_node(n, task, model, drives, done, parent, a)}, maps::new(), chunk)
+        results = collect(maps::size(mons), mons, acc)
+        if maps::get(:__cancelled__, results, false)
+          results
+        else
+          run_wave_chunks(rest, task, model, drives, done, results)
+        end
+    end
+  end
+
+  def self.flow_maxpar()
+    match erlang::get(:__flow_maxpar__)
+      case :undefined
+        nil
+      case v
+        v
+    end
   end
 
   def self.spawn_node(n, task, model, drives, done, parent, mons)

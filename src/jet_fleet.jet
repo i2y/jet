@@ -70,8 +70,10 @@ module jet_fleet
       parent = erlang::self()
       ctx = {ring: ring, retry: maps::get(:retry, opts, default_retry(ring)),
              model: model, drives: drives, topic: topic, facts: facts}
-      mons = spawn_all(members, model, drives, topic, facts, parent)   # fan out (parallel)
-      results = collect(maps::size(mons), mons, maps::new(), ctx)  # gather; crash-isolated + self-healing
+      # fan out -- all at once, or in chunks of max_parallel: (a concurrency cap;
+      # N members previously always meant N simultaneous LLM calls)
+      results = run_chunks(chunks_of(members, maps::get(:max_parallel, opts, nil)),
+                           model, drives, topic, facts, parent, ctx, maps::new())
       if maps::get(:__cancelled__, results, false)
         jet_acp::emit_event({:text, erlang::iolist_to_binary(["(cancelled -- partial results)\n\n",
           fallback_report(members, maps::remove(:__cancelled__, results))])})
@@ -181,10 +183,10 @@ module jet_fleet
     members = lists::map({|m| add_node(m, model, drives)}, members)   # one trace node per member (running)
     parent = erlang::self()
     wts = make_worktrees(members)                          # name -> worktree path (or :no_wt)
-    mons = spawn_wt_all(members, model, drives, topic, wts, parent)
     # worktree members never respawn (a retry would re-enter a half-edited tree)
-    results = collect(maps::size(mons), mons, maps::new(),
-                      {ring: [erlang::node()], retry: 0, model: model, drives: drives, topic: topic, facts: <<>>})
+    ctx = {ring: [erlang::node()], retry: 0, model: model, drives: drives, topic: topic, facts: <<>>}
+    results = run_wt_chunks(chunks_of(members, maps::get(:max_parallel, opts, nil)),
+                            model, drives, topic, wts, parent, ctx, maps::new())
     if maps::get(:__cancelled__, results, false)
       cleanup_worktrees(wts)
       jet_acp::emit_event({:text, <<"(cancelled -- worktrees cleaned up)">>})
@@ -211,6 +213,21 @@ module jet_fleet
         maps::put(name, path, acc)
       case _
         maps::put(name, :no_wt, acc)
+    end
+  end
+
+  def self.run_wt_chunks(chunks, model, drives, topic, wts, parent, ctx, acc)
+    match chunks
+      case []
+        acc
+      case [chunk, *rest]
+        mons = spawn_wt_all(chunk, model, drives, topic, wts, parent)
+        results = collect(maps::size(mons), mons, acc, ctx)
+        if maps::get(:__cancelled__, results, false)
+          results
+        else
+          run_wt_chunks(rest, model, drives, topic, wts, parent, ctx, results)
+        end
     end
   end
 
@@ -316,6 +333,40 @@ module jet_fleet
   end
 
   # --- fan out: one monitored BEAM process per member ---
+
+  # spawn chunk -> collect chunk -> next chunk (results accumulate across chunks;
+  # a cancel in one chunk stops the later ones). One chunk == today's behavior.
+  def self.run_chunks(chunks, model, drives, topic, facts, parent, ctx, acc)
+    match chunks
+      case []
+        acc
+      case [chunk, *rest]
+        mons = spawn_all(chunk, model, drives, topic, facts, parent)
+        results = collect(maps::size(mons), mons, acc, ctx)
+        if maps::get(:__cancelled__, results, false)
+          results
+        else
+          run_chunks(rest, model, drives, topic, facts, parent, ctx, results)
+        end
+    end
+  end
+
+  def self.chunks_of(members, k)
+    if erlang::is_integer(k) and (k >= 1) and (k < erlang::length(members))
+      chunk_loop(members, k)
+    else
+      [members]
+    end
+  end
+
+  def self.chunk_loop(list, k)
+    if erlang::length(list) <= k
+      [list]
+    else
+      {chunk, rest} = lists::split(k, list)
+      [chunk, *chunk_loop(rest, k)]
+    end
+  end
 
   def self.spawn_all(members, model, drives, topic, facts, parent)
     lists::foldl({|m, mons| spawn_one(m, model, drives, topic, facts, parent, mons)}, maps::new(), members)
