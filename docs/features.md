@@ -530,6 +530,10 @@ graph LR
 runner Flow(drives: "claude-code-acp")   # you write no graph — the designer builds the DAG per task
 ```
 
+Flow's parallel waves take the same `nodes:` / `retry:` / `max_parallel:` as Fleet (see above): a
+wave's nodes spread across BEAM nodes, and a node lost to a dead worker re-homes onto a survivor —
+`runner Flow(model: "ollama:qwen3.6:35b-a3b", nodes: ["b@host2"], retry: 2)`.
+
 **Auto** — a router picks one of your pre-configured shapes at runtime (each with a `when:` hint).
 
 ```jet

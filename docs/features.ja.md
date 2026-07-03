@@ -500,6 +500,10 @@ graph LR
 runner Flow(drives: "claude-code-acp")   # グラフは書かない — designer がタスクごとに DAG を組み立てる
 ```
 
+Flow の並列 wave も Fleet と同じ `nodes:` / `retry:` / `max_parallel:` を受け取ります（上記参照）:
+wave のノードが BEAM ノード群に分散し、死んだワーカーで失われたノードは生存ノードに re-home します —
+`runner Flow(model: "ollama:qwen3.6:35b-a3b", nodes: ["b@host2"], retry: 2)`。
+
 **Auto** — router が、あらかじめ設定した shape の1つを実行時に選ぶ（各 shape に `when:` のヒントを付ける）。
 
 ```jet

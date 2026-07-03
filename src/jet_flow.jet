@@ -33,6 +33,9 @@ module jet_flow
       reason = jet_backend::to_bin(maps::get(<<"reason">>, design, <<>>))
       {nodes, sink} = ensure_sink(norm_nodes(maps::get(<<"nodes">>, design, [])))
       announce(nodes, sink, reason)                       # show the generated topology
+      ring = jet_cluster::ring(opts)                      # nodes: -> spread each wave's nodes across BEAM nodes
+      erlang::put(:__flow_ring__, ring)
+      erlang::put(:__flow_retry__, maps::get(:retry, opts, flow_default_retry(ring)))
       match execute(nodes, sink, topic, model, drives, tools, skills_block)
         case {:error, :cancelled}
           {:error, :cancelled}
@@ -270,23 +273,27 @@ module jet_flow
   end
 
   # one wave: spawn a monitored BEAM process per ready node, gather (crash-isolated).
-  # max_parallel: caps concurrency by splitting the wave into chunks.
+  # nodes: spreads the wave's nodes across BEAM nodes (round-robin); max_parallel:
+  # caps concurrency by splitting the wave into chunks.
   def self.run_wave(wave, task, model, drives, done)
-    run_wave_chunks(jet_fleet::chunks_of(wave, flow_maxpar()), task, model, drives, done, maps::new())
+    ring = flow_ring()
+    wave2 = jet_fleet::assign_nodes(wave, ring)           # each node gets :on (its BEAM node) when ring spans nodes
+    ctx = {ring: ring, retry: flow_retry(), task: task, model: model, drives: drives, done: done}
+    run_wave_chunks(jet_fleet::chunks_of(wave2, flow_maxpar()), task, model, drives, done, ctx, maps::new())
   end
 
-  def self.run_wave_chunks(chunks, task, model, drives, done, acc)
+  def self.run_wave_chunks(chunks, task, model, drives, done, ctx, acc)
     match chunks
       case []
         acc
       case [chunk, *rest]
         parent = erlang::self()
         mons = lists::foldl({|n, a| spawn_node(n, task, model, drives, done, parent, a)}, maps::new(), chunk)
-        results = collect(maps::size(mons), mons, acc)
+        results = collect(maps::size(mons), mons, acc, ctx)
         if maps::get(:__cancelled__, results, false)
           results
         else
-          run_wave_chunks(rest, task, model, drives, done, results)
+          run_wave_chunks(rest, task, model, drives, done, ctx, results)
         end
     end
   end
@@ -300,16 +307,77 @@ module jet_flow
     end
   end
 
+  def self.flow_ring()
+    match erlang::get(:__flow_ring__)
+      case :undefined
+        [erlang::node()]
+      case r
+        r
+    end
+  end
+
+  def self.flow_retry()
+    match erlang::get(:__flow_retry__)
+      case :undefined
+        0
+      case v
+        v
+    end
+  end
+
+  # nodes: present -> a dead node's work respawns once by default; local runs keep
+  # record-and-continue unless retry: is set.
+  def self.flow_default_retry(ring)
+    if erlang::length(ring) > 1
+      1
+    else
+      0
+    end
+  end
+
   def self.spawn_node(n, task, model, drives, done, parent, mons)
+    spawn_node_attempt(n, task, model, drives, done, parent, mons, 1)
+  end
+
+  def self.spawn_node_attempt(n, task, model, drives, done, parent, mons, attempt)
     id = maps::get(:id, n)
     backend = node_backend(n, model, drives)
     input = node_input(n, task, done)
     role = step_role(maps::get(:role, n))       # intermediate: TEXT only, no files (avoids parallel clobbering)
-    {pid, mref} = erlang::spawn_monitor({|| jet_flow::node_proc(parent, id, backend, role, input)})
-    label = erlang::iolist_to_binary(["🔹 ", id, " · ", jet_backend::bk_label(model, drives)])
+    # MFA spawn on the node's assigned BEAM node (local by default); node_remote
+    # ensures gun is started there before running the node body.
+    {pid, mref} = erlang::spawn_monitor(node_placement(n), :jet_flow, :node_remote,
+                                        [parent, id, backend, role, input])
+    label = node_wlabel(id, model, drives, n)
     flow_node_put(id, jet_acp::trace_node(label, "running"), label)   # a struct node; its tools nest under it
     plan_mark(id, <<"in_progress">>)
-    maps::put(pid, {id, mref}, mons)
+    maps::put(pid, {id, mref, n, attempt}, mons)
+  end
+
+  def self.node_placement(n)
+    match maps::get(:on, n, nil)
+      case nil
+        erlang::node()
+      case bn
+        bn
+    end
+  end
+
+  # a node's trace label, with an @node suffix when the run spans BEAM nodes.
+  def self.node_wlabel(id, model, drives, n)
+    base = erlang::iolist_to_binary(["🔹 ", id, " · ", jet_backend::bk_label(model, drives)])
+    match maps::get(:on, n, nil)
+      case nil
+        base
+      case bn
+        erlang::iolist_to_binary([base, " @", jet_cluster::short(bn)])
+    end
+  end
+
+  # remote-safe node entry: the worker node's gun may not be started yet.
+  def self.node_remote(parent, id, backend, role, input)
+    jet_http_ffi::ensure_started()
+    node_proc(parent, id, backend, role, input)
   end
 
   # node_id -> {trace_id, label}, so collect/forward_progress (all in the PARENT process) can
@@ -411,25 +479,30 @@ module jet_flow
     end
   end
 
-  def self.collect(remaining, mons, results)
+  def self.collect(remaining, mons, results, ctx)
     if remaining <= 0
       results
     else
       receive
         case {:flow_done, pid, id, out, u}
-          erlang::demonitor(node_mref(pid, mons), [:flush])
-          jet_usage::note_member(id, u)          # fold the node's tokens into this turn
-          flow_done_u(id, "ok", u)
-          plan_mark(id, <<"completed">>)
-          collect(remaining - 1, maps::remove(pid, mons), maps::put(id, out, results))
+          if maps::is_key(pid, mons)
+            erlang::demonitor(node_mref(pid, mons), [:flush])
+            jet_usage::note_member(id, u)          # fold the node's tokens into this turn
+            flow_done_u(id, "ok", u)
+            plan_mark(id, <<"completed">>)
+            collect(remaining - 1, maps::remove(pid, mons), maps::put(id, out, results), ctx)
+          else
+            collect(remaining, mons, results, ctx)   # stale done (already respawned) -> ignore
+          end
         case {:DOWN, _mref, :process, pid, reason}
-          id = node_name(pid, mons)
-          flow_done(id, "error")
-          plan_mark(id, <<"completed">>)
-          collect(remaining - 1, maps::remove(pid, mons), maps::put(id, fail_text(id), results))
+          if maps::is_key(pid, mons)
+            handle_node_down(remaining, mons, results, ctx, pid, reason)
+          else
+            collect(remaining, mons, results, ctx)
+          end
         case {{:flow_progress, nid}, {:item, ev}}
           forward_progress(nid, ev)                # surface a running node's tool_calls, namespaced
-          collect(remaining, mons, results)
+          collect(remaining, mons, results, ctx)
         case :__cancel_turn__
           # user cancel: kill the wave's pending nodes and flag the result --
           # run_waves stops (no later waves, no final node).
@@ -440,8 +513,46 @@ module jet_flow
         # nothing on the main stream -- which would idle-time-out the turn and kill it
         # with no output. Heartbeat keeps the turn alive AND shows it's still working.
         jet_acp::emit_event({:thought, erlang::iolist_to_binary(["Still working: ", running_ids(mons), "..."])})
-        collect(remaining, mons, results)
+        collect(remaining, mons, results, ctx)
       end
+    end
+  end
+
+  # a node's process (or its whole BEAM node) died. With retry budget left, respawn
+  # it -- on a surviving BEAM node when the run spans nodes (a dead worker re-homes
+  # its nodes onto the origin); in place otherwise. Same trace id, so the UI resets.
+  def self.handle_node_down(remaining, mons, results, ctx, pid, reason)
+    {id, _mref, n, attempt} = maps::get(pid, mons)
+    if attempt <= maps::get(:retry, ctx, 0)
+      n2 = flow_move_node(n, ctx)
+      jet_acp::emit_event({:thought, erlang::iolist_to_binary([id, " lost (", jet_fleet::reason_text(reason),
+        ") -- respawning", flow_where(n2), ", attempt ", erlang::integer_to_binary(attempt + 1)])})
+      mons2 = spawn_node_attempt(n2, maps::get(:task, ctx, nil), maps::get(:model, ctx, nil),
+                                 maps::get(:drives, ctx, nil), maps::get(:done, ctx, maps::new()),
+                                 erlang::self(), maps::remove(pid, mons), attempt + 1)
+      collect(remaining, mons2, results, ctx)        # remaining unchanged: the node is live again
+    else
+      flow_done(id, "error")
+      plan_mark(id, <<"completed">>)
+      collect(remaining - 1, maps::remove(pid, mons), maps::put(id, fail_text(id), results), ctx)
+    end
+  end
+
+  def self.flow_move_node(n, ctx)
+    match maps::get(:on, n, nil)
+      case nil
+        n
+      case cur
+        maps::put(:on, jet_fleet::pick_other(jet_cluster::alive(maps::get(:ring, ctx, [erlang::node()])), cur), n)
+    end
+  end
+
+  def self.flow_where(n)
+    match maps::get(:on, n, nil)
+      case nil
+        <<>>
+      case bn
+        erlang::iolist_to_binary([" on ", erlang::atom_to_binary(bn, :utf8)])
     end
   end
 
@@ -473,7 +584,7 @@ module jet_flow
   end
 
   def self.pair_id(kv)
-    {_pid, {id, _mref}} = kv
+    {_pid, {id, _mref, _n, _a}} = kv
     id
   end
 
@@ -487,12 +598,12 @@ module jet_flow
   end
 
   def self.node_mref(pid, mons)
-    {_id, mref} = maps::get(pid, mons, {nil, nil})
+    {_id, mref, _n, _a} = maps::get(pid, mons, {nil, nil, nil, nil})
     mref
   end
 
   def self.node_name(pid, mons)
-    {id, _mref} = maps::get(pid, mons, {<<"?">>, nil})
+    {id, _mref, _n, _a} = maps::get(pid, mons, {<<"?">>, nil, nil, nil})
     id
   end
 
