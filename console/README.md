@@ -75,7 +75,12 @@ that thread's cwd (project or git worktree) and surviving a browser reload.
   tagged by thread: `{:jet_event_tag, id, ev}` then `{:jet_done_tag, id, result}`.
   `handle_info` folds each event into that thread's blocks.
 - **Panels** — center renders user/agent (markdown via Earmark)/thought; the right sidebar
-  shows the **plan** (checklist) and **tool-call activity** (status dots).
+  shows the **plan** (checklist) and the **run trace** (a span tree with per-step durations, and
+  per-member token counts for `Fleet`/`Flow`).
+- **Metering** — the jet side meters every turn (`{:usage, …}` events); the UI shows a per-reply
+  **token/cost badge** under the agent message, a per-thread **`Σ` total** in the header, and step
+  durations in the trace. Cost appears only when the backend reports it (the native `claude` CLI);
+  Ollama shows tokens. A turn that ends in a typed error surfaces as a red error block.
 
 ## Browser-side editor & terminal (vendored JS, no npm/Node)
 
@@ -217,9 +222,11 @@ the **pre-built agents load fine without it**. Next: `mix desktop.deploy`
 The full app is committed here and runs today: **parallel** threads, each on its own agent
 (a local model **or** an ACP agent **or** the native Claude CLI); thread + conversation
 **persistence** across reloads and restarts (a turn in flight **survives a reload**); interactive
-**🔐 approvals**; **stop/cancel**; a no-code **agent builder** + **Settings** (auto-detects local
-models); a file viewer/editor; an embedded **terminal** (resizes with the pane); markdown + mermaid
-rendering; dark/light themes; completion **notifications**; and a parallel-threads **board**.
+**🔐 approvals**; **graceful stop/cancel** (the turn ends, partial output + token/cost badge land,
+and the **agent + session survive** for the next message); **token/cost metering** (per-reply badge
++ per-thread `Σ` total + trace durations); a no-code **agent builder** + **Settings** (auto-detects
+local models); a file viewer/editor; an embedded **terminal** (resizes with the pane); markdown +
+mermaid rendering; dark/light themes; completion **notifications**; and a parallel-threads **board**.
 
 Caveat: the node cwd is global, so a turn's project folder is set per turn (`File.cd!`); for true
 concurrent isolation give a thread its own **git worktree** (the 🌳 button). External backends
