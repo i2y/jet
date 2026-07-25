@@ -11,6 +11,6 @@ module acp_flow_demo
   #      (the designer fans out one node per strategy, then joins them in a final).
   agent Composer
     runner Flow(drives: "claude-code-acp")
-    ask handle(task)
+    expose handle(task)
   end
 end

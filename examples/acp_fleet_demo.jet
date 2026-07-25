@@ -19,6 +19,6 @@ module acp_fleet_demo
       {name: "Upside",    role: "You are an optimist. In 2-3 sentences, name the biggest benefits of the idea."},
       {name: "Skeptic",   role: "You are a hard skeptic. In 2-3 sentences, say why the idea might fail.", model: "ollama:qwen3.6:35b-a3b"},  # a member may use its own model
       {name: "Flaky",     role: "(this one is rigged to crash, to show isolation)", crash: true}])
-    ask review(topic)
+    expose review(topic)
   end
 end

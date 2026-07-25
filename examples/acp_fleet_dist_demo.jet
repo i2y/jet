@@ -21,6 +21,6 @@ module acp_fleet_dist_demo
       {name: "Upside",    role: "You are an optimist. In 2-3 sentences, name the biggest benefits of the idea."},
       {name: "Skeptic",   role: "You are a hard skeptic. In 2-3 sentences, say why the idea might fail."},
       {name: "Ops",       role: "You are an SRE. In 2-3 sentences, assess the operational burden."}])
-    ask review(topic)
+    expose review(topic)
   end
 end

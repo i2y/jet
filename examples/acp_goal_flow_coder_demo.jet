@@ -18,6 +18,6 @@ module acp_goal_flow_coder_demo
                 surface: true,
                 max_rounds: 3,
                 drives: "claude-code-acp")
-    ask handle(task)
+    expose handle(task)
   end
 end

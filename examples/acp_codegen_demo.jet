@@ -11,6 +11,6 @@ module acp_codegen_demo
                  members: [
       {name: "Minimal", role: "Implement the requested change with the smallest, cleanest diff. Make the edit with your tools, then reply with a one-line summary."},
       {name: "Robust",  role: "Implement the requested change favoring clear naming and an edge-case check. Make the edit with your tools, then reply with a one-line summary."}])
-    ask build(task)
+    expose build(task)
   end
 end

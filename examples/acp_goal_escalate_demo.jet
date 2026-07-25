@@ -23,6 +23,6 @@ module acp_goal_escalate_demo
       checker: "ollama:qwen3.6:35b-a3b",   # a reliable judge here; can be a cheaper model in practice
       max_rounds: 3,
       accept: "The answer correctly solves this logic puzzle (three daughters, integer ages with product 36 and sum 13, oldest uniquely determined) and states the oldest daughter's age as a single final number. A wrong number or faulty logic must NOT be marked MET.")
-    ask handle(goal)
+    expose handle(goal)
   end
 end

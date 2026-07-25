@@ -6,8 +6,8 @@ module agent_flagship
     model "claude-opus-4-8"                # => runner Llm
     role "Research rigorously; cite sources."
 
-    ask research(question) -> {answer: String, sources: [String]}
-    ask classify(text)     -> {label: String}
+    expose research(question) -> {answer: String, sources: [String]}
+    expose classify(text)     -> {label: String}
 
     tool web_search
   end
@@ -19,8 +19,8 @@ module agent_flagship
     workspace "./src"                      # fs sandbox root
     memory :session
 
-    task fix(description)
-    task refactor(target, goal)
+    expose fix(description) -> TurnResult
+    expose refactor(target, goal) -> TurnResult
 
     def on_approval(req)                   # permission policy
       match req.get(:kind)

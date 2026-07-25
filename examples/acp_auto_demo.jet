@@ -20,6 +20,6 @@ module acp_auto_demo
       {name: :Pipeline, when: "a multi-step writing/transform task",
        stages: [{name: "Outline", role: "3-bullet outline. Output only it."},
                 {name: "Draft", role: "Short draft from the outline."}]}])
-    ask handle(task)
+    expose handle(task)
   end
 end

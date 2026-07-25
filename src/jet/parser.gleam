@@ -1054,36 +1054,13 @@ fn parse_agent_body(
         Error(er) -> Error(er)
       }
     }
-    // `approve do |req| ... end` desugars to an on_approval(req) method (the
-    // permission policy; see the on_approval hook in jet_runtime).
-    Some(token.Name("approve")) -> {
-      let #(_, parser) = advance(parser)
-      case parse_block_lambda(parser) {
-        Ok(#(ast.Lambda(largs, _g, lbody, lline), parser)) -> {
-          let method =
-            ast.FuncDef(
-              name: "_" <> name <> "_instance_method_on_approval",
-              line: lline,
-              args: [ast.Var("self", lline), ..largs],
-              guards: [],
-              body: lbody,
-              context: ast.InstanceMethod,
-            )
-          parse_agent_body(
-            parser,
-            name,
-            AgentParts(..parts, stmts: [method, ..parts.stmts]),
-          )
-        }
-        Ok(#(_, parser)) ->
-          Error(error.ParseError(
-            current_line(parser),
-            "approve do |req| ... end",
-            "other",
-          ))
-        Error(e) -> Error(e)
-      }
-    }
+    // `expose m(args)` is the one declaration form -- the same keyword an `actor`
+    // uses, which is what makes "agent = actor + runner" true at the syntax level
+    // and not just in the AST. The RETURN TYPE decides how the turn is delivered:
+    //   expose reply(msg)                  -> free text
+    //   expose research(q) -> {a: String}  -> a value coerced to that schema
+    //   expose fix(desc) -> TurnResult     -> the WORK the agent did
+    // `ask` / `task` are the older spellings, kept as aliases.
     Some(token.Expose) -> parse_exposed_into(parser, name, parts, "ask")
     Some(token.Name("ask")) -> parse_exposed_into(parser, name, parts, "ask")
     Some(token.Name("task")) -> parse_exposed_into(parser, name, parts, "task")
@@ -1426,8 +1403,16 @@ fn parse_agent_exposed(
         Some(token.ThinArrow) -> {
           let #(_, parser) = advance(parser)
           case parse_schema(parser) {
-            Ok(#(schema, parser)) ->
-              continue_exposed(parser, kind, #(mname, params, schema, kind), acc)
+            Ok(#(schema, parser)) -> {
+              // `-> TurnResult` names the WORK the agent did rather than a value,
+              // so the return type alone decides how the turn is delivered and
+              // `expose` needs no `ask`/`task` companion keyword.
+              let #(schema, kind2) = case schema {
+                ast.AtomLit("turnresult", l) -> #(ast.AtomLit("any", l), "task")
+                _ -> #(schema, kind)
+              }
+              continue_exposed(parser, kind, #(mname, params, schema, kind2), acc)
+            }
             Error(e) -> Error(e)
           }
         }

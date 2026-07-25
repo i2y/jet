@@ -8,6 +8,6 @@
 module acp_architect_demo
   agent Architect
     runner Architect(drives: "claude-code-acp")
-    ask handle(task)
+    expose handle(task)
   end
 end

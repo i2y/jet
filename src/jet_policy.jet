@@ -1,10 +1,10 @@
 module jet_policy
-  # Composable, DATA-DRIVEN tool-approval policies for an agent's `approve do |req| ... end`
+  # Composable, DATA-DRIVEN tool-approval policies for an agent's `def on_approval(req) ... end`
   # block (the native tool gate calls on_approval(req); see jet_llm::approved?). Each policy
   # takes the request map -- req = {name, kind, title, args} -- and returns :allow | :deny.
   # Configure by passing token / prefix lists; no per-agent matching code.
   #
-  #   approve do |req|
+  #   def on_approval(req)
   #     jet_policy::gate(req, <<"run">>, {|r| jet_policy::deny_tokens(r, jet_policy::default_deny())})
   #   end
 

@@ -11,7 +11,7 @@ module jet_console_demo
     role "You are a coding assistant working IN the current project directory. Use your tools to inspect real files before answering -- never guess. To summarize a project: list_dir(\".\"), then read_file the README and key config files, then summarize what you actually read."
     tool list_dir(path: String) do |p| jet_fs::list(p) end
     tool read_file(path: String) do |p| jet_fs::read(p) end
-    ask chat(message)
+    expose chat(message)
   end
 
   # 2. Local coder -- full file + shell tools, works in the project dir (Node-free).
@@ -24,10 +24,10 @@ module jet_console_demo
     tool edit_file(path: String, old: String, new: String) do |p, o, n| jet_fs::edit(p, o, n) end
     tool list_dir(path: String) do |p| jet_fs::list(p) end
     tool run(command: String) do |c| os::cmd(erlang::binary_to_list(erlang::iolist_to_binary(c))) end
-    approve do |req|
+    def on_approval(req)
       jet_policy::gate(req, <<"run">>, {|r| jet_policy::deny_tokens(r, jet_policy::default_deny())})
     end
-    ask chat(message)
+    expose chat(message)
   end
 
   # 3. Local researcher -- web search + fetch.
@@ -37,13 +37,13 @@ module jet_console_demo
     role "You are a research assistant. Use web_search(query) to look things up and web_fetch(url) to read a page, then answer concisely based on what you found."
     tool web_search(query: String) do |q| jet_web::search(q) end
     tool web_fetch(url: String) do |u| jet_web::fetch(u) end
-    ask chat(message)
+    expose chat(message)
   end
 
   # 4. Claude Code over ACP -- frontier coding agent with full file/shell tools.
   agent ClaudeThread
     drives "claude-code-acp"
-    ask chat(message)
+    expose chat(message)
   end
 
   # 5. Jet Forge -- Goal + Architect on Claude Code: verify-until-PROVEN, designs a team per task.
@@ -54,7 +54,7 @@ module jet_console_demo
       accept: "The task is FULLY implemented in real files (code actually written or edited, not merely described), AND proven to work by an ACTUAL execution whose REAL terminal output is included in the answer: run the relevant tests, or if none exist a command that clearly exercises the new or changed behavior, and show the genuine output -- never simulated, summarized, or paraphrased. Pre-existing tests and the build must still pass (no regressions). Edge cases and error handling must be addressed. The goal is NOT met if any required check fails, the proving output is absent, or results are only described.",
       surface: true,
       max_rounds: 4)
-    ask chat(message)
+    expose chat(message)
   end
 
   # 6. Jet Verified Coder -- Goal + Flow on Claude Code: a leaner verify-until-proven loop.
@@ -65,7 +65,7 @@ module jet_console_demo
       surface: true,
       max_rounds: 3,
       drives: "claude-code-acp")
-    ask chat(message)
+    expose chat(message)
   end
 
   def self.run()

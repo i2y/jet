@@ -5,7 +5,7 @@ module agent_tools_live
   agent Shop
     model "ollama:qwen3.6:35b-a3b"
     role "You look up prices. You do NOT know any prices yourself — you MUST call the get_price tool and report exactly the integer it returns as `price`. Never guess."
-    ask price_of(item) -> {price: Int}
+    expose price_of(item) -> {price: Int}
 
     tool get_price(item: String), "Look up the catalog price (an integer) of an item by name" do |i|
       4217

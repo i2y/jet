@@ -6,6 +6,6 @@
 module acp_task_demo
   agent Builder
     role "A demo agent that plans, runs a tool, and reports."
-    task build(spec)
+    expose build(spec) -> TurnResult
   end
 end

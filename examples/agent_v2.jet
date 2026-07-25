@@ -5,8 +5,8 @@ module agent_v2
   agent Demo
     role "demo"
 
-    ask research(question) -> {answer: String, sources: [String]}   # typed answer
-    task fix(description)                                            # work -> TurnResult
+    expose research(question) -> {answer: String, sources: [String]}   # typed answer
+    expose fix(description) -> TurnResult
   end
 
   def self.run()

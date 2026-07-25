@@ -9,6 +9,6 @@ module acp_pipeline_demo
       {name: "Outline", role: "Produce a tight 3-bullet outline for the user's request. Output only the outline."},
       {name: "Draft",   role: "Write a short draft from the outline you are given. Output only the draft."},
       {name: "Polish",  role: "Tighten and clarify the draft you are given into a final short paragraph. Output only the final text."}])
-    ask write(request)
+    expose write(request)
   end
 end

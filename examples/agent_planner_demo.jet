@@ -13,7 +13,7 @@
 module agent_planner_demo
   agent Planner
     runner Plan(model: "ollama:qwen3.6:35b-a3b")
-    ask handle(goal)
+    expose handle(goal)
   end
 
   # Goal wraps Plan: the planner makes each attempt; a cheap checker verifies the acceptance
@@ -23,7 +23,7 @@ module agent_planner_demo
                 via: {name: :Plan},
                 surface: true,
                 model: "ollama:qwen3.6:35b-a3b")
-    ask handle(goal)
+    expose handle(goal)
   end
 
   # Same composition with a borderline acceptance condition: haiku 5-7-5. The two-loop runs
@@ -35,7 +35,7 @@ module agent_planner_demo
                 via: {name: :Plan},
                 surface: true,
                 model: "ollama:qwen3.6:35b-a3b")
-    ask handle(goal)
+    expose handle(goal)
   end
 
   def self.run()

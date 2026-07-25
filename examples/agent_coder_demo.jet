@@ -36,11 +36,11 @@ module agent_coder_demo
 
     # tool approval policy (DATA-DRIVEN; see jet_policy). Gate the shell `run` tool through a
     # configurable denylist; the file tools pass. Swap default_deny() for your own token list.
-    approve do |req|
+    def on_approval(req)
       jet_policy::gate(req, <<"run">>, {|r| jet_policy::deny_tokens(r, jet_policy::default_deny())})
     end
 
-    ask code(task)
+    expose code(task)
   end
 
   def self.run()

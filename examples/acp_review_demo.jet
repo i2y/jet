@@ -12,6 +12,6 @@ module acp_review_demo
       {name: "Security",    role: "Review the code the user names for SECURITY issues only. Use your tools to read the file(s). List concrete issues as 'file:line - issue - one-line fix'. If you find none, say 'no security issues found'. Do not edit anything."},
       {name: "Correctness", role: "Review the named code for CORRECTNESS bugs and edge cases only. Read the file(s) with your tools. List concrete issues as 'file:line - issue'. Do not edit anything."},
       {name: "Performance", role: "Review the named code for PERFORMANCE issues only. Read the file(s) with your tools. List concrete issues as 'file:line - issue'. Do not edit anything."}])
-    ask review(request)
+    expose review(request)
   end
 end

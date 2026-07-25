@@ -5,7 +5,7 @@ module cc_test
     drives "claude-code-acp"
     workspace "/tmp"                 # neutral cwd -> no project CLAUDE.md/skills confusing it
     role "Be concise. Answer in one short sentence. Do not edit files."
-    task ask(question)
+    expose ask(question) -> TurnResult
   end
 
   def self.run()

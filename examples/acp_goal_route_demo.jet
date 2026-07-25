@@ -23,6 +23,6 @@ module acp_goal_route_demo
       checker: "ollama:qwen3.6:35b-a3b",
       max_rounds: 1,
       accept: "The answer addresses the question accurately and directly.")
-    ask handle(task)
+    expose handle(task)
   end
 end

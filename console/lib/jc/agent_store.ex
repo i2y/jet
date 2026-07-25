@@ -106,7 +106,7 @@ defmodule Jc.AgentStore do
       agent MyAgent
         model jet_settings::strong()   # the model picked in Settings (or set "ollama:your-model")
         role "You are a helpful assistant."
-        ask chat(message)
+        expose chat(message)
       end
 
       def self.catalog()

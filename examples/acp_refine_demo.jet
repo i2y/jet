@@ -8,6 +8,6 @@ module acp_refine_demo
                   max_rounds: 3,
                   worker: {role: "Write a haiku for the user's topic. Output only the 3 lines."},
                   critic: {role: "Check the haiku is exactly 3 lines with a 5-7-5 syllable pattern and on-topic."})
-    ask compose(topic)
+    expose compose(topic)
   end
 end

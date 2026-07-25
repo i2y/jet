@@ -4,7 +4,7 @@
 #   catalog/0   -> [{key_atom, "Label shown in the picker"}, ...]
 #   spawn_for/1 -> key_atom -> a spawned agent pid (driveable via :chat)
 # The console lists every file's catalog in its backend picker, hot-reloads a file when you save
-# it from the UI, and re-reads the catalog. Add an agent: add an `agent X ... ask chat(message)
+# it from the UI, and re-reads the catalog. Add an agent: add an `agent X ... expose chat(message)
 # end` block + a catalog entry + a spawn_for clause. Add a backend set: add a new .jet file.
 module builtin
   # 1. Local assistant -- fast, Node-free, read-only file tools.
@@ -15,7 +15,7 @@ module builtin
     tool list_dir(path: String) do |p| jet_fs::list(p) end
     tool read_file(path: String) do |p| jet_fs::read(p) end
     tool grep(pattern: String, path: String) do |pat, p| jet_fs::grep(pat, p) end
-    ask chat(message)
+    expose chat(message)
   end
 
   # 2. Local coder -- full file + shell tools, works in the project dir.
@@ -29,10 +29,10 @@ module builtin
     tool list_dir(path: String) do |p| jet_fs::list(p) end
     tool grep(pattern: String, path: String) do |pat, p| jet_fs::grep(pat, p) end
     tool run(command: String) do |c| os::cmd(erlang::binary_to_list(erlang::iolist_to_binary(c))) end
-    approve do |req|
+    def on_approval(req)
       jet_policy::gate(req, <<"run">>, {|r| jet_policy::deny_tokens(r, jet_policy::default_deny())})
     end
-    ask chat(message)
+    expose chat(message)
   end
 
   # 3. Local researcher -- web search + fetch.
@@ -42,13 +42,13 @@ module builtin
     role "You are a research assistant. Use web_search(query) and web_fetch(url), then answer concisely based on what you found."
     tool web_search(query: String) do |q| jet_web::search(q) end
     tool web_fetch(url: String) do |u| jet_web::fetch(u) end
-    ask chat(message)
+    expose chat(message)
   end
 
   # 4. Claude Code over ACP.
   agent ClaudeThread
     drives jet_settings::coding_drive()
-    ask chat(message)
+    expose chat(message)
   end
 
   # 4b. Claude Code NATIVE -- drives the `claude` CLI directly (headless streaming-JSON), with no
@@ -56,7 +56,7 @@ module builtin
   #     jet_claude::native?). Same UX (streamed text / tool calls / slash menu), one fewer dependency.
   agent ClaudeNative
     drives "claude"
-    ask chat(message)
+    expose chat(message)
   end
 
   # 5. Jet Forge -- Goal + Architect on Claude Code (verify-until-PROVEN).
@@ -67,7 +67,7 @@ module builtin
       accept: "The task is FULLY implemented in real files (code actually written or edited, not merely described), AND proven to work by an ACTUAL execution whose REAL terminal output is included in the answer. Pre-existing tests and the build must still pass (no regressions). The goal is NOT met if any required check fails, the proving output is absent, or results are only described.",
       surface: true,
       max_rounds: 4)
-    ask chat(message)
+    expose chat(message)
   end
 
   # 6. Jet Verified Coder -- Goal + Flow on Claude Code.
@@ -78,7 +78,7 @@ module builtin
       surface: true,
       max_rounds: 3,
       drives: jet_settings::coding_drive())
-    ask chat(message)
+    expose chat(message)
   end
 
   # 5b/6b. Native-Claude variants of Forge / Verified Coder -- identical, but drive the `claude` CLI
@@ -92,7 +92,7 @@ module builtin
       accept: "The task is FULLY implemented in real files (code actually written or edited, not merely described), AND proven to work by an ACTUAL execution whose REAL terminal output is included in the answer. Pre-existing tests and the build must still pass (no regressions). The goal is NOT met if any required check fails, the proving output is absent, or results are only described.",
       surface: true,
       max_rounds: 4)
-    ask chat(message)
+    expose chat(message)
   end
 
   agent VerifiedCoderNative
@@ -102,7 +102,7 @@ module builtin
       surface: true,
       max_rounds: 3,
       drives: "claude")
-    ask chat(message)
+    expose chat(message)
   end
 
   # 7. Routed (local pool) -- a cheap router reads each model's PROFILE and picks the best-fit
@@ -120,7 +120,7 @@ module builtin
       checker: jet_settings::strong(),
       max_rounds: 1,
       accept: "The reply directly and correctly answers the question.")
-    ask chat(message)
+    expose chat(message)
   end
 
   def self.catalog()

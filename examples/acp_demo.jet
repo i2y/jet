@@ -5,6 +5,6 @@ module acp_demo
   agent Sage
     model "ollama:qwen3.6:35b-a3b"
     role "You are a helpful assistant. Be concise."
-    ask reply(message)                 # no schema -> free-text answer
+    expose reply(message)                 # no schema -> free-text answer
   end
 end

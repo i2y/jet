@@ -7,7 +7,7 @@ module agent_memory_demo
   agent Assistant
     model "ollama:qwen3.6:35b-a3b"
     role "You are a helpful assistant with memory of the conversation. Answer in one short sentence."
-    ask chat(message) -> {reply: String}
+    expose chat(message) -> {reply: String}
   end
 
   def self.run()

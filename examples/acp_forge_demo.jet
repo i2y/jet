@@ -28,6 +28,6 @@ module acp_forge_demo
       accept: "The task is FULLY implemented in real files (code actually written or edited, not merely described), AND proven to work by an ACTUAL execution whose REAL terminal output is included in the answer: run the relevant tests, or if none exist a command that clearly exercises the new or changed behavior, and show the genuine output -- never simulated, summarized, or paraphrased. Pre-existing tests and the build must still pass (no regressions). Edge cases and error handling must be addressed. The goal is NOT met if any required check fails, the proving output is absent, or results are only described.",
       surface: true,
       max_rounds: 4)
-    ask handle(task)
+    expose handle(task)
   end
 end

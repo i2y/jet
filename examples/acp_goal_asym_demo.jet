@@ -20,6 +20,6 @@ module acp_goal_asym_demo
                 checker: "ollama:hf.co/mmnga/Llama-3.1-Swallow-8B-Instruct-v0.5-gguf:Q4_K_M",
                 max_rounds: 2,
                 accept: "The answer is at most 3 sentences and written in plain words a beginner can understand.")
-    ask handle(goal)
+    expose handle(goal)
   end
 end

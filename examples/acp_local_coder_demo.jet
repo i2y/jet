@@ -17,7 +17,7 @@ module acp_local_coder_demo
       os::cmd(erlang::binary_to_list(erlang::iolist_to_binary(["cd /tmp/jet_coder && ", c])))
     end
 
-    approve do |req|
+    def on_approval(req)
       jet_policy::gate(req, <<"run">>, {|r| jet_policy::deny_tokens(r, jet_policy::default_deny())})
     end
 
@@ -26,7 +26,7 @@ module acp_local_coder_demo
                 model: "ollama:qwen3.6:35b-a3b",
                 surface: true,
                 max_rounds: 2)
-    ask handle(task)
+    expose handle(task)
   end
 
   def self.run()

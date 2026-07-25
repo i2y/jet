@@ -5,13 +5,13 @@
 module agent_compose
   agent Summarizer
     role "You summarize crisply."
-    ask summarize(text) -> {summary: String}
+    expose summarize(text) -> {summary: String}
   end
 
   agent Orchestrator
     role "You coordinate research."
     tool Summarizer, web_search        # other agents / tools become its tools
-    task research(topic)
+    expose research(topic) -> TurnResult
   end
 
   def self.run()

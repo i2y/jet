@@ -13,6 +13,6 @@ module acp_goal_demo
     runner Goal(drives: "claude-code-acp",
                 accept: "The project builds with `go build ./...` and a test passes with `go test ./...`, demonstrated with the actual command output (not just claimed).",
                 max_rounds: 5)
-    ask handle(goal)
+    expose handle(goal)
   end
 end

@@ -10,6 +10,6 @@ module acp_debate_demo
                     {name: "Pro", role: "You argue IN FAVOR of the proposition. Be concrete."},
                     {name: "Con", role: "You argue AGAINST the proposition. Be concrete."}],
                   judge: {role: "You are the moderator. Weigh both sides and give a balanced verdict in 2-3 sentences."})
-    ask debate(proposition)
+    expose debate(proposition)
   end
 end

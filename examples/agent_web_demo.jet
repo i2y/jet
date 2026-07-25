@@ -16,7 +16,7 @@ module agent_web_demo
       jet_web::fetch(u)
     end
 
-    ask research(task)
+    expose research(task)
   end
 
   def self.run()

@@ -19,6 +19,6 @@ module acp_refine_escalate_demo
       critic: {model: "ollama:qwen3.6:35b-a3b",
                role: "You are a strict grader. Evaluate whether the final number and the reasoning are correct."},
       max_rounds: 3)
-    ask write(task)
+    expose write(task)
   end
 end

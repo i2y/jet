@@ -5,7 +5,7 @@
 module agent_as_tool
   agent Sub
     role "You greet people."
-    ask greet(name) -> {msg: String}
+    expose greet(name) -> {msg: String}
   end
 
   def self.run()

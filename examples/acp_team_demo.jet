@@ -12,6 +12,6 @@ module acp_team_demo
       {name: "Risks",   role: "You are a risk analyst. Use your tools to research current facts, then name the biggest risks in 2-3 specific sentences with concrete data."},
       {name: "Upside",  role: "You are an optimist. Use your tools to research current facts, then name the biggest benefits in 2-3 specific sentences."},
       {name: "Skeptic", role: "You are a hard skeptic. Use your tools to research current facts, then say why it might fail in 2-3 specific sentences."}])
-    ask review(topic)
+    expose review(topic)
   end
 end

@@ -110,10 +110,10 @@ defmodule Jc.AgentBuilder do
         _ -> simple_body(a, "")
       end
 
-    "  agent #{mod(a)}\n#{body}\n    ask chat(message)\n  end"
+    "  agent #{mod(a)}\n#{body}\n    expose chat(message)\n  end"
   end
 
-  # simple / tools: a backend + role (+ optional tools/approve/fuel)
+  # simple / tools: a backend + role (+ optional tools/on_approval/fuel)
   defp simple_body(a, tools) do
     [backend_line(a), fuel_line(a), "    role #{jstr(a["role"] || "You are a helpful assistant.")}", tools]
     |> Enum.reject(&(&1 in [nil, ""]))
@@ -142,7 +142,7 @@ defmodule Jc.AgentBuilder do
   defp tool_block(a) do
     names = a["tools"] || []
     tools = names |> Enum.map(&Map.get(@tool_lib, &1)) |> Enum.reject(&is_nil/1) |> Enum.map(&("    " <> &1))
-    gate = if "run" in names, do: ["    approve do |req|", "      jet_policy::gate(req, <<\"run\">>, {|r| jet_policy::deny_tokens(r, jet_policy::default_deny())})", "    end"], else: []
+    gate = if "run" in names, do: ["    def on_approval(req)", "      jet_policy::gate(req, <<\"run\">>, {|r| jet_policy::deny_tokens(r, jet_policy::default_deny())})", "    end"], else: []
     Enum.join(tools ++ gate, "\n")
   end
 
