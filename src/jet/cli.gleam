@@ -5,6 +5,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import jet/codegen/beam
+import jet/enum_check
 import jet/error
 import jet/lexer
 import jet/parser
@@ -339,6 +340,7 @@ fn do_compile(
           let filtered = token_filter.filter(tokens, module_name)
           case parser.parse(filtered, module_name) {
             Ok(module) -> {
+              enum_check.check(module)
               let module = rebind.rename_module(module)
               case beam.compile(module) {
                 Ok(#(_mod_atom, binary)) -> Ok(#(module_name, binary))

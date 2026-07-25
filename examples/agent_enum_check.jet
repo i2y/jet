@@ -1,0 +1,54 @@
+# A closed vocabulary: `-> enum(:a, :b, :c)`.
+#
+# Jet is dynamically typed on purpose -- no type system can promise what an LLM
+# returns, and `Architect`/`Flow` build their topology at runtime. But an enum is
+# a CLOSED SET written in the source, so two things become possible without one:
+#
+#   at runtime   Schema-Aligned Parsing matches whatever the model said to one of
+#                the allowed values -- exact, quoted, case-folded, or named inside
+#                a sentence -- and REPORTS an answer that is ambiguous or unknown
+#                instead of guessing.
+#   at compile   `match` on that method is checked for exhaustiveness. Delete the
+#                `case {:ok, :unrelated}` arm below and recompile: the compiler
+#                names the value you forgot.
+#
+# The compile-time half is INTRA-FUNCTION: it tracks `a = Agent.spawn()` and a
+# `match` in the same body (a lambda inside that body counts too). Move the match
+# into a function that receives the agent as a parameter and the analysis stops --
+# nothing in a dynamic language says what a parameter holds. That boundary is why
+# this is a targeted check over a declared, closed domain, and not a type system.
+#
+#   ./jet -r agent_enum_check::run examples/agent_enum_check.jet
+module agent_enum_check
+  agent Assessor
+    role "You classify a diff against the current code."
+    runner Fake(replies: {|_m, args| erlang::hd(args)})   # echo the input back
+    expose assess(diff) -> enum(:stale, :current, :unrelated)
+  end
+
+  def self.run()
+    a = agent_enum_check::Assessor.spawn()
+
+    # the runtime half -- six things a model might actually say
+    lists::foreach({|r| io::format("  ~-20s => ~P~n", [r, a.assess(r).await(), 6])},
+                   ["stale",                  # exact
+                    "\"current\"",            # quoted by the model
+                    "UNRELATED",              # case-folded
+                    "I'd say stale.",         # named inside a sentence
+                    "stale or current",       # AMBIGUOUS -> reported, not guessed
+                    "banana"])                # unknown   -> reported
+
+    # the compile-time half -- the spawn above and this match are in one body
+    decision = match a.assess("UNRELATED").await()
+      case {:ok, :stale}
+        "the diff predates the code"
+      case {:ok, :current}
+        "in sync"
+      case {:ok, :unrelated}
+        "touches nothing relevant"
+      case {:error, _}
+        "not one of the allowed values"
+    end
+    io::format("~ndecision for \"UNRELATED\": ~s~n", [decision])
+  end
+end
