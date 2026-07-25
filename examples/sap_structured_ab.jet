@@ -1,0 +1,235 @@
+# A/B: constrained decoding vs. compact schema + Schema-Aligned Parsing.
+#
+# Ollama can compile a JSON Schema into a sampling grammar (`format:`), which
+# guarantees parseable output. The claim SAP makes is that this costs ANSWER
+# quality -- the sampler is made to satisfy the shape before the content -- and
+# that a compact schema in the prompt plus a repairing parser does better.
+#
+# That is an empirical question, and it is per-model. This measures it: same
+# model, same tasks, same schemas, same prompts otherwise. The only difference is
+#
+#     runner Llm(model: ..., structured: :constrained)   # format: JSON Schema
+#     runner Llm(model: ..., structured: :prompt)        # schema in prompt + jet_sap
+#
+# Reported per arm: how often the declared schema was satisfied at all, how often
+# the ANSWER was right, and the wall-clock cost.
+#
+# The model is YOURS -- set JET_MODEL_STRONG (or pick one in the Console settings)
+# to any Ollama model; nothing here assumes a particular one. Run it against your
+# own model before changing a default on the strength of someone else's benchmark.
+#
+#   JET_MODEL_STRONG=ollama:your-model \
+#     ./jet -r sap_structured_ab::run examples/sap_structured_ab.jet
+#
+# Measured 2026-07-25 on ollama:qwen3.6:35b-a3b (7 cases x 2 reps per arm):
+#
+#   arm           conform   correct   median   total
+#   constrained    14/14     14/14     46.0s    684s
+#   prompt+SAP      8/14      7/14    104.0s   1365s
+#
+# For THIS model the grammar wins on all three axes, so the default stays
+# :constrained. The prompt arm did not fail on malformed JSON -- jet_sap repaired
+# everything malformed it was given -- it failed because the model ignored "reply
+# with only JSON" and answered in prose ("The capital of France is..."), and SAP
+# can repair broken structure but cannot invent an absent field. It is also
+# slower, because an unconstrained model writes paragraphs the grammar cuts off.
+#
+# Do not generalise this: one model, one backend, n=2. Published SAP-vs-function-
+# calling numbers come from hosted models on a function-calling benchmark, which
+# is a different setting. Run it on yours.
+module sap_structured_ab
+  agent Constrained
+    runner Llm(model: jet_settings::strong(), structured: :constrained)
+    role "You answer precisely and factually."
+    expose capital(country) -> {city: String, population_millions: Int}
+    expose arith(problem) -> {answer: Int}
+    expose classify(text) -> {sentiment: String, confidence: Float}
+    expose extract(text) -> {names: [String]}
+    expose compare(pair) -> {larger: String, difference: Int}
+    expose plan(task) -> {steps: [String], risky: Bool}
+  end
+
+  agent Prompted
+    runner Llm(model: jet_settings::strong(), structured: :prompt)
+    role "You answer precisely and factually."
+    expose capital(country) -> {city: String, population_millions: Int}
+    expose arith(problem) -> {answer: Int}
+    expose classify(text) -> {sentiment: String, confidence: Float}
+    expose extract(text) -> {names: [String]}
+    expose compare(pair) -> {larger: String, difference: Int}
+    expose plan(task) -> {steps: [String], risky: Bool}
+  end
+
+  # {name, call(agent) -> future, correct?(value) -> bool}
+  #
+  # NOTE: each argument is a SELF-CONTAINED question. `build_prompt` sends the
+  # role plus the arguments -- the method name is not part of the prompt -- so a
+  # bare "France" would leave the model guessing, and we would be measuring prompt
+  # ambiguity rather than the structured-output mechanism.
+  def self.cases()
+    [{<<"capital/FR">>,  {|a| a.capital("What is the capital city of France, and that city's population in millions?")},
+      {|v| has?(maps::get(:city, v, <<>>), <<"paris">>) and millions?(maps::get(:population_millions, v, 0))}},
+     {<<"capital/JP">>,  {|a| a.capital("What is the capital city of Japan, and that city's population in millions?")},
+      {|v| has?(maps::get(:city, v, <<>>), <<"tokyo">>) and millions?(maps::get(:population_millions, v, 0))}},
+     {<<"arith">>,       {|a| a.arith("What is 17 * 23 + 5?")},
+      {|v| maps::get(:answer, v, 0) == 396}},
+     {<<"classify">>,    {|a| a.classify("Classify the sentiment (positive/negative/neutral) of: \"The delivery was late and the box was crushed.\"")},
+      {|v| has?(maps::get(:sentiment, v, <<>>), <<"neg">>)}},
+     {<<"extract">>,     {|a| a.extract("List every person named in this sentence: \"Ada Lovelace and Alan Turing both worked on computing.\"")},
+      {|v| names_ok?(maps::get(:names, v, []))}},
+     {<<"compare">>,     {|a| a.compare("Which is larger, 1024 or 999, and by how much?")},
+      {|v| (maps::get(:difference, v, 0) == 25) and has?(maps::get(:larger, v, <<>>), <<"1024">>)}},
+     {<<"plan">>,        {|a| a.plan("Give the steps to delete every file in /tmp older than 30 days, and say whether the operation is risky.")},
+      {|v| (erlang::length(maps::get(:steps, v, [])) >= 2) and (maps::get(:risky, v, false) == true)}}]
+  end
+
+  def self.run()
+    check_scorers()
+    run_reps(2)
+  end
+
+  # A benchmark whose scorer is wrong is worse than no benchmark, so the scorers
+  # are asserted before any model is called.
+  def self.check_scorers()
+    exp = [{<<"has? miss">>, has?(<<"Oh">>, <<"1024">>), false},
+           {<<"has? hit">>, has?(<<"1024">>, <<"1024">>), true},
+           {<<"has? case-fold">>, has?(<<"Paris">>, <<"paris">>), true},
+           {<<"millions? wrong unit">>, millions?(2100000), false},
+           {<<"millions? ok">>, millions?(2), true},
+           {<<"names? hit">>, names_ok?([<<"Ada Lovelace">>, <<"Alan Turing">>]), true},
+           {<<"names? miss">>, names_ok?([<<"Ada Lovelace">>]), false}]
+    bad = lists::filter({|e| erlang::element(2, e) != erlang::element(3, e)}, exp)
+    if bad != []
+      erlang::error({:scorer_broken, bad})
+    else
+      io::format("scorers ok (~p assertions)~n", [erlang::length(exp)])
+    end
+  end
+
+  def self.run_reps(reps)
+    cs = cases()
+    io::format("~n~p cases x ~p reps x 2 arms = ~p calls on ~ts~n~n",
+               [erlang::length(cs), reps, erlang::length(cs) * reps * 2,
+                jet_backend::to_bin(jet_settings::strong())])
+    a = measure(<<"constrained">>, sap_structured_ab::Constrained.spawn(), cs, reps)
+    b = measure(<<"prompt+SAP">>, sap_structured_ab::Prompted.spawn(), cs, reps)
+    report(a)
+    report(b)
+    io::format("~n(conform = the declared schema was satisfied; correct = the answer was right)~n", [])
+  end
+
+  # --- one arm ---------------------------------------------------------------
+
+  def self.measure(label, a, cs, reps)
+    rs = lists::flatmap({|c| repeat(a, c, reps)}, cs)
+    {label, rs}
+  end
+
+  def self.repeat(a, c, n)
+    if n == 0
+      []
+    else
+      lists::append([one(a, c)], repeat(a, c, n - 1))
+    end
+  end
+
+  def self.one(a, c)
+    {name, call, check} = c
+    t0 = erlang::monotonic_time(:millisecond)
+    out = try
+      erlang::apply(call, [a]).await()
+    catch e
+      {:error, :crashed, e.get(:reason)}
+    end
+    ms = erlang::monotonic_time(:millisecond) - t0
+    io::format("  ~-14s ~-13s ~7wms  ~s~n",
+               [name, verdict(out, check), ms, brief(out)])
+    {name, conform?(out), correct?(out, check), ms}
+  end
+
+  def self.conform?(out)
+    match out
+      case {:ok, _}
+        true
+      case _
+        false
+    end
+  end
+
+  def self.correct?(out, check)
+    match out
+      case {:ok, v}
+        try
+          erlang::apply(check, [v]) == true
+        catch _e
+          false
+        end
+      case _
+        false
+    end
+  end
+
+  def self.verdict(out, check)
+    if correct?(out, check)
+      <<"correct">>
+    elsif conform?(out)
+      <<"conform/wrong">>
+    else
+      <<"MISMATCH">>
+    end
+  end
+
+  def self.brief(out)
+    b = jet_backend::to_bin(io_lib::format("~P", [out, 8]))
+    if erlang::byte_size(b) > 110
+      erlang::iolist_to_binary([binary::part(b, 0, 110), "..."])
+    else
+      b
+    end
+  end
+
+  # --- report ----------------------------------------------------------------
+
+  def self.report(arm)
+    {label, rs} = arm
+    n = erlang::length(rs)
+    io::format("~n~-13s conform ~p/~p   correct ~p/~p   median ~pms   total ~pms~n",
+               [label,
+                count(rs, {|r| erlang::element(2, r)}), n,
+                count(rs, {|r| erlang::element(3, r)}), n,
+                median(lists::map({|r| erlang::element(4, r)}, rs)),
+                lists::sum(lists::map({|r| erlang::element(4, r)}, rs))])
+  end
+
+  def self.count(rs, f)
+    erlang::length(lists::filter({|r| erlang::apply(f, [r]) == true}, rs))
+  end
+
+  def self.median(xs)
+    s = lists::sort(xs)
+    if s == []
+      0
+    else
+      lists::nth(erlang::trunc(erlang::length(s) / 2) + 1, s)
+    end
+  end
+
+  # --- checkers --------------------------------------------------------------
+
+  def self.has?(v, needle)
+    lc = erlang::iolist_to_binary(string::lowercase(jet_backend::to_bin(v)))
+    binary::split(lc, needle) != [lc]
+  end
+
+  # a city population in MILLIONS: the schema says the unit, so 2100000 is a wrong
+  # answer even though it satisfies `Int` -- exactly the kind of content error that
+  # shape-conformance alone does not catch
+  def self.millions?(n)
+    erlang::is_integer(n) and (n >= 1) and (n <= 50)
+  end
+
+  def self.names_ok?(names)
+    joined = erlang::iolist_to_binary(lists::map({|n| jet_backend::to_bin(n)}, names))
+    has?(joined, <<"lovelace">>) and has?(joined, <<"turing">>)
+  end
+end

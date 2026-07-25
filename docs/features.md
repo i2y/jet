@@ -78,7 +78,7 @@ module hello
   agent Greeter
     model "ollama:qwen3.6:35b-a3b"     # a local model — no API key
     role "You are a friendly assistant. Be concise."
-    ask greet(name) -> {greeting: String}
+    expose greet(name) -> {greeting: String}
   end
 end
 ```
@@ -185,11 +185,11 @@ module my_agents
     end
 
     # gate each tool call: deny dangerous shell commands (rm/sudo/curl/…); the file tools pass
-    approve do |req|
+    def on_approval(req)
       jet_policy::gate(req, <<"run">>, {|r| jet_policy::deny_tokens(r, jet_policy::default_deny())})
     end
 
-    ask code(task)                         # a (typed) answer; use `task m(args)` for a TurnResult
+    expose code(task)                         # free text; add `-> Schema` or `-> TurnResult`
   end
   # … catalog/0 + spawn_for/1 below …
 end
@@ -201,11 +201,12 @@ end
 |---|---|
 | `model "ollama:…"` / `drives "claude"` | the backend — a local model, or an external/native Claude agent |
 | `role "…"` | the system prompt |
-| `ask m(args) -> Schema` | a call returning a **schema-validated** value |
-| `task m(args)` | a call returning a **`TurnResult`** (`.text` / `.edits` / `.commands` / …) |
+| `expose m(args)` | a call returning free text |
+| `expose m(args) -> Schema` | a call returning a **schema-validated** value |
+| `expose m(args) -> TurnResult` | a call returning a **`TurnResult`** (`.text` / `.edits` / `.commands` / …) |
 | `tool name(p: Type) do \|p\| … end` | a callable tool; its typed params become the JSON schema the model fills. Bare `tool name` = a peer with no local impl. |
 | `tool_fuel N` | cap on tool calls per turn (the agentic loop's budget) |
-| `approve do \|req\| … end` | gate each tool/permission request (`:allow`/`:deny`); `jet_policy` has ready-made allow/deny-list policies |
+| `def on_approval(req)` | gate each tool/permission request (`:allow`/`:deny`); `jet_policy` has ready-made allow/deny-list policies |
 | `mcp "npx …"` | pull in an external MCP server's tools |
 | `memory "id"` · `skills "dir"` | durable conversation memory · progressive-disclosure skills |
 | `runner Shape(…)` | use a multi-agent [shape](#3-collaboration-shapes-multi-agent-patterns) instead of a single `model`/`drives` |
@@ -288,17 +289,71 @@ The `agent` keyword backs an object with an LLM/agent runtime. An `agent` desuga
 agent Researcher
   model "ollama:qwen3.6:35b-a3b"
   role "You research rigorously and cite sources."
-  ask research(question) -> {answer: String, sources: [String]}
+  expose research(question) -> {answer: String, sources: [String]}
   tool web_search
 end
 ```
 
-### `ask` vs `task`
+### One `expose`, three result shapes
 
-| Kind | Returns | Use for |
+The return type picks the shape — there is no second declaration keyword.
+
+| Declaration | Returns | Use for |
 |------|--------|------------|
-| `ask m(args) -> Type` | a typed, schema-validated value | analysis, Q&A, structured extraction |
-| `task m(args)` | a `TurnResult` (`.text` / `.ok?` / `.edits` / `.commands` / `.plan` / `.files`) | code changes, file/command work |
+| `expose m(args)` | free text | chat, summaries, open-ended replies |
+| `expose m(args) -> Type` | a typed value, schema-aligned (below) | analysis, Q&A, structured extraction |
+| `expose m(args) -> TurnResult` | a `TurnResult` (`.text` / `.ok?` / `.edits` / `.commands` / `.plan` / `.files`) | code changes, file/command work |
+
+(`ask m(...)` and `task m(...)` are the older spellings, still accepted.)
+
+#### The declared schema is a contract
+
+A `-> Type` is enforced by **Schema-Aligned Parsing** (`src/jet_sap.jet`), the one
+place every runner and shape funnels through. The reply is repaired *against the
+declared schema* — markdown fences, prose around the value, `<think>` blocks,
+single quotes, unquoted keys, trailing/missing commas, unescaped quotes inside
+strings, truncation — and then coerced by type: `"123"` → `123` for an `Int`,
+`"yes"` → `true` for a `Bool`, a lone `"Amazon"` → `["Amazon"]` for a `[String]`,
+`sourceList` → `source_list:`.
+
+Every reading of the reply is scored by the repairs it needed (each 1–3) plus 100
+per schema leaf it still fails, and the cheapest wins — so a candidate that
+actually carries the data always beats one that merely parses. Nothing is guessed:
+a value is reshaped only because the declared type says what it must become.
+
+When the schema still cannot be satisfied the turn returns
+`{:error, {:schema_mismatch, %{schema:, missing:, partial:, text:}}}` — it never
+degrades to raw text, which used to turn a type error into a crash far from its
+cause. Run its test suite, which is a list of things models actually do, with
+`./jet -r jet_sap::run_tests src/jet_sap.jet`.
+
+Because the repair happens in-process, there is **no retry on schema mismatch**: a
+retry costs a round trip and usually reproduces the same output. (Transport
+failures *are* retried with backoff, in `jet_plan::retry` — a different failure.)
+
+For an Ollama backend the schema reaches the model one of two ways, and which is
+better is an empirical, per-model question — `runner Llm(structured: :constrained)`
+(default; a JSON Schema as `format:`, compiled to a sampling grammar) or
+`structured: :prompt` (the compact schema in the prompt, repaired by `jet_sap`).
+[`examples/sap_structured_ab.jet`](../examples/sap_structured_ab.jet) measures both.
+
+Measured on `ollama:qwen3.6:35b-a3b`, 7 cases × 2 reps per arm:
+
+| arm | schema satisfied | answer correct | median | total |
+|---|---|---|---|---|
+| `:constrained` (default) | **14/14** | **14/14** | 46.0s | 684s |
+| `:prompt` + `jet_sap` | 8/14 | 7/14 | 104.0s | 1365s |
+
+The grammar wins on all three axes here, so the default stays `:constrained`. Note
+*why* the prompt arm lost: `jet_sap` repaired everything malformed it was handed —
+it lost because the model ignored "reply with only JSON" and answered in prose, and
+SAP can repair broken structure but cannot invent an absent field. One model, one
+backend, n=2; run it on yours before drawing a conclusion.
+
+This does **not** make SAP optional. Only the Ollama path has a grammar at all: the
+ACP runners and the hosted providers (Anthropic/OpenAI) send no `format:`/
+`response_format`, so for them prompt-plus-repair is the *only* mechanism, and SAP
+is what keeps their `-> Type` honest.
 
 ### Backends
 
@@ -317,7 +372,7 @@ agent FileHelper
     jet_fs::read(p)
   end
   tool web_search                           # bare — a declared peer/tool with no local impl
-  ask help(request) -> String
+  expose help(request) -> String
 end
 ```
 
@@ -326,7 +381,7 @@ end
 ```jet
 agent SafeAgent
   model "ollama:qwen3.6:35b-a3b"
-  approve do |req|
+  def on_approval(req)
     match req.get(:kind)
       case "execute"
         :deny                               # never run commands
@@ -334,7 +389,7 @@ agent SafeAgent
         :allow
     end
   end
-  task work(request)
+  expose work(request) -> TurnResult
 end
 ```
 
@@ -347,7 +402,7 @@ agent Echoer
   model "ollama:qwen3.6:35b-a3b"
   mcp "npx -y @modelcontextprotocol/server-everything"
   tool_fuel 25                              # cap total tool calls per turn (loop guard)
-  ask say(text) -> {reply: String}
+  expose say(text) -> {reply: String}
 end
 ```
 
@@ -616,7 +671,7 @@ case :Pair
 ```jet
 agent Buddy
   runner Pair(model: "ollama:qwen3.6:35b-a3b")
-  ask answer(question)
+  expose answer(question)
 end
 ```
 
@@ -643,7 +698,7 @@ there is no automated test suite for them yet, and result quality is model-depen
 agent Assistant
   model "ollama:qwen3.6:35b-a3b"
   memory "demo-durable-ada"          # a persistence id -> the conversation survives restarts
-  ask chat(message) -> {reply: String}
+  expose chat(message) -> {reply: String}
 end
 ```
 
@@ -658,7 +713,7 @@ window doesn't overflow. → [`agent_memory_demo.jet`](../examples/agent_memory_
 agent Concierge
   model "ollama:qwen3.6:35b-a3b"
   skills "examples/skills"           # a directory of SKILL.md files
-  ask handle(request) -> {reply: String}
+  expose handle(request) -> {reply: String}
 end
 ```
 
@@ -783,5 +838,5 @@ each agent is a process. In the Console, each thread is independent and the boar
 **Verify an agent's output?** Use `Goal` with a machine-checkable `accept:` condition (e.g. a test
 command); it loops until the check passes (up to `max_rounds`).
 
-**Prevent dangerous operations?** An `approve do |req| … end` block gates each permission request
+**Prevent dangerous operations?** An `def on_approval(req) … end` block gates each permission request
 (`:allow` / `:deny`); in the Console, requests surface as 🔐 prompts.

@@ -29,10 +29,15 @@ Two non-negotiables learned in design discussion:
 
 ## 2. Surface syntax
 
-Two method kinds, by result shape — **`ask`** (a typed answer) and **`task`** (a
-`TurnResult`: the work the agent did). Backend by form — **`model`** (in-process
-LLM) / **`drives`** (external ACP agent). (`runner Llm/Acp(...)` and `expose -> T`
-remain as the underlying/alias forms.)
+One declaration form — **`expose`**, the same keyword an `actor` uses — with the
+**return type** choosing the result shape: none (free text), `-> T` (a typed
+answer), `-> TurnResult` (the work the agent did). That is what makes
+"agent = actor + runner" true at the surface and not just in the AST; the AST has
+carried a single `ExposedMethod` all along. (`ask` / `task` remain as aliases.)
+
+Backend by form — **`runner X(...)`** is the one form; **`model`** (in-process
+LLM) and **`drives`** (external ACP agent) are shorthands for
+`runner Llm(model:)` / `runner Acp(command:)`.
 
 ```ruby
 # a thinking machine: typed answers (Llm)
@@ -40,8 +45,8 @@ agent Researcher
   model "claude-opus-4-8"
   role "You research rigorously and cite sources."
 
-  ask research(question) -> {answer: String, sources: [String]}
-  ask critique(draft)    -> {issues: [String], score: Int}
+  expose research(question) -> {answer: String, sources: [String]}
+  expose critique(draft)    -> {issues: [String], score: Int}
 
   tool web_search, Summarizer          # other actors/agents/MCP become tools
 end
@@ -53,10 +58,10 @@ agent Coder
   workspace "./src"                    # fs sandbox root
   memory :session                      # :session (default) | :fresh
 
-  task fix(description)
-  task refactor(target, goal)
+  expose fix(description) -> TurnResult
+  expose refactor(target, goal) -> TurnResult
 
-  approve do |req|                     # permission policy
+  def on_approval(req)                     # permission policy
     match req.get(:kind)
       case "execute"
         :deny
@@ -320,7 +325,7 @@ case :Pair
 ```ruby
 agent Buddy
   runner Pair(model: "ollama:qwen3.6:35b-a3b")
-  ask answer(question)
+  expose answer(question)
 end
 ```
 
@@ -407,5 +412,9 @@ Remaining follow-ups:
 
 - symlink-tight fs sandbox + async/streaming `terminal/*`
 - tool-use loop / MCP tools (esp. the `Llm` runner; `peers` as tools)
-- conversation memory for the `Llm` runner; runner-level retry on schema mismatch
+- conversation memory for the `Llm` runner
+  (runner-level *retry* on schema mismatch was dropped: `jet_sap` repairs the reply
+  in-process, so a retry would spend a round trip to reproduce the same output.
+  Transport failures are still retried with backoff in `jet_plan::retry` — a
+  different failure, kept separate.)
 - A2A (expose Jet agents as peers); ConnectRPC stubs from `expose`

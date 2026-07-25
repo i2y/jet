@@ -74,7 +74,7 @@ module hello
   agent Greeter
     model "ollama:qwen3.6:35b-a3b"     # ローカルモデル — API キー不要
     role "You are a friendly assistant. Be concise."
-    ask greet(name) -> {greeting: String}
+    expose greet(name) -> {greeting: String}
   end
 end
 ```
@@ -175,11 +175,11 @@ module my_agents
     end
 
     # 各 tool 呼び出しをゲート: 危険なシェルコマンド（rm/sudo/curl/…）を拒否。ファイル tool は通す
-    approve do |req|
+    def on_approval(req)
       jet_policy::gate(req, <<"run">>, {|r| jet_policy::deny_tokens(r, jet_policy::default_deny())})
     end
 
-    ask code(task)                         # （型付きの）回答。TurnResult が欲しければ `task m(args)`
+    expose code(task)                         # 自由テキスト。`-> Schema` / `-> TurnResult` を付けられる
   end
   # … 下に catalog/0 + spawn_for/1 …
 end
@@ -191,11 +191,12 @@ end
 |---|---|
 | `model "ollama:…"` / `drives "claude"` | バックエンド — ローカルモデル、または外部/ネイティブの Claude agent |
 | `role "…"` | システムプロンプト |
-| `ask m(args) -> Schema` | **schema 検証された**値を返す呼び出し |
-| `task m(args)` | **`TurnResult`** を返す呼び出し（`.text` / `.edits` / `.commands` / …） |
+| `expose m(args)` | 自由テキストを返す呼び出し |
+| `expose m(args) -> Schema` | **schema 検証された**値を返す呼び出し |
+| `expose m(args) -> TurnResult` | **`TurnResult`** を返す呼び出し（`.text` / `.edits` / `.commands` / …） |
 | `tool name(p: Type) do \|p\| … end` | 呼び出せる tool。型付きパラメータがモデルの埋める JSON schema になる。`tool name` 単体 = ローカル実装のない peer。 |
 | `tool_fuel N` | ターンあたりの tool 呼び出し上限（agentic ループの予算） |
-| `approve do \|req\| … end` | 各 tool / 権限リクエストをゲート（`:allow`/`:deny`）。`jet_policy` に既製の allow/deny リストポリシーがある |
+| `def on_approval(req)` | 各 tool / 権限リクエストをゲート（`:allow`/`:deny`）。`jet_policy` に既製の allow/deny リストポリシーがある |
 | `mcp "npx …"` | 外部 MCP サーバの tool を取り込む |
 | `memory "id"` · `skills "dir"` | 永続的な会話メモリ · progressive disclosure な skills |
 | `runner Shape(…)` | 単一の `model`/`drives` の代わりにマルチエージェントの [shape](#3-コラボレーション-shape--マルチエージェントのパターン) を使う |
@@ -260,17 +261,22 @@ end
 agent Researcher
   model "ollama:qwen3.6:35b-a3b"
   role "You research rigorously and cite sources."
-  ask research(question) -> {answer: String, sources: [String]}
+  expose research(question) -> {answer: String, sources: [String]}
   tool web_search
 end
 ```
 
-### `ask` と `task`
+### 一つの `expose`、三つの戻り値の形
+
+戻り値の型が形を決めるので、宣言キーワードは一つだけです。
 
 | 種別 | 返り値 | 用途 |
 |------|--------|------------|
-| `ask m(args) -> Type` | 型付きで schema 検証された値 | 分析、Q&A、構造化抽出 |
-| `task m(args)` | `TurnResult`（`.text` / `.ok?` / `.edits` / `.commands` / `.plan` / `.files`） | コード変更、ファイル/コマンド作業 |
+| `expose m(args)` | 自由テキスト | チャット、要約、自由回答 |
+| `expose m(args) -> Type` | 型付きで schema 検証された値 | 分析、Q&A、構造化抽出 |
+| `expose m(args) -> TurnResult` | `TurnResult`（`.text` / `.ok?` / `.edits` / `.commands` / `.plan` / `.files`） | コード変更、ファイル/コマンド作業 |
+
+（`ask m(...)` / `task m(...)` は旧表記で、引き続き使えます。）
 
 ### バックエンド
 
@@ -289,7 +295,7 @@ agent FileHelper
     jet_fs::read(p)
   end
   tool web_search                           # 単体 — ローカル実装のない peer/tool の宣言
-  ask help(request) -> String
+  expose help(request) -> String
 end
 ```
 
@@ -298,7 +304,7 @@ end
 ```jet
 agent SafeAgent
   model "ollama:qwen3.6:35b-a3b"
-  approve do |req|
+  def on_approval(req)
     match req.get(:kind)
       case "execute"
         :deny                               # コマンドは決して実行しない
@@ -306,7 +312,7 @@ agent SafeAgent
         :allow
     end
   end
-  task work(request)
+  expose work(request) -> TurnResult
 end
 ```
 
@@ -319,7 +325,7 @@ agent Echoer
   model "ollama:qwen3.6:35b-a3b"
   mcp "npx -y @modelcontextprotocol/server-everything"
   tool_fuel 25                              # ターンあたりの tool 呼び出し総数の上限（ループガード）
-  ask say(text) -> {reply: String}
+  expose say(text) -> {reply: String}
 end
 ```
 
@@ -562,7 +568,7 @@ module jet_pair
     final = jet_backend::run_streaming(backend,
               "Improve the draft below; reply with ONLY the improved answer.", draft)
 
-    jet_backend::coerce(final, schema)   # `ask` → schema へ検証; `task` → TurnResult
+    jet_backend::coerce(final, schema)   # `-> Schema` → schema へ検証; `task` → TurnResult
   end
 end
 ```
@@ -579,7 +585,7 @@ case :Pair
 ```jet
 agent Buddy
   runner Pair(model: "ollama:qwen3.6:35b-a3b")
-  ask answer(question)
+  expose answer(question)
 end
 ```
 
@@ -604,7 +610,7 @@ end
 agent Assistant
   model "ollama:qwen3.6:35b-a3b"
   memory "demo-durable-ada"          # 永続化 id -> 会話が再起動をまたいで残る
-  ask chat(message) -> {reply: String}
+  expose chat(message) -> {reply: String}
 end
 ```
 
@@ -616,7 +622,7 @@ end
 agent Concierge
   model "ollama:qwen3.6:35b-a3b"
   skills "examples/skills"           # SKILL.md ファイルのディレクトリ
-  ask handle(request) -> {reply: String}
+  expose handle(request) -> {reply: String}
 end
 ```
 
@@ -725,4 +731,4 @@ Jet **も** Phoenix も BEAM 上で動くので、Console 全体は Erlang ラ�
 
 **agent の出力を検証するには？** 機械的に検査できる `accept:` 条件（例: テストコマンド）を付けた `Goal` を使います。チェックが通るまで（`max_rounds` まで）ループします。
 
-**危険な操作を防ぐには？** `approve do |req| … end` ブロックが各権限リクエストをゲートします（`:allow` / `:deny`）。Console ではリクエストが 🔐 プロンプトとして現れます。
+**危険な操作を防ぐには？** `def on_approval(req) … end` ブロックが各権限リクエストをゲートします（`:allow` / `:deny`）。Console ではリクエストが 🔐 プロンプトとして現れます。
