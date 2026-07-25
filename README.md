@@ -142,10 +142,27 @@ reference implementation. Its test suite is the list of things models actually d
 `./jet -r jet_sap::run_tests src/jet_sap.jet`.
 
 A schema type is `String` · `Int` · `Float` · `Bool` · `Atom` · `[T]` · `{k: T}` ·
-**`enum(:a, :b, :c)`**. An enum is a *closed set*, which is where matching a
-model's answer pays off most: `stale`, `"current"`, `UNRELATED` and `I'd say
-stale.` all land on the right value, while `stale or current` is **reported as
-ambiguous rather than guessed**.
+**`enum(:a, :b, :c)`**, and a field may carry two modifiers:
+
+```jet
+expose research(q) -> {answer:    String   "one sentence, no preamble",
+                       sources:  [String]? "URLs only, no titles",
+                       certainty: Int?}
+```
+
+An **enum** is a *closed set*, which is where matching a model's answer pays off
+most: `stale`, `"current"`, `UNRELATED` and `I'd say stale.` all land on the right
+value, while `stale or current` is **reported as ambiguous rather than guessed**.
+
+**`?`** is not cosmetic — it changes the price. A missing *required* field costs
+100 in the score above; a missing *optional* one costs 1. That gap is the whole
+meaning of the mark: "the model legitimately left this out" stops being the same
+event as "this is the wrong answer". `null` counts as absent.
+
+The **description** travels with the declaration and is written once: the model
+sees `"string // URLs only, no titles"` in the compact prompt schema, and a
+backend that constrains generation gets it as JSON Schema's own `description`.
+Runnable: [`examples/agent_optional_schema.jet`](examples/agent_optional_schema.jet).
 
 ### What the compiler checks — without a type system
 

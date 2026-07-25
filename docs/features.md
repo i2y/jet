@@ -332,6 +332,22 @@ A schema type is `String` · `Int` · `Float` · `Bool` · `Atom` · `[T]` · `{
 one of its values — exact, quoted, case-folded, or named inside a sentence — and
 report an ambiguous or unknown answer instead of guessing at it.
 
+A field may also be **optional** and carry a **description**:
+
+```jet
+expose research(q) -> {answer:    String   "one sentence, no preamble",
+                       sources:  [String]? "URLs only, no titles",
+                       certainty: Int?}
+```
+
+`?` changes the *price*, not just the check: an absent required field costs 100
+in the SAP score, an absent optional one costs 1, and `null` counts as absent. The
+description is written once and reaches the model two ways — as
+`"string // URLs only, no titles"` in the compact prompt schema, and as JSON
+Schema's own `description` when the backend constrains generation (optional fields
+are correspondingly left out of `required`). See
+[`examples/agent_optional_schema.jet`](../examples/agent_optional_schema.jet).
+
 Three things that used to fail silently are now errors, because they are declared
 and closed:
 
