@@ -908,6 +908,8 @@ module jet_sap
      {<<"unquoted keys">>,   <<"{answer: \"hi\"}">>, s, {:ok, {answer: <<"hi">>}}},
      {<<"missing comma">>,   <<"{\"answer\":\"hi\" \"extra\":1}">>, s, {:ok, {answer: <<"hi">>}}},
      {<<"inner quotes">>,    <<"{\"answer\":\"he said \"hi\" there\"}">>, s, {:ok, {answer: <<"he said \"hi\" there">>}}},
+     # the inner quote ends the string too: the LAST of the run closes it
+     {<<"inner quotes at end">>, <<"{\"answer\":\"he said \"hi\"\"}">>, s, {:ok, {answer: <<"he said \"hi\"">>}}},
      {<<"comments">>,        <<"{ // here\n \"answer\": \"hi\" /* done */ }">>, s, {:ok, {answer: <<"hi">>}}},
      {<<"truncated">>,       <<"{\"answer\":\"hi\"">>, s, {:ok, {answer: <<"hi">>}}},
      {<<"python literals">>, <<"{\"answer\": None}">>, s, {:ok, {answer: <<>>}}},

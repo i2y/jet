@@ -363,6 +363,50 @@ warning naming it. The analysis is intra-function — it connects
 function boundaries, where a dynamic language gives no way to know what a
 parameter holds. See [`examples/agent_enum_check.jet`](../examples/agent_enum_check.jet).
 
+#### Measured against the Elixir alternative
+
+The idiomatic Elixir path for structured output is [Instructor.ex](https://hexdocs.pm/instructor)
+— which [`jido_ai`](https://hexdocs.pm/jido_ai) depends on. Its offline pipeline is
+`Jason.decode` → `Instructor.cast_all` (a schemaless Ecto changeset) → validate;
+a validation failure is what triggers its `max_retries`, i.e. another round trip
+to the model.
+
+Twenty replies a model might actually return, one schema
+(`{answer: String, sources: [String], n: Int}`), both stacks offline:
+
+| | delivered the value | note |
+|---|---|---|
+| `Jason.decode` + `Instructor.cast_all` | **2 / 19** | clean JSON, and `"7"` → `7` (Ecto casts) |
+| `jet_sap` | **19 / 19** | 10–40 µs per reply |
+
+Both correctly reject the 20th, where a required field is genuinely absent.
+
+The 17 the Elixir pipeline loses are not exotic: a markdown fence, prose before or
+after, a `<think>` block, a trailing comma, single quotes, unquoted keys, a missing
+comma, `//` comments, truncation, `True`, an unescaped quote inside a string, an
+answer wrapped in `{"result": …}`, a decoy object earlier in the reply, a bare
+string where a list was declared, and a capitalised key. `Jason.decode` is
+all-or-nothing, so each of those costs a retry.
+
+The difference is not that Ecto cannot coerce — it can, which is why `"7"` passes.
+It is that **nothing repairs the syntax before the decoder sees it**, and no
+candidate other than "the whole reply is JSON" is ever considered.
+
+To reproduce: `./jet -r jet_sap::run_tests src/jet_sap.jet` for the Jet side, and
+for the Elixir side a `mix new` project with `{:jido_ai, "~> 0.5"}` plus
+
+```elixir
+types = %{answer: :string, sources: {:array, :string}, n: :integer}
+case Jason.decode(text) do
+  {:ok, map} when is_map(map) ->
+    {%{}, types}
+    |> Ecto.Changeset.cast(map, Map.keys(types))
+    |> Ecto.Changeset.validate_required(Map.keys(types))
+    |> Map.get(:valid?)
+  _ -> false
+end
+```
+
 Because the repair happens in-process, there is **no retry on schema mismatch**: a
 retry costs a round trip and usually reproduces the same output. (Transport
 failures *are* retried with backoff, in `jet_plan::retry` — a different failure.)

@@ -386,10 +386,21 @@ str(<<C, R/binary>>, Q, Acc) -> str(R, Q, <<Acc/binary, C>>).
 closes(R) ->
     case ws(R) of
         <<>> -> true;
+        %% A quote immediately after this one: the LAST of the run is the real
+        %% close, so `"he said "hi""` keeps its inner pair. But a missing comma
+        %% -- `{"a":"x" "b":"y"}` -- must still close here, so only defer when
+        %% what follows THAT quote is itself structural.
+        <<C, Rest/binary>> when C =:= $"; C =:= $' ->
+            not structural_head(ws(Rest));
         <<C, _/binary>> when C =:= $,; C =:= $}; C =:= $]; C =:= $:;
-                             C =:= ${; C =:= $[; C =:= $"; C =:= $' -> true;
+                             C =:= ${; C =:= $[ -> true;
         _ -> false
     end.
+
+structural_head(<<>>) -> true;
+structural_head(<<C, _/binary>>) when C =:= $,; C =:= $}; C =:= $]; C =:= $:;
+                                      C =:= ${; C =:= $[ -> true;
+structural_head(_) -> false.
 
 escape($n, R, Q, Acc) -> str(R, Q, <<Acc/binary, $\n>>);
 escape($t, R, Q, Acc) -> str(R, Q, <<Acc/binary, $\t>>);
