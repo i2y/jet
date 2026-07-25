@@ -1,26 +1,32 @@
 <img src="https://github.com/i2y/jet/raw/master/jet_logo.png" width="300px"/>
 
-# `object = actor = agent`
+# An agent is a file
 
-One object model and one call syntax — `x.method()` — spanning a local value → a concurrent process → a supervised AI agent.
-
-AI agents are long-lived, stateful, concurrent, and failure-prone — exactly what the BEAM has handled since 1986. Jet makes the **agent a first-class language primitive** on the runtime built for millions of supervised, fault-tolerant processes: crash an agent and OTP restarts it; run thousands as lightweight processes; drive external coding agents over [ACP](https://agentclientprotocol.com) and expose tools over MCP — in Ruby-like syntax.
-
-```ruby
-class Point                                    # a plain value
-  def dist()  math::sqrt(@x * @x + @y * @y)  end
-end
-
-agent Sage                                     # an AI agent — same x.method() call
-  model "ollama:qwen3.6:35b-a3b"                # a real local LLM (no API key)
-  expose answer(q) -> {answer: String}          # native, schema-typed output
-end
-
-actor Worker                                   # an agent is just a supervised process
-  def add(n)  @total = @total + n  @total  end
-  def on_message(_)  erlang::error(:boom)  end   # crash it — the supervisor restarts it
+```jet
+# sage.jet
+module sage
+  agent Sage
+    model "ollama:qwen3.6:35b-a3b"      # a real local model — no API key
+    role "You research rigorously and cite sources."
+    expose answer(question) -> {answer: String, sources: [String]?}
+  end
 end
 ```
+
+```sh
+jet acp-serve sage::Sage::answer sage.jet
+```
+
+That file is now an agent **inside your editor**: any [ACP](https://agentclientprotocol.com) client drives it, replies stream token by token, the session remembers, and plans and tool calls render natively. Add a `catalog/0` and drop the same file in `console/agents/` and it appears in a **[web UI](#or-in-a-web-ui-jet-console)** too, recompiled and hot-loaded when you save.
+
+**You don't rewrite your system in Jet.** The unit of adoption is one file — the same unit as a config file, with a compiler and a supervisor behind it.
+
+What that file gets you, that a wrapper around a chat API doesn't:
+
+- **It's supervised.** Crash it and OTP restarts it. Run ten thousand of them.
+- **It survives machines.** Split a fleet across BEAM nodes, kill a whole node mid-flight, and the supervisor re-homes its agents onto the survivor.
+- **It can drive other coding agents.** `drives "claude-code-acp"` — or `drives "claude"`, no adapter — makes Claude Code or Codex a *member* of a supervised Jet fleet.
+- **Its declared schema can't be silently broken.** `-> {answer: String, sources: [String]?}` is a [contract](#the-schema-is-a-contract--schema-aligned-parsing), not a hint.
 
 ![Jet — object = actor = agent, with supervised crash-recovery](jet_demo.gif)
 
@@ -38,7 +44,29 @@ The LLM `Fleet` runner does the same: `nodes: ["b@host"], retry: 2` places membe
 
 Runnable: [`examples/pitch.jet`](examples/pitch.jet) (the first GIF) · [`examples/fleet.jet`](examples/fleet.jet) (the fleet) · [`examples/fleet_dist.jet`](examples/fleet_dist.jet) (two nodes, self-healing).
 
-These same agents also run **inside your editor** ([over ACP](#agents-in-your-editor-over-acp)) and in a **web UI** ([Jet Console](#or-in-a-web-ui-jet-console)).
+More on driving these [from your editor](#agents-in-your-editor-over-acp) and in [Jet Console](#or-in-a-web-ui-jet-console).
+
+## `object = actor = agent`
+
+That file is small because the agent is a *form* in the language, not a library on top of one. One object model and one call syntax — `x.method()` — spans a local value → a concurrent process → a supervised AI agent:
+
+```ruby
+class Point                                    # a plain value
+  def dist()  math::sqrt(@x * @x + @y * @y)  end
+end
+
+agent Sage                                     # an AI agent — same x.method() call
+  model "ollama:qwen3.6:35b-a3b"                # a real local LLM (no API key)
+  expose answer(q) -> {answer: String}          # native, schema-typed output
+end
+
+actor Worker                                   # an agent is just a supervised process
+  def add(n)  @total = @total + n  @total  end
+  def on_message(_)  erlang::error(:boom)  end   # crash it — the supervisor restarts it
+end
+```
+
+AI agents are long-lived, stateful, concurrent and failure-prone — exactly what the BEAM has handled since 1986. Which raises the fair question:
 
 ## Why a language, and not an Elixir library?
 
