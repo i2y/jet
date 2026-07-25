@@ -11,7 +11,7 @@
 
 module agent_echo
   agent Researcher
-    runner Echo(model: "claude-opus-4-8")
+    runner Stub(model: "claude-opus-4-8")
     role "You research rigorously and cite sources."
     tools web_search, Summarizer
     expose research(question) -> {answer: String, sources: [String]}

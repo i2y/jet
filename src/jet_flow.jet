@@ -726,4 +726,13 @@ module jet_flow
   def self.fail_text(id)
     erlang::iolist_to_binary(["(node ", id, " failed)"])
   end
+
+  # The option keys `runner Flow(...)` accepts -- a generated DAG.
+  # jet_agent checks a config against this before routing a turn, so a typo like
+  # `member:` for `members:` fails loudly instead of silently yielding an empty
+  # run. It lives HERE, not in the compiler: a shape stays "one module + one
+  # dispatch line", and the compiler never learns a shape's vocabulary.
+  def self.runner_opts_spec()
+    [:model, :drives, :designer, :max_parallel, :retry, :nodes]
+  end
 end

@@ -359,7 +359,7 @@ module jet_acp
     else
       erlang::iolist_to_binary([base,
         "\n\nRespond with ONLY a JSON value matching this shape (no markdown, no prose): ",
-        jet_json_ffi::encode(schema)])
+        jet_json_ffi::encode(jet_sap::for_prompt(schema))])
     end
   end
 
@@ -1080,5 +1080,14 @@ module jet_acp
       case path
         file::write_file(path, erlang::iolist_to_binary([tag, data, "\n"]), [:append])
     end
+  end
+
+  # The option keys `runner Acp(...)` accepts -- the external agent's command line.
+  # jet_agent checks a config against this before routing a turn, so a typo like
+  # `member:` for `members:` fails loudly instead of silently yielding an empty
+  # run. It lives HERE, not in the compiler: a shape stays "one module + one
+  # dispatch line", and the compiler never learns a shape's vocabulary.
+  def self.runner_opts_spec()
+    [:command]
   end
 end

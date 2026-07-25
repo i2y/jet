@@ -469,6 +469,9 @@ module jet_llm
   def self.to_json_schema(schema)
     if erlang::is_atom(schema)
       scalar_schema(schema)
+    elsif jet_sap::enum?(schema)
+      {type: "string",
+       enum: lists::map({|a| erlang::atom_to_binary(a, :utf8)}, jet_sap::enum_values(schema))}
     elsif erlang::is_tuple(schema)
       {_, elem} = schema
       {type: "array", items: to_json_schema(elem)}
@@ -795,5 +798,14 @@ module jet_llm
       case text
         text
     end
+  end
+
+  # The option keys `runner Llm(...)` accepts -- the in-process LLM turn.
+  # jet_agent checks a config against this before routing a turn, so a typo like
+  # `member:` for `members:` fails loudly instead of silently yielding an empty
+  # run. It lives HERE, not in the compiler: a shape stays "one module + one
+  # dispatch line", and the compiler never learns a shape's vocabulary.
+  def self.runner_opts_spec()
+    [:model, :provider, :api_key, :structured, :think, :options]
   end
 end

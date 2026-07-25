@@ -39,7 +39,75 @@ module jet_agent
   end
 
   def self.dispatch(config, method, args, schema, kind)
-    match runner_name(config)
+    name = runner_name(config)
+    match check_runner_opts(name, config)
+      case :ok
+        route(name, config, method, args, schema, kind)
+      case err
+        err
+    end
+  end
+
+  # Check the runner's option keys against the SHAPE'S OWN manifest
+  # (`<module>::runner_opts_spec/0`). Only UNRECOGNISED keys are an error: a
+  # missing key usually has a legitimate substitute (a Fleet can carry `model:`
+  # on each member instead of on the group), while `member:` for `members:` is
+  # unambiguously a typo -- and used to produce an empty fleet in silence.
+  #
+  # The manifest lives with the shape, never in the compiler, so adding a shape
+  # stays "one module + one dispatch line + its own spec".
+  def self.check_runner_opts(name, config)
+    match accepted_opts(name)
+      case nil
+        :ok
+      case allowed
+        unknown = lists::filter({|k| unknown_opt?(k, allowed)},
+                                maps::keys(jet_backend::opts(config)))
+        if unknown == []
+          :ok
+        else
+          {:error, {:unknown_runner_options, name, lists::sort(unknown), lists::sort(allowed)}}
+        end
+    end
+  end
+
+  def self.unknown_opt?(k, allowed)
+    (not lists::member(k, allowed)) and (not internal_opt?(k))
+  end
+
+  # keys the runtime injects (:__mem__, :__mcp_conns__, …) are never user-written
+  def self.internal_opt?(k)
+    lists::prefix("__", erlang::atom_to_list(k))
+  end
+
+  def self.accepted_opts(name)
+    match runner_module(name)
+      case nil
+        nil
+      case mod
+        code::ensure_loaded(mod)
+        if erlang::function_exported(mod, :runner_opts_spec, 0)
+          erlang::apply(mod, :runner_opts_spec, [])
+        else
+          nil                          # a shape that declares nothing is not checked
+        end
+    end
+  end
+
+  # :Fleet -> :jet_fleet, by the same convention every shape already follows.
+  def self.runner_module(name)
+    if name == :Plan
+      :jet_planner
+    elsif lists::member(name, known_runners()) and (name != :Stub)
+      erlang::binary_to_atom(erlang::iolist_to_binary(
+        ["jet_", string::lowercase(erlang::atom_to_binary(name, :utf8))]), :utf8)
+    else
+      nil                              # unknown, or the offline stub (takes anything)
+    end
+  end
+
+  def self.route(name, config, method, args, schema, kind)
+    match name
       case :Acp
         jet_acp::turn(config, method, args, schema)
       case :Llm
@@ -64,9 +132,22 @@ module jet_agent
         jet_planner::turn(config, method, args, schema)
       case :Fake
         jet_fake::turn(config, method, args, schema, kind)
-      case _
+      case :Stub
         stub_turn(config, schema, kind)
+      case :stub                      # no runner declared at all
+        stub_turn(config, schema, kind)
+      case other
+        # A NAME WE DO NOT KNOW IS AN ERROR. This used to fall through to the
+        # stub, which SYNTHESIZES a schema-conforming value -- so `runner Fleeet`
+        # (one typo) returned plausible fabricated data and looked like a success.
+        # A wrong runner name is never something to guess at.
+        {:error, {:unknown_runner, other, known_runners()}}
     end
+  end
+
+  def self.known_runners()
+    [:Acp, :Llm, :Fake, :Stub,
+     :Fleet, :Pipeline, :Refine, :Debate, :Auto, :Architect, :Flow, :Goal, :Plan]
   end
 
   def self.runner_name(config)
@@ -299,6 +380,8 @@ module jet_agent
   def self.gen_value(schema)
     if erlang::is_atom(schema)
       gen_scalar(schema)
+    elsif jet_sap::enum?(schema)
+      erlang::hd(jet_sap::enum_values(schema))
     elsif erlang::is_tuple(schema)
       {_, elem_schema} = schema
       [gen_value(elem_schema)]
@@ -418,6 +501,77 @@ module jet_agent
       after 600000     # a whole turn may be a multi-stage agent pipeline (minutes)
         {:error, :agent_await_timeout}
       end
+    end
+  end
+
+  # ===== Unit tests:  ./jet -r jet_agent::run_tests src/jet_agent.jet =====
+  #
+  # The option sets below are the ones that actually appear across examples/ and
+  # console/agents/, so a manifest that is too narrow fails here rather than in
+  # someone's program.
+
+  def self.ok_cases()
+    [{:Acp, [:command]},
+     {:Llm, [:model, :structured, :provider, :api_key, :think, :options]},
+     {:Fake, [:replies]},
+     {:Fleet, [:drives, :ground, :members, :model, :nodes, :reduce, :retry,
+               :workspace, :lead, :max_parallel]},
+     {:Pipeline, [:model, :stages]},
+     {:Refine, [:critic, :max_rounds, :model, :worker, :models, :select, :router]},
+     {:Debate, [:agents, :judge, :model, :rounds]},
+     {:Auto, [:model, :router, :shapes]},
+     {:Architect, [:drives, :designer]},
+     {:Flow, [:drives, :designer, :max_parallel, :retry, :nodes]},
+     {:Goal, [:accept, :checker, :drives, :max_rounds, :model, :models, :router,
+              :select, :surface, :via, :doer]},
+     {:Plan, [:model, :planner, :worker, :via, :max_steps, :max_replans]},
+     {:Stub, [:model]},
+     {:stub, []}]
+  end
+
+  def self.cfg(name, keys)
+    {runner: {name: name, opts: lists::foldl({|k, m| maps::put(k, 1, m)}, maps::new(), keys)}}
+  end
+
+  def self.test_manifests_accept_real_configs()
+    bad = lists::filter({|c| check_runner_opts(erlang::element(1, c),
+                                               cfg(erlang::element(1, c), erlang::element(2, c))) != :ok},
+                        ok_cases())
+    {bad == [], bad, []}
+  end
+
+  def self.test_unknown_option_rejected()
+    r = check_runner_opts(:Fleet, cfg(:Fleet, [:member]))
+    {erlang::element(1, r) == :error, r, :error}
+  end
+
+  def self.test_internal_options_allowed()
+    r = check_runner_opts(:Llm, cfg(:Llm, [:model, :__mem__]))
+    {r == :ok, r, :ok}
+  end
+
+  def self.test_unknown_runner_errors()
+    r = dispatch(cfg(:Fleeet, [:members]), :m, [], :any, :ask)
+    {erlang::element(1, r) == :error, r, :error}
+  end
+
+  def self.run_tests()
+    ts = [{"manifests_accept_real_configs", test_manifests_accept_real_configs()},
+          {"unknown_option_rejected", test_unknown_option_rejected()},
+          {"internal_options_allowed", test_internal_options_allowed()},
+          {"unknown_runner_errors", test_unknown_runner_errors()}]
+    lists::foreach({|t| report(t)}, ts)
+    bad = lists::filter({|t| erlang::element(1, erlang::element(2, t)) == false}, ts)
+    io::format("~n~p/~p passed~n", [erlang::length(ts) - erlang::length(bad), erlang::length(ts)])
+  end
+
+  def self.report(t)
+    {name, r} = t
+    {ok, got, want} = r
+    if ok
+      io::format("  ok   ~s~n", [name])
+    else
+      io::format("  FAIL ~s~n         got:      ~P~n         expected: ~P~n", [name, got, 8, want, 8])
     end
   end
 end

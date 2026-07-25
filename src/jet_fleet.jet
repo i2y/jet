@@ -782,4 +782,14 @@ module jet_fleet
       erlang::iolist_to_binary(io_lib::format("~p", [v]))
     end
   end
+
+  # The option keys `runner Fleet(...)` accepts -- parallel fan-out + synthesis.
+  # jet_agent checks a config against this before routing a turn, so a typo like
+  # `member:` for `members:` fails loudly instead of silently yielding an empty
+  # run. It lives HERE, not in the compiler: a shape stays "one module + one
+  # dispatch line", and the compiler never learns a shape's vocabulary.
+  def self.runner_opts_spec()
+    [:model, :drives, :members, :lead, :reduce, :ground, :workspace,
+     :nodes, :retry, :max_parallel]
+  end
 end

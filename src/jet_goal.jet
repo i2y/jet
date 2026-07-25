@@ -314,4 +314,14 @@ module jet_goal
       jet_acp::emit_event({:tool_call, maps::put(:output, output, base)})
     end
   end
+
+  # The option keys `runner Goal(...)` accepts -- verify-loop (+ escalation pool).
+  # jet_agent checks a config against this before routing a turn, so a typo like
+  # `member:` for `members:` fails loudly instead of silently yielding an empty
+  # run. It lives HERE, not in the compiler: a shape stays "one module + one
+  # dispatch line", and the compiler never learns a shape's vocabulary.
+  def self.runner_opts_spec()
+    [:model, :drives, :accept, :checker, :doer, :max_rounds, :surface,
+     :via, :models, :select, :router]
+  end
 end

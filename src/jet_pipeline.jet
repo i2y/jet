@@ -72,4 +72,13 @@ module jet_pipeline
       "You are ONE stage of an autonomous multi-stage pipeline. NO human is available mid-run, so do NOT ask the user questions or wait for input -- make reasonable assumptions, state them in one line, and produce your stage's concrete deliverable. Your input below is the user's task (if you are the first stage) or the PREVIOUS stage's output (otherwise); build directly on it -- do NOT role-play the user, and do NOT reply to it as if it were a chat message. When you revise an existing artifact, check its current state first and prefer rewriting it wholesale over many small patches.\n\nYour role: ",
       role])
   end
+
+  # The option keys `runner Pipeline(...)` accepts -- sequential stages.
+  # jet_agent checks a config against this before routing a turn, so a typo like
+  # `member:` for `members:` fails loudly instead of silently yielding an empty
+  # run. It lives HERE, not in the compiler: a shape stays "one module + one
+  # dispatch line", and the compiler never learns a shape's vocabulary.
+  def self.runner_opts_spec()
+    [:model, :drives, :stages]
+  end
 end

@@ -1503,11 +1503,30 @@ fn skip_to_param_boundary(
   }
 }
 
+/// The scalar types a schema literal may name. A schema is a CONTRACT, so an
+/// unrecognised name is rejected here rather than lowercased into an atom that
+/// silently conforms to everything -- `-> {answer: Strng}` used to accept an Int.
+const schema_scalars: List(String) = [
+  "string", "int", "float", "bool", "atom", "any", "turnresult",
+]
+
 fn parse_schema(parser: Parser) -> ParseResult(Expr) {
   case peek(parser) {
+    // `enum(:a, :b, :c)` -- a closed set of atoms. Written before the scalar
+    // check because `enum` is not itself a type name.
+    Some(#(token.Name("enum"), Position(line))) -> parse_enum_schema(parser, line)
     Some(#(token.Name(tname), Position(line))) -> {
       let #(_, parser) = advance(parser)
-      Ok(#(ast.AtomLit(string.lowercase(tname), line), parser))
+      let lowered = string.lowercase(tname)
+      case list.contains(schema_scalars, lowered) {
+        True -> Ok(#(ast.AtomLit(lowered, line), parser))
+        False ->
+          Error(error.ParseError(
+            line,
+            "a schema type: String, Int, Float, Bool, Atom, Any, TurnResult, [T] or {k: T}",
+            tname,
+          ))
+      }
     }
     Some(#(token.LBrack, Position(line))) -> {
       let #(_, parser) = advance(parser)
@@ -1533,6 +1552,64 @@ fn parse_schema(parser: Parser) -> ParseResult(Expr) {
         current_line(parser),
         "schema (Type, [Type], or {key: Type})",
         "other",
+      ))
+  }
+}
+
+/// `enum(:a, :b, :c)` -> {:enum, [:a, :b, :c]}. A closed set of atoms, so the
+/// values a method may answer with are written down once and can be checked --
+/// by the parser here, by jet_sap at runtime, and by the exhaustiveness warning.
+fn parse_enum_schema(parser: Parser, line: Int) -> ParseResult(Expr) {
+  let #(_, parser) = advance(parser)
+  case expect(parser, token.LParen) {
+    Ok(#(_, parser)) ->
+      case parse_enum_values(parser, []) {
+        Ok(#([], parser)) ->
+          Error(error.ParseError(current_line(parser), "enum(:a, :b, …)", "empty enum"))
+        Ok(#(values, parser)) ->
+          Ok(#(
+            ast.TupleLit(
+              [ast.AtomLit("enum", line), ast.ListLit(values, line)],
+              line,
+            ),
+            parser,
+          ))
+        Error(e) -> Error(e)
+      }
+    Error(e) -> Error(e)
+  }
+}
+
+fn parse_enum_values(
+  parser: Parser,
+  acc: List(Expr),
+) -> ParseResult(List(Expr)) {
+  let parser = skip_newlines(parser)
+  case peek(parser) {
+    Some(#(token.RParen, _)) -> {
+      let #(_, parser) = advance(parser)
+      Ok(#(list.reverse(acc), parser))
+    }
+    Some(#(token.Atom(name), Position(line))) -> {
+      let #(_, parser) = advance(parser)
+      let parser = skip_newlines(parser)
+      let parser = case peek_token(parser) {
+        Some(token.Comma) -> {
+          let #(_, p) = advance(parser)
+          p
+        }
+        _ -> parser
+      }
+      parse_enum_values(parser, [ast.AtomLit(name, line), ..acc])
+    }
+    _ ->
+      Error(error.ParseError(
+        current_line(parser),
+        "an atom value in enum(...)",
+        case peek(parser) {
+          Some(#(tok, _)) -> token.token_name(tok)
+          None -> "end of file"
+        },
       ))
   }
 }

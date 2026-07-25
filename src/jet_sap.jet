@@ -50,6 +50,8 @@ module jet_sap
   def self.conforms(value, schema)
     if erlang::is_atom(schema)
       conforms_scalar(value, schema)
+    elsif enum?(schema)
+      lists::member(value, enum_values(schema))
     elsif erlang::is_tuple(schema)
       conforms_list(value, schema)
     elsif erlang::is_map(schema)
@@ -97,8 +99,14 @@ module jet_sap
         erlang::is_boolean(value)
       case :atom
         erlang::is_atom(value)
-      case _
+      case :any
         true
+      case _
+        # An unrecognised type name is NOT a wildcard. This used to be `true`,
+        # which meant one typo in a type name silently retired the contract for
+        # that field. The parser rejects such names now; this is the runtime half,
+        # for schemas that reach here some other way.
+        false
     end
   end
 
@@ -178,6 +186,12 @@ module jet_sap
   def self.unsatisfied(value, schema)
     if erlang::is_map(schema)
       unsat_map(value, schema)
+    elsif enum?(schema)
+      if conforms(value, schema)
+        0
+      else
+        1
+      end
     elsif erlang::is_tuple(schema)
       unsat_list(value, schema)
     elsif conforms(value, schema)
@@ -217,6 +231,8 @@ module jet_sap
   def self.leaves(schema)
     if erlang::is_map(schema)
       lists::foldl({|kv, acc| acc + leaves(erlang::element(2, kv))}, 0, maps::to_list(schema))
+    elsif enum?(schema)
+      1
     elsif erlang::is_tuple(schema)
       leaves(erlang::element(2, schema))
     else
@@ -310,6 +326,8 @@ module jet_sap
   def self.coerce(value, schema)
     if erlang::is_atom(schema)
       coerce_scalar(value, schema)
+    elsif enum?(schema)
+      coerce_enum(value, enum_values(schema))
     elsif erlang::is_tuple(schema)
       coerce_list(value, schema)
     elsif erlang::is_map(schema)
@@ -459,6 +477,80 @@ module jet_sap
     re::run(b, <<"^[A-Za-z][A-Za-z0-9_]*$">>, [{:capture, :none}]) == :match
   end
 
+  # --- enum(:a, :b, :c) ------------------------------------------------------
+  #
+  # A closed set of atoms. Matching a model's answer to one of them is where a
+  # declared vocabulary pays: exact is free, a string spelling of a value costs
+  # string_to_atom, and a value NAMED inside a longer reply ("I'd say stale.")
+  # costs substring_match -- but only when EXACTLY ONE allowed value appears, so
+  # an ambiguous reply is reported rather than guessed at.
+
+  def self.enum?(schema)
+    erlang::is_tuple(schema) and (erlang::tuple_size(schema) == 2) and
+      (erlang::element(1, schema) == :enum)
+  end
+
+  def self.enum_values(schema)
+    erlang::element(2, schema)
+  end
+
+  def self.enum_text(schema)
+    erlang::iolist_to_binary(lists::join("|",
+      lists::map({|a| erlang::atom_to_binary(a, :utf8)}, enum_values(schema))))
+  end
+
+  # The schema as the MODEL should see it: compact, with enums as "a|b|c" and a
+  # list as ["string"] rather than the raw ["list","string"] tuple encoding. This
+  # is the form that goes in the prompt, so it should read like a shape, not like
+  # an internal representation -- and it costs far fewer tokens than JSON Schema.
+  def self.for_prompt(schema)
+    if enum?(schema)
+      enum_text(schema)
+    elsif erlang::is_tuple(schema)
+      {_, t} = schema
+      [for_prompt(t)]
+    elsif erlang::is_map(schema)
+      maps::map({|_k, v| for_prompt(v)}, schema)
+    else
+      schema
+    end
+  end
+
+  def self.coerce_enum(value, allowed)
+    if lists::member(value, allowed)
+      {value, []}
+    elsif erlang::is_atom(value)
+      {value, []}                       # some other atom -- reported, not guessed
+    else
+      enum_from_text(to_bin(value), allowed)
+    end
+  end
+
+  def self.enum_from_text(b, allowed)
+    n = norm(b)
+    match lists::filter({|a| norm(erlang::atom_to_binary(a, :utf8)) == n}, allowed)
+      case [exact]
+        {exact, [:string_to_atom]}
+      case _
+        enum_by_mention(b, allowed)
+    end
+  end
+
+  def self.enum_by_mention(b, allowed)
+    lc = lower(b)
+    match lists::filter({|a| mentions?(lc, erlang::atom_to_binary(a, :utf8))}, allowed)
+      case [only]
+        {only, [:substring_match]}
+      case _
+        {b, []}                         # none, or ambiguous -> leave it, report it
+    end
+  end
+
+  def self.mentions?(lc, name)
+    n = lower(name)
+    binary::split(lc, n) != [lc]
+  end
+
   def self.coerce_list(value, schema)
     {_, t} = schema
     if erlang::is_list(value)
@@ -572,6 +664,12 @@ module jet_sap
   def self.miss(value, schema, path)
     if erlang::is_map(schema)
       miss_map(value, schema, path)
+    elsif enum?(schema)
+      if conforms(value, schema)
+        []
+      else
+        [describe(path, label(schema), value)]
+      end
     elsif erlang::is_tuple(schema)
       miss_list(value, schema, path)
     elsif conforms(value, schema)
@@ -625,6 +723,8 @@ module jet_sap
   def self.label(schema)
     if erlang::is_atom(schema)
       erlang::atom_to_binary(schema, :utf8)
+    elsif enum?(schema)
+      erlang::iolist_to_binary(["one of ", enum_text(schema)])
     else
       <<"value">>
     end
@@ -744,7 +844,19 @@ module jet_sap
      # must lose to the one that actually satisfies the schema
      {<<"decoy loses to real">>, <<"Example: {\"n\": \"oops\"}\nAnswer: {\"n\": 7}">>, {n: :int}, {:ok, {n: 7}}},
      {<<"list of int strings">>, <<"{\"ns\": [\"1\",\"2\"]}">>, {ns: {:list, :int}}, {:ok, {ns: [1, 2]}}},
-     {<<"non-JSON fence ignored">>, <<"```python\nprint(1)\n```\nResult: {\"n\": 7}">>, {n: :int}, {:ok, {n: 7}}}]
+     {<<"non-JSON fence ignored">>, <<"```python\nprint(1)\n```\nResult: {\"n\": 7}">>, {n: :int}, {:ok, {n: 7}}},
+     # enum(:a, :b): a declared vocabulary is where matching a model's answer pays
+     {<<"enum exact">>, <<"stale">>, {:enum, [:stale, :current]}, {:ok, :stale}},
+     {<<"enum quoted">>, <<"\"current\"">>, {:enum, [:stale, :current]}, {:ok, :current}},
+     {<<"enum case-folded">>, <<"CURRENT">>, {:enum, [:stale, :current]}, {:ok, :current}},
+     {<<"enum named in prose">>, <<"I'd say stale.">>, {:enum, [:stale, :current]}, {:ok, :stale}},
+     {<<"enum nested in object">>, <<"{\"state\": \"FAILED\"}">>, {state: {:enum, [:ok, :failed]}},
+      {:ok, {state: :failed}}},
+     # ambiguity and unknown values are REPORTED, never guessed
+     {<<"enum ambiguous errors">>, <<"maybe stale or current">>, {:enum, [:stale, :current]},
+      {:error, [<<"value: expected one of stale|current, got string">>]}},
+     {<<"enum unknown errors">>, <<"banana">>, {:enum, [:stale, :current]},
+      {:error, [<<"value: expected one of stale|current, got string">>]}}]
   end
 
   # the contract: a declared schema that cannot be met must FAIL, not degrade to text
