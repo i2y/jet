@@ -90,6 +90,10 @@ module jet_acp
     end
   end
 
+  # role + the arguments. NOTE the METHOD NAME is deliberately not part of the
+  # prompt -- the `role` is the instruction and the args are the input. So
+  # `expose capital(country)` called as `a.capital("France")` sends only "France":
+  # if the method name carries the intent, put it in the role or in the argument.
   def self.build_prompt(config, method, args)
     role = maps::get(:role, config, "")
     question = labeled_args(config, method, args)
@@ -338,25 +342,13 @@ module jet_acp
     collect_list(erlang::get({:__acp_collect__, :plan}))
   end
 
-  # parse the agent's text against the declared schema: trivial schema -> raw
-  # text; otherwise decode JSON and validate, falling back to text on mismatch.
+  # Parse the agent's text against the declared schema. `:any` (no `-> Type`)
+  # means the reply IS the answer; otherwise this is Schema-Aligned Parsing --
+  # see jet_sap. A declared schema that cannot be satisfied now returns
+  # {:error, {:schema_mismatch, info}}: the contract fails loudly at its cause
+  # instead of handing the caller a raw binary that crashes somewhere else.
   def self.parse_result(text, schema)
-    if schema == :any
-      {:ok, text}
-    else
-      match jet_json_ffi::decode(text)
-        case {:ok, value}
-          coerced = jet_agent::coerce(value, schema)
-          match jet_agent::validate(coerced, schema)
-            case {:ok, v}
-              {:ok, v}
-            case _
-              {:ok, text}
-          end
-        case _
-          {:ok, text}
-      end
-    end
+    jet_sap::parse(text, schema)
   end
 
   # like build_prompt but appends a JSON instruction when a schema is declared
@@ -374,12 +366,14 @@ module jet_acp
   # ask -> ask for JSON (schema instruction); task -> plain prompt (the result
   # is the WORK the agent does, returned as a TurnResult, not a coerced value).
   def self.build_turn_prompt(config, method, args, schema, kind)
-    match kind
+    prompt = match kind
       case :task
         build_prompt(config, method, args)
       case _
         build_prompt_schema(config, method, args, schema)
     end
+    emit_prompt(:acp, command_of(maps::get(:runner, config, nil)), nil, prompt)
+    prompt
   end
 
   # --- JSON-RPC sequence (single-shot; persistent path above reuses helpers) ---
@@ -624,6 +618,25 @@ module jet_acp
   # forward a structured stream event to the subscriber stashed by run_turn /
   # connection_loop. Events are tagged: {:text, b} {:thought, b}
   # {:tool_call, m} {:plan, entries}.
+  # The prompt ACTUALLY sent, as a structured event on the same bus as {:text} and
+  # {:usage}. Iterating on a prompt means seeing the real request rather than
+  # inferring what the runner assembled -- so a Console, an ACP client or a test
+  # can show it verbatim. Consumers that don't know the event ignore it.
+  def self.emit_prompt(source, model, system, input)
+    emit_event({:prompt, {source: source,
+                          model: prompt_bin(model),
+                          system: prompt_bin(system),
+                          input: prompt_bin(input)}})
+  end
+
+  def self.prompt_bin(x)
+    if x == nil
+      nil
+    else
+      jet_backend::to_bin(x)
+    end
+  end
+
   def self.emit_event(ev)
     if suppressed_by_probe?(ev)
       :ok

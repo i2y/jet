@@ -744,11 +744,7 @@ module jet_fleet
   end
 
   def self.coerce(report, schema)
-    if schema == :any
-      {:ok, report}
-    else
-      jet_acp::parse_result(report, schema)
-    end
+    jet_sap::parse(report, schema)
   end
 
   def self.runner_opts(config)

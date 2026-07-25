@@ -1,0 +1,43 @@
+# Testing an agent with no model, no API key and no network.
+#
+# `runner Fake(replies: "...")` swaps the backend for canned text -- and that text
+# still goes through the SAME Schema-Aligned Parsing a real reply does. So these
+# are not mock assertions: each agent below pins down what your program ACTUALLY
+# gets when a model wraps its answer in markdown, quotes with ', writes a bare
+# scalar where a list was declared, or simply forgets a field.
+#
+#   ./jet -r agent_fake_test::run examples/agent_fake_test.jet
+module agent_fake_test
+  # 1. The model yapped and wrapped the JSON in a markdown fence.
+  agent Markdowned
+    role "You research topics."
+    runner Fake(replies: "Sure! Here you go:\n```json\n{\"answer\": \"42\", \"sources\": [\"douglas\"]}\n```")
+    expose research(question) -> {answer: String, sources: [String]}
+  end
+
+  # 2. Single quotes, unquoted keys, a trailing comma, a lone scalar where a list
+  #    was declared, and a number typed as a string. Five defects, one turn.
+  agent Sloppy
+    role "You research topics."
+    runner Fake(replies: "{answer: 'forty two', sources: 'douglas', confidence: '85',}")
+    expose research(question) -> {answer: String, sources: [String], confidence: Int}
+  end
+
+  # 3. A field is simply absent. The contract must FAIL -- loudly, naming the
+  #    field -- instead of quietly handing back the raw text.
+  agent Forgetful
+    role "You research topics."
+    runner Fake(replies: "{\"answer\": \"42\"}")
+    expose research(question) -> {answer: String, sources: [String]}
+  end
+
+  def self.run()
+    io::format("1. markdown + prose  => ~p~n", [ask(agent_fake_test::Markdowned.spawn())])
+    io::format("2. five defects      => ~p~n", [ask(agent_fake_test::Sloppy.spawn())])
+    io::format("3. missing field     => ~p~n", [ask(agent_fake_test::Forgetful.spawn())])
+  end
+
+  def self.ask(a)
+    a.research("what is the answer?").await()
+  end
+end

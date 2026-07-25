@@ -1,0 +1,96 @@
+module jet_fake
+  # The Fake runner -- canned replies instead of a model, so an agent program can
+  # be tested without a network, an API key, or a GPU.
+  #
+  #   agent Researcher
+  #     runner Fake(replies: "```json\n{\"answer\":\"42\"}\n```")
+  #     expose research(question) -> {answer: String}
+  #   end
+  #
+  # Two things make this more than a mock:
+  #
+  #   - a reply given as TEXT goes through the SAME jet_sap parse every real
+  #     runner uses, so a test can pin down exactly what happens when a model
+  #     wraps its answer in markdown, drops a field, or returns "123" for an Int.
+  #     The example above is a passing test for markdown-wrapped output;
+  #   - it needed no parser support. `runner Name(...)` already resolves
+  #     generically, so a new runner is one module plus one line of dispatch --
+  #     the same seam Llm, Acp and every shape sit on.
+  #
+  # `replies:` may be
+  #   a fn(method, args)  full control -- branch on the method or the input
+  #   a {method: reply}   one reply per exposed method
+  #   anything else       that value, for every turn
+  #
+  # A reply that is text is PARSED against the schema (the contract path); a reply
+  # that is already structured is validated. The runner is deliberately stateless
+  # -- each turn runs in its own process -- so a multi-turn script is written as a
+  # function of the input rather than as hidden call-order state.
+
+  def self.turn(config, method, args, schema, kind)
+    reply = resolve(replies_of(jet_backend::opts(config)), method, args)
+    deliver(reply, schema, kind)
+  end
+
+  def self.replies_of(opts)
+    match maps::get(:replies, opts, :__none__)
+      case :__none__
+        maps::get(:responses, opts, :__none__)
+      case r
+        r
+    end
+  end
+
+  def self.resolve(replies, method, args)
+    if replies == :__none__
+      no_replies()
+    elsif erlang::is_function(replies)
+      erlang::apply(replies, [method, args])
+    elsif erlang::is_map(replies) and maps::is_key(method, replies)
+      maps::get(method, replies)
+    else
+      replies
+    end
+  end
+
+  def self.no_replies()
+    erlang::error({:jet_fake_no_replies,
+      <<"runner Fake(...) needs replies: -- a value, a {method: value} map, or a fn(method, args)">>})
+  end
+
+  def self.deliver(reply, schema, kind)
+    text = as_text(reply)
+    jet_acp::emit_event({:text, text})     # so `.stream do |ev| ... end` works too
+    match kind
+      case :task
+        {:ok, jet_agent::TurnResult.new({text: text, ok: true, edits: [], commands: [],
+                                         plan: [], tool_calls: [], files: []})}
+      case _
+        answer(reply, text, schema)
+    end
+  end
+
+  # Text goes through Schema-Aligned Parsing exactly as a real reply would --
+  # that is the point of the Fake. An already-structured reply skips the parse
+  # but still has to satisfy the contract.
+  def self.answer(reply, text, schema)
+    if textual?(reply)
+      jet_sap::parse(text, schema)
+    else
+      jet_sap::validate(reply, schema)
+    end
+  end
+
+  # a Jet string is a charlist, so "..." is text but ["a", "b"] is a value
+  def self.textual?(r)
+    erlang::is_binary(r) or ((r != []) and jet_sap::charlist?(r))
+  end
+
+  def self.as_text(r)
+    if textual?(r)
+      jet_backend::to_bin(r)
+    else
+      jet_json_ffi::encode(r)
+    end
+  end
+end

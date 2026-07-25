@@ -62,6 +62,8 @@ module jet_agent
         jet_goal::turn(config, method, args, schema)
       case :Plan
         jet_planner::turn(config, method, args, schema)
+      case :Fake
+        jet_fake::turn(config, method, args, schema, kind)
       case _
         stub_turn(config, schema, kind)
     end
@@ -324,107 +326,21 @@ module jet_agent
     end
   end
 
-  # --- schema validation ---
+  # --- schema handling: delegated to jet_sap (Schema-Aligned Parsing) ---
+  #
+  # A declared `-> Type` is enforced in exactly one place for every runner and
+  # every shape. These two are kept here because the stub runner and older callers
+  # name them; the implementation -- lenient parse, schema-guided coercion, scored
+  # candidate selection -- lives in jet_sap.
 
   def self.validate(value, schema)
-    if conforms(value, schema)
-      {:ok, value}
-    else
-      {:error, {:expected, schema, :got, value}}
-    end
+    jet_sap::validate(value, schema)
   end
 
   def self.conforms(value, schema)
-    if erlang::is_atom(schema)
-      conforms_scalar(value, schema)
-    elsif erlang::is_tuple(schema)
-      if erlang::is_list(value)
-        {_, elem_schema} = schema
-        lists::all({|x| conforms(x, elem_schema)}, value)
-      else
-        false
-      end
-    elsif erlang::is_map(schema)
-      if erlang::is_map(value)
-        lists::all({|kv| conforms_field(value, kv)}, maps::to_list(schema))
-      else
-        false
-      end
-    else
-      true
-    end
+    jet_sap::conforms(value, schema)
   end
 
-  def self.conforms_field(value, kv)
-    {k, t} = kv
-    if maps::is_key(k, value)
-      conforms(maps::get(k, value), t)
-    else
-      false
-    end
-  end
-
-  def self.conforms_scalar(value, t)
-    match t
-      case :string
-        erlang::is_list(value) or erlang::is_binary(value)
-      case :int
-        erlang::is_integer(value)
-      case :float
-        erlang::is_float(value)
-      case :bool
-        erlang::is_boolean(value)
-      case :atom
-        erlang::is_atom(value)
-      case _
-        true
-    end
-  end
-
-  # --- future returned to the caller (await with selective receive) ---
-
-  # Coerce a JSON-decoded value (binary keys) to a schema's atom keys,
-  # recursively, creating atoms only for schema-declared keys (bounded/safe).
-  def self.coerce(value, schema)
-    if erlang::is_atom(schema)
-      value
-    elsif erlang::is_tuple(schema)
-      coerce_list(value, schema)
-    elsif erlang::is_map(schema)
-      coerce_map(value, schema)
-    else
-      value
-    end
-  end
-
-  def self.coerce_list(value, schema)
-    {_, t} = schema
-    if erlang::is_list(value)
-      lists::map({|x| coerce(x, t)}, value)
-    else
-      value
-    end
-  end
-
-  def self.coerce_map(value, schema)
-    if erlang::is_map(value)
-      lists::foldl({|kv, acc| coerce_put(value, kv, acc)}, maps::new(), maps::to_list(schema))
-    else
-      value
-    end
-  end
-
-  def self.coerce_put(value, kv, acc)
-    {k, t} = kv
-    bkey = erlang::atom_to_binary(k, :utf8)
-    if maps::is_key(bkey, value)
-      maps::put(k, coerce(maps::get(bkey, value), t), acc)
-    elsif maps::is_key(k, value)
-      maps::put(k, coerce(maps::get(k, value), t), acc)
-    else
-      acc
-    end
-  end
 
   # The result of a `task` (action) turn: the WORK the agent did, not a coerced
   # answer. Built from ACP's structured tool_call/edit/plan stream (vs `ask`,

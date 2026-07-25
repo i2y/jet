@@ -58,10 +58,15 @@ module jet_llm
     jet_http_ffi::ensure_started()
     erlang::put(:__ollama_extra__, ollama_extra(config))   # think:/options: (runner opts) -> request body
     erlang::put(:__ollama_acc__, <<>>)       # assistant text accumulates here (for memory + .stream)
-    erlang::put(:__approve_agent__, maps::get(:__agent__, config, nil))   # agent pid iff it defined `approve` -> gate tools
+    erlang::put(:__approve_agent__, maps::get(:__agent__, config, nil))   # agent pid iff it defined `on_approval` -> gate tools
+    erlang::put(:__ollama_structured__, structured_mode(config))
     role = role_of(config)
     mem = maps::get(:__mem__, config, nil)
-    question = jet_acp::build_prompt(config, method, args)
+    question = if structured_mode(config) == :prompt
+      jet_acp::build_prompt_schema(config, method, args, schema)   # compact schema in the prompt
+    else
+      jet_acp::build_prompt(config, method, args)                  # the grammar carries the schema
+    end
     {sys, recent} = mem_context(mem, role, mem_budget(config),
                                 {|prev, ts| ollama_summarize(model, prev, ts)})
     skills_dir = maps::get(:skills, config, nil)                   # agent skills (progressive disclosure)
@@ -73,6 +78,7 @@ module jet_llm
     messages = lists::append([{role: "system", content: sys2}],
                              lists::append(ollama_turn_msgs(recent),
                                            [{role: "user", content: question}]))
+    jet_acp::emit_prompt(:llm, model, sys2, question)
     result = if tools == []
       ollama_stream(model, messages, schema)
     else
@@ -92,17 +98,29 @@ module jet_llm
                                     [{<<"content-type">>, <<"application/json">>}],
                                     body,
                                     {|ev| on_stream(ev)})
-    jet_acp::parse_result(erlang::get(:__ollama_acc__), schema)
+    jet_sap::parse(erlang::get(:__ollama_acc__), schema)
   end
 
   def self.stream_body(model, messages, schema)
-    base = {model: model, stream: true, messages: messages}
-    body = if schema == :any
+    with_extra(with_format({model: model, stream: true, messages: messages}, schema))
+  end
+
+  # How the declared schema reaches an Ollama model. `:constrained` (the default)
+  # sends a JSON Schema as `format:`, which Ollama compiles to a grammar --
+  # guaranteed-parseable output, at the cost of forcing the sampler to satisfy the
+  # shape before the content. `:prompt` instead puts the compact Jet schema in the
+  # prompt and lets jet_sap repair whatever comes back. Which one is better is an
+  # empirical question per model -- see examples/sap_structured_ab.jet.
+  def self.structured_mode(config)
+    maps::get(:structured, runner_opts(maps::get(:runner, config, nil)), :constrained)
+  end
+
+  def self.with_format(base, schema)
+    if (schema == :any) or (erlang::get(:__ollama_structured__) == :prompt)
       base
     else
       maps::put(:format, to_json_schema(schema), base)
     end
-    with_extra(body)
   end
 
   # merge think:/options: (from the runner opts, stashed in run_ollama) into an ollama body.
@@ -193,7 +211,7 @@ module jet_llm
             content = maps::get(<<"content">>, msg, <<>>)   # free text: the model's
             erlang::put(:__ollama_acc__, content)           # record assistant text for memory
             jet_acp::emit_event({:text, content})           # final message IS the answer --
-            jet_acp::parse_result(content, schema)          # no redundant re-query
+            jet_sap::parse(content, schema)          # no redundant re-query
           else
             ollama_final(model, lists::append(messages, [msg]), schema)
           end
@@ -213,7 +231,7 @@ module jet_llm
         content = maps::get(<<"content">>, msg, <<>>)
         erlang::put(:__ollama_acc__, content)   # record the assistant text for memory (tools path isn't token-streamed)
         jet_acp::emit_event({:text, content})   # stream the answer
-        jet_acp::parse_result(content, schema)
+        jet_sap::parse(content, schema)
       case {:error, reason}
         {:error, :ollama_error, reason}
     end
@@ -264,13 +282,7 @@ module jet_llm
   end
 
   def self.ollama_final_body(model, messages, schema)
-    base = {model: model, stream: false, messages: messages}
-    body = if schema == :any
-      base
-    else
-      maps::put(:format, to_json_schema(schema), base)
-    end
-    with_extra(body)
+    with_extra(with_format({model: model, stream: false, messages: messages}, schema))
   end
 
   def self.ollama_tool_defs(tools)
@@ -537,13 +549,14 @@ module jet_llm
                                         mcp_conn_tools(maps::get(:__mcp_conns__, config, []))),
                           skill_tools(cat, skills_dir))
     messages = lists::append(llm_turn_msgs(recent), [{:user, prompt}])
+    jet_acp::emit_prompt(:llm, model, sys2, prompt)
     llm_opts = {api_key: api_key, model: model, max_tokens: 4096, system: sys2}
     match llm_run(provider, messages, llm_opts, tools)
       case {:error, reason}
         {:error, :llm_error, reason}
       case text
         jet_memory::append_turn(mem, jet_acp::args_to_text(args), text)   # store the RAW user msg, not the role+schema-instruction prompt
-        jet_acp::parse_result(text, schema)
+        jet_sap::parse(text, schema)
     end
   end
 

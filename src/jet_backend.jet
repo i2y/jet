@@ -218,11 +218,23 @@ module jet_backend
     end
   end
 
+  def self.backend_label(backend)
+    match backend
+      case {_, name}
+        to_bin(name)
+      case other
+        to_bin(other)
+    end
+  end
+
   # like run/3 but suppresses streaming to the user -- for INTERNAL calls (a
   # meta-orchestrator's router/designer, a shape's members/stages) whose output is
   # plumbing or a tool_call, NOT the final answer. (An ACP-agent backend streams its
   # chunks via the process's :__acp_stream__; clear it around the call, then restore.)
   def self.run_silent(backend, role, input)
+    # the OUTPUT is plumbing, but the PROMPT is exactly what you want to inspect --
+    # emit it before the stream is cleared, so internal calls stay visible.
+    jet_acp::emit_prompt(:internal, backend_label(backend), role, input)
     saved = erlang::get(:__acp_stream__)
     erlang::erase(:__acp_stream__)
     out = run(backend, role, input)
@@ -291,6 +303,7 @@ module jet_backend
   end
 
   def self.run_ollama(m, role, input)
+    jet_acp::emit_prompt(:member, m, role, input)
     match jet_llm::ollama_post({model: m, stream: false,
                                 messages: [{role: "system", content: role}, {role: "user", content: to_bin(input)}]})
       case {:ok, msg}
@@ -309,6 +322,7 @@ module jet_backend
   end
 
   def self.run_acp_in(cmd, role, input, workspace)
+    jet_acp::emit_prompt(:member, cmd, role, input)
     base = {runner: {name: :Acp, opts: {command: to_bin(cmd)}}, role: role}
     config = if workspace == nil
       base
@@ -365,11 +379,7 @@ module jet_backend
   end
 
   def self.coerce(text, schema)
-    if schema == :any
-      {:ok, text}
-    else
-      jet_acp::parse_result(text, schema)
-    end
+    jet_sap::parse(text, schema)
   end
 
   # does the conversation already have a prior assistant answer? (used to tell a

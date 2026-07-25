@@ -1,0 +1,802 @@
+module jet_sap
+  # Schema-Aligned Parsing, stage 2 of 2: SCHEMA-GUIDED COERCION + SCORING.
+  #
+  # `jet_sap_ffi` repairs the syntax and hands back every plausible reading of the
+  # model's reply, each tagged with the repairs it needed. This module is the half
+  # that knows the DECLARED schema. It is not a fixed pipeline -- it is a search:
+  #
+  #   for each candidate: coerce it toward the schema, recording every repair
+  #                       the coercion had to make
+  #   score the repairs   cheap fixes cost 1-3; a MISSING REQUIRED FIELD costs 100
+  #   keep the cheapest   ties go to the earlier (more literal) candidate
+  #
+  # So `"Amazon"` satisfies `[String]` (wrap: 1), `"123"` satisfies `Int`
+  # (parse: 1), `sourceList` satisfies `source_list:` (normalise: 3) -- but a
+  # candidate that actually HAS the field always beats one that doesn't, because
+  # 100 dwarfs any pile of small repairs.
+  #
+  # The repair->cost weights are ported from BoundaryML's jsonish deserializer
+  # (`deserializer/score.rs`, Apache-2.0), the reference SAP implementation.
+  #
+  # This is the ONE place a declared schema is enforced: every runner and every
+  # shape funnels through it (jet_acp, jet_llm, jet_backend::coerce,
+  # jet_fleet::coerce), so `-> {...}` means the same thing everywhere.
+
+  # {:ok, value} | {:error, {:schema_mismatch, info}}
+  #
+  # A declared schema is a CONTRACT: when it cannot be satisfied this returns an
+  # error naming what was missing and carrying the partial value -- it never
+  # quietly hands back the raw text (which turned a type error into a crash far
+  # away from its cause). `:any` (no `-> Type` on the declaration) means the reply
+  # IS the answer, so the text comes back untouched.
+  def self.parse(text, schema)
+    if schema == :any
+      {:ok, text}
+    else
+      choose(candidates(text, schema), text, schema, nil)
+    end
+  end
+
+  # --- the contract ----------------------------------------------------------
+
+  def self.validate(value, schema)
+    if conforms(value, schema)
+      {:ok, value}
+    else
+      {:error, {:expected, schema, :got, value}}
+    end
+  end
+
+  def self.conforms(value, schema)
+    if erlang::is_atom(schema)
+      conforms_scalar(value, schema)
+    elsif erlang::is_tuple(schema)
+      conforms_list(value, schema)
+    elsif erlang::is_map(schema)
+      conforms_map(value, schema)
+    else
+      true
+    end
+  end
+
+  def self.conforms_list(value, schema)
+    if erlang::is_list(value)
+      {_, t} = schema
+      lists::all({|x| conforms(x, t)}, value)
+    else
+      false
+    end
+  end
+
+  def self.conforms_map(value, schema)
+    if erlang::is_map(value)
+      lists::all({|kv| conforms_field(value, kv)}, maps::to_list(schema))
+    else
+      false
+    end
+  end
+
+  def self.conforms_field(value, kv)
+    {k, t} = kv
+    if maps::is_key(k, value)
+      conforms(maps::get(k, value), t)
+    else
+      false
+    end
+  end
+
+  def self.conforms_scalar(value, t)
+    match t
+      case :string
+        erlang::is_binary(value) or charlist?(value)
+      case :int
+        erlang::is_integer(value)
+      case :float
+        erlang::is_float(value)
+      case :bool
+        erlang::is_boolean(value)
+      case :atom
+        erlang::is_atom(value)
+      case _
+        true
+    end
+  end
+
+  # --- candidate generation --------------------------------------------------
+
+  def self.candidates(text, schema)
+    b = to_bin(text)
+    parsed = jet_sap_ffi::parse_all(b)
+    lists::append(lists::append(parsed, unwrapped(parsed)), raw(b, schema))
+  end
+
+  # A model that wraps the answer -- {"result": {...}} where {...} was asked for --
+  # costs one implied_key, so an unwrapped candidate still loses to a clean one.
+  def self.unwrapped(parsed)
+    lists::flatmap({|c| unwrap_one(c)}, parsed)
+  end
+
+  def self.unwrap_one(c)
+    {v, f} = c
+    if erlang::is_map(v) and (maps::size(v) == 1)
+      lists::map({|inner| {inner, lists::append(f, [:implied_key])}}, maps::values(v))
+    else
+      []
+    end
+  end
+
+  # Last resort: the reply itself. For `-> String` this is the NATURAL answer at
+  # cost 0 -- a chatty reply IS the value, not a parse failure -- so it wins over
+  # any JSON we might have found inside it. For `-> Int` / `-> Bool` the numbers
+  # and boolean words in the prose come along too, priced as substring_match. For
+  # an object schema it never wins, but it guarantees there is always something to
+  # report, so a failure names the schema instead of shrugging.
+  def self.raw(b, schema)
+    lists::append([{trim(b), []}], substrings(b, elem_type(schema)))
+  end
+
+  def self.elem_type(schema)
+    if erlang::is_tuple(schema)
+      {_, t} = schema
+      t
+    else
+      schema
+    end
+  end
+
+  def self.substrings(b, t)
+    if (t == :int) or (t == :float) or (t == :bool)
+      lists::map({|v| {v, [:substring_match]}}, jet_sap_ffi::scalars(b))
+    else
+      []
+    end
+  end
+
+  # --- the search ------------------------------------------------------------
+
+  def self.choose(cands, text, schema, best)
+    if cands == []
+      finish(best, text, schema)
+    else
+      choose(erlang::tl(cands), text, schema, better(best, judge(erlang::hd(cands), schema)))
+    end
+  end
+
+  # Coerce one candidate and price it: {value, flags, score}. The score is the sum
+  # of the repairs it needed PLUS 100 for every schema leaf it still fails to
+  # satisfy -- so no pile of cheap repairs ever outweighs actually having the data.
+  def self.judge(cand, schema)
+    {v0, f0} = cand
+    {v, f} = coerce(v0, schema)
+    flags = lists::append(f0, f)
+    {v, flags, score(flags) + (unsatisfied(v, schema) * cost(:no_value))}
+  end
+
+  # How many schema LEAVES the value fails to satisfy. A value of the wrong shape
+  # entirely fails every leaf, so an object missing one field always beats prose
+  # that matched nothing.
+  def self.unsatisfied(value, schema)
+    if erlang::is_map(schema)
+      unsat_map(value, schema)
+    elsif erlang::is_tuple(schema)
+      unsat_list(value, schema)
+    elsif conforms(value, schema)
+      0
+    else
+      1
+    end
+  end
+
+  def self.unsat_map(value, schema)
+    if erlang::is_map(value)
+      lists::foldl({|kv, acc| acc + unsat_field(value, kv)}, 0, maps::to_list(schema))
+    else
+      leaves(schema)
+    end
+  end
+
+  def self.unsat_field(value, kv)
+    {k, t} = kv
+    if maps::is_key(k, value)
+      unsatisfied(maps::get(k, value), t)
+    else
+      leaves(t)
+    end
+  end
+
+  def self.unsat_list(value, schema)
+    {_, t} = schema
+    if erlang::is_list(value)
+      lists::foldl({|x, acc| acc + unsatisfied(x, t)}, 0, value)
+    else
+      leaves(t)
+    end
+  end
+
+  # how many scalar leaves a schema demands (a list counts as its element type)
+  def self.leaves(schema)
+    if erlang::is_map(schema)
+      lists::foldl({|kv, acc| acc + leaves(erlang::element(2, kv))}, 0, maps::to_list(schema))
+    elsif erlang::is_tuple(schema)
+      leaves(erlang::element(2, schema))
+    else
+      1
+    end
+  end
+
+  # strict `<`, so an earlier (more literal) candidate wins a tie
+  def self.better(best, cand)
+    if best == nil
+      cand
+    else
+      {_, _, bs} = best
+      {_, _, cs} = cand
+      if cs < bs
+        cand
+      else
+        best
+      end
+    end
+  end
+
+  def self.finish(best, text, schema)
+    if best == nil
+      mismatch(nil, text, schema, [<<"reply contained no value matching the schema">>])
+    else
+      {v, _, _} = best
+      if conforms(v, schema)
+        {:ok, v}
+      else
+        mismatch(v, text, schema, missing(v, schema))
+      end
+    end
+  end
+
+  def self.mismatch(partial, text, schema, missing)
+    {:error, {:schema_mismatch, {schema: schema,
+                                 missing: missing,
+                                 partial: partial,
+                                 text: to_bin(text)}}}
+  end
+
+  # --- scoring (mirrors BAML's deserializer/score.rs) -------------------------
+
+  def self.score(flags)
+    lists::foldl({|f, acc| acc + cost(f)}, 0, flags)
+  end
+
+  def self.cost(f)
+    if erlang::is_tuple(f)
+      {_, n} = f                       # {:array_item_error, n} -> 1 + n
+      1 + n
+    else
+      maps::get(f, cost_table(), 1)
+    end
+  end
+
+  # Lower is better. The shape of this table IS the policy: every syntactic or
+  # type-level repair is cheap (1-3) because models make them constantly and none
+  # of them loses information; the only expensive outcomes are the ones where data
+  # is absent or wrong.
+  def self.cost_table()
+    {from_markdown: 0,        # a fenced block is the EXPECTED wrapper, not a defect
+     incomplete: 0,           # truncated/streaming output is not the model's error
+     embedded: 1,             # we picked one of several `{`/`[` offsets in prose
+     inner_quote: 1,          # an unescaped " inside a string
+     fraction: 1,             # 1/3 where a float belongs
+     extra_key: 1,            # a key the schema does not declare (dropped)
+     single_to_array: 1,      # "Amazon" -> ["Amazon"]
+     string_to_bool: 1,       # "true" -> true
+     string_to_int: 1,        # "123" -> 123
+     string_to_float: 1,      # "1.5" -> 1.5
+     string_to_null: 1,       # null -> []
+     float_to_int: 1,         # 12.0 -> 12
+     string_to_atom: 1,       # "done" -> :done
+     substring_match: 2,      # pulled a scalar out of surrounding prose
+     implied_key: 2,          # unwrapped {"result": ...}
+     object_to_string: 2,     # a scalar where text was asked for
+     json_to_string: 2,       # a whole object re-encoded as text
+     stripped_non_alnum: 3,   # sourceList / source-list matched source_list:
+     no_value: 100}           # charged per UNSATISFIED SCHEMA LEAF (see judge) --
+                              # two orders of magnitude above any repair above it
+  end
+
+  # --- step 3: schema-guided coercion, returning {value, flags} ---------------
+  #
+  # Every rule here is LICENSED BY THE DECLARED TYPE: a value is reshaped only
+  # because the schema says what it must become. Nothing is guessed, and every
+  # reshaping is recorded so the search can price it.
+
+  def self.coerce(value, schema)
+    if erlang::is_atom(schema)
+      coerce_scalar(value, schema)
+    elsif erlang::is_tuple(schema)
+      coerce_list(value, schema)
+    elsif erlang::is_map(schema)
+      coerce_map(value, schema)
+    else
+      {value, []}
+    end
+  end
+
+  def self.coerce_scalar(value, t)
+    match t
+      case :string
+        to_string(value)
+      case :int
+        to_int(value)
+      case :float
+        to_float(value)
+      case :bool
+        to_bool(value)
+      case :atom
+        to_atom(value)
+      case _
+        {value, []}
+    end
+  end
+
+  def self.to_string(v)
+    if erlang::is_binary(v)
+      {v, []}
+    elsif charlist?(v)
+      {erlang::iolist_to_binary(v), []}
+    elsif erlang::is_integer(v)
+      {erlang::integer_to_binary(v), [:object_to_string]}
+    elsif erlang::is_float(v)
+      {erlang::float_to_binary(v, [{:decimals, 17}, :compact]), [:object_to_string]}
+    elsif v == :null
+      {<<>>, [:string_to_null]}
+    elsif erlang::is_atom(v)
+      {erlang::atom_to_binary(v, :utf8), [:object_to_string]}
+    else
+      {jet_json_ffi::encode(v), [:json_to_string]}
+    end
+  end
+
+  def self.to_int(v)
+    if erlang::is_integer(v)
+      {v, []}
+    elsif erlang::is_float(v)
+      {erlang::round(v), [:float_to_int]}
+    elsif erlang::is_binary(v)
+      parse_int(trim(v))
+    else
+      {v, []}
+    end
+  end
+
+  def self.parse_int(t)
+    try
+      {erlang::binary_to_integer(t), [:string_to_int]}
+    catch _e
+      parse_int_loose(t)
+    end
+  end
+
+  def self.parse_int_loose(t)
+    try
+      {erlang::round(erlang::binary_to_float(t)), [:string_to_int, :float_to_int]}
+    catch _e
+      {t, []}                          # leave it -- the search prices it :bad_value
+    end
+  end
+
+  def self.to_float(v)
+    if erlang::is_float(v)
+      {v, []}
+    elsif erlang::is_integer(v)
+      {erlang::float(v), [:string_to_float]}
+    elsif erlang::is_binary(v)
+      parse_float(trim(v))
+    else
+      {v, []}
+    end
+  end
+
+  def self.parse_float(t)
+    try
+      {erlang::binary_to_float(t), [:string_to_float]}
+    catch _e
+      parse_float_loose(t)
+    end
+  end
+
+  def self.parse_float_loose(t)
+    try
+      {erlang::float(erlang::binary_to_integer(t)), [:string_to_float]}
+    catch _e
+      {t, []}
+    end
+  end
+
+  def self.to_bool(v)
+    if erlang::is_boolean(v)
+      {v, []}
+    elsif erlang::is_binary(v)
+      bool_word(lower(trim(v)), v)
+    elsif v == 1
+      {true, [:string_to_bool]}
+    elsif v == 0
+      {false, [:string_to_bool]}
+    else
+      {v, []}
+    end
+  end
+
+  def self.bool_word(lc, orig)
+    if lists::member(lc, [<<"true">>, <<"yes">>, <<"y">>, <<"1">>, <<"t">>, <<"on">>])
+      {true, [:string_to_bool]}
+    elsif lists::member(lc, [<<"false">>, <<"no">>, <<"n">>, <<"0">>, <<"f">>, <<"off">>])
+      {false, [:string_to_bool]}
+    else
+      {orig, []}
+    end
+  end
+
+  # `-> Atom` is the enum-ish case ("done" -> :done). Only short, identifier-shaped
+  # values are converted: an unbounded binary_to_atom on model output would be an
+  # atom-table leak in a long-running agent.
+  def self.to_atom(v)
+    if erlang::is_atom(v)
+      {v, []}
+    elsif erlang::is_binary(v)
+      atom_of(trim(v))
+    else
+      {v, []}
+    end
+  end
+
+  def self.atom_of(b)
+    if identifier?(b) and (erlang::byte_size(b) <= 64)
+      {erlang::binary_to_atom(b, :utf8), [:string_to_atom]}
+    else
+      {b, []}
+    end
+  end
+
+  def self.identifier?(b)
+    re::run(b, <<"^[A-Za-z][A-Za-z0-9_]*$">>, [{:capture, :none}]) == :match
+  end
+
+  def self.coerce_list(value, schema)
+    {_, t} = schema
+    if erlang::is_list(value)
+      coerce_items(value, t)
+    elsif value == :null
+      {[], [:string_to_null]}
+    else
+      wrap_single(value, t)              # a lone value IS a one-element list
+    end
+  end
+
+  def self.coerce_items(items, t)
+    lists::mapfoldl({|x, acc| item_step(x, t, acc)}, [], items)
+  end
+
+  def self.item_step(x, t, acc)
+    {v, f} = coerce(x, t)
+    {v, lists::append(acc, f)}
+  end
+
+  def self.wrap_single(value, t)
+    {v, f} = coerce(value, t)
+    {[v], lists::append([:single_to_array], f)}
+  end
+
+  def self.coerce_map(value, schema)
+    if erlang::is_map(value)
+      build_map(value, schema)
+    elsif maps::size(schema) == 1
+      imply_key(value, schema)
+    else
+      {value, []}
+    end
+  end
+
+  # A bare value where a ONE-field object was declared is that field: asked for
+  # `{answer: Int}`, a model that replies `396` answered the question. Only
+  # unambiguous when the schema has a single field, and it costs implied_key, so a
+  # real object always wins.
+  def self.imply_key(value, schema)
+    {k, t} = erlang::hd(maps::to_list(schema))
+    {v, f} = coerce(value, t)
+    {maps::from_list([{k, v}]), lists::append([:implied_key], f)}
+  end
+
+  def self.build_map(value, schema)
+    {pairs, flags} = lists::mapfoldl({|kv, acc| field_step(value, kv, acc)},
+                                     [], maps::to_list(schema))
+    kept = lists::filter({|p| erlang::element(2, p) != :__jet_sap_absent__}, pairs)
+    {maps::from_list(kept), lists::append(flags, extra_flags(value, schema))}
+  end
+
+  def self.field_step(value, kv, acc)
+    {k, t} = kv
+    match lookup(value, k)
+      case {:ok, v, lf}
+        {cv, cf} = coerce(v, t)
+        {{k, cv}, lists::append(acc, lists::append(lf, cf))}
+      case _
+        # absent: left out of the result so `unsatisfied` prices it, once
+        {{k, :__jet_sap_absent__}, acc}
+    end
+  end
+
+  # keys the schema does not declare are dropped -- at a price, so a candidate
+  # that is exactly the schema beats one carrying half the model's scratch work.
+  def self.extra_flags(value, schema)
+    lists::duplicate(erlang::max(0, maps::size(value) - maps::size(schema)), :extra_key)
+  end
+
+  # Match a schema key against the model's keys: the atom, its binary form, then a
+  # NORMALISED form (case-folded, non-alphanumerics dropped) -- so `sourceList`,
+  # `source-list` and `Source List` all satisfy `source_list:`.
+  def self.lookup(value, k)
+    bkey = erlang::atom_to_binary(k, :utf8)
+    if maps::is_key(k, value)
+      {:ok, maps::get(k, value), []}
+    elsif maps::is_key(bkey, value)
+      {:ok, maps::get(bkey, value), []}
+    else
+      lookup_norm(norm(bkey), maps::to_list(value))
+    end
+  end
+
+  def self.lookup_norm(nk, kvs)
+    if kvs == []
+      :none
+    else
+      {k, v} = erlang::hd(kvs)
+      if norm(to_bin(k)) == nk
+        {:ok, v, [:stripped_non_alnum]}
+      else
+        lookup_norm(nk, erlang::tl(kvs))
+      end
+    end
+  end
+
+  def self.norm(b)
+    binary::replace(lower(b), [<<"_">>, <<"-">>, <<" ">>, <<".">>], <<>>, [:global])
+  end
+
+  # --- why it did not fit ----------------------------------------------------
+  #
+  # The point of failing loudly is being able to see WHAT failed, so the error
+  # names the path of every field that is missing or the wrong type.
+
+  def self.missing(value, schema)
+    miss(value, schema, <<"value">>)
+  end
+
+  def self.miss(value, schema, path)
+    if erlang::is_map(schema)
+      miss_map(value, schema, path)
+    elsif erlang::is_tuple(schema)
+      miss_list(value, schema, path)
+    elsif conforms(value, schema)
+      []
+    else
+      [describe(path, label(schema), value)]
+    end
+  end
+
+  def self.miss_map(value, schema, path)
+    if erlang::is_map(value)
+      lists::flatmap({|kv| miss_field(value, kv, path)}, maps::to_list(schema))
+    else
+      [describe(path, <<"object">>, value)]
+    end
+  end
+
+  def self.miss_field(value, kv, path)
+    {k, t} = kv
+    p = erlang::iolist_to_binary([path, ".", erlang::atom_to_binary(k, :utf8)])
+    if maps::is_key(k, value)
+      miss(maps::get(k, value), t, p)
+    else
+      [erlang::iolist_to_binary([p, " is missing"])]
+    end
+  end
+
+  def self.miss_list(value, schema, path)
+    {_, t} = schema
+    if erlang::is_list(value)
+      miss_items(value, t, path, 0)
+    else
+      [describe(path, <<"list">>, value)]
+    end
+  end
+
+  def self.miss_items(items, t, path, i)
+    if items == []
+      []
+    else
+      p = erlang::iolist_to_binary([path, "[", erlang::integer_to_binary(i), "]"])
+      lists::append(miss(erlang::hd(items), t, p),
+                    miss_items(erlang::tl(items), t, path, i + 1))
+    end
+  end
+
+  def self.describe(path, want, got)
+    erlang::iolist_to_binary([path, ": expected ", want, ", got ", type_of(got)])
+  end
+
+  def self.label(schema)
+    if erlang::is_atom(schema)
+      erlang::atom_to_binary(schema, :utf8)
+    else
+      <<"value">>
+    end
+  end
+
+  def self.type_of(v)
+    if erlang::is_binary(v)
+      <<"string">>
+    elsif erlang::is_boolean(v)
+      <<"bool">>
+    elsif erlang::is_integer(v)
+      <<"int">>
+    elsif erlang::is_float(v)
+      <<"float">>
+    elsif erlang::is_map(v)
+      <<"object">>
+    elsif erlang::is_list(v)
+      <<"list">>
+    elsif erlang::is_atom(v)
+      <<"atom">>
+    else
+      <<"value">>
+    end
+  end
+
+  # --- helpers ---------------------------------------------------------------
+
+  def self.charlist?(v)
+    erlang::is_list(v) and lists::all({|c| erlang::is_integer(c)}, v)
+  end
+
+  # string::trim / string::lowercase raise on invalid UTF-8, which a stream cut
+  # mid-codepoint produces. No reply is worth crashing a turn over.
+  def self.trim(b)
+    try
+      erlang::iolist_to_binary(string::trim(b))
+    catch _e
+      b
+    end
+  end
+
+  def self.lower(b)
+    try
+      erlang::iolist_to_binary(string::lowercase(b))
+    catch _e
+      b
+    end
+  end
+
+  def self.to_bin(x)
+    if erlang::is_binary(x)
+      x
+    elsif erlang::is_atom(x)
+      erlang::atom_to_binary(x, :utf8)
+    else
+      to_bin_loose(x)
+    end
+  end
+
+  def self.to_bin_loose(x)
+    try
+      erlang::iolist_to_binary(x)
+    catch _e
+      erlang::iolist_to_binary(io_lib::format("~p", [x]))
+    end
+  end
+
+  # ========== Unit tests:  ./jet -r jet_sap::run_tests src/jet_sap.jet ==========
+  #
+  # Each row is what a model ACTUALLY does to "reply with only JSON". Every one of
+  # the first block used to come back as `{:ok, <raw text>}` -- a declared schema
+  # silently returning a binary.
+
+  def self.cases()
+    lists::append(lists::append(syntax_cases(), coercion_cases()), contract_cases())
+  end
+
+  # stage 1: the reply is not clean JSON
+  def self.syntax_cases()
+    s = {answer: :string}
+    [{<<"clean json">>,      <<"{\"answer\":\"hi\"}">>, s, {:ok, {answer: <<"hi">>}}},
+     {<<"markdown fence">>,  <<"```json\n{\"answer\":\"hi\"}\n```">>, s, {:ok, {answer: <<"hi">>}}},
+     {<<"prose before">>,    <<"Sure! Here it is:\n{\"answer\":\"hi\"}">>, s, {:ok, {answer: <<"hi">>}}},
+     {<<"prose after">>,     <<"{\"answer\":\"hi\"}\nHope that helps!">>, s, {:ok, {answer: <<"hi">>}}},
+     {<<"think block">>,     <<"<think>maybe {\"answer\":\"draft\"}</think>\n{\"answer\":\"hi\"}">>, s, {:ok, {answer: <<"hi">>}}},
+     {<<"trailing comma">>,  <<"{\"answer\":\"hi\",}">>, s, {:ok, {answer: <<"hi">>}}},
+     {<<"single quotes">>,   <<"{'answer':'hi'}">>, s, {:ok, {answer: <<"hi">>}}},
+     {<<"unquoted keys">>,   <<"{answer: \"hi\"}">>, s, {:ok, {answer: <<"hi">>}}},
+     {<<"missing comma">>,   <<"{\"answer\":\"hi\" \"extra\":1}">>, s, {:ok, {answer: <<"hi">>}}},
+     {<<"inner quotes">>,    <<"{\"answer\":\"he said \"hi\" there\"}">>, s, {:ok, {answer: <<"he said \"hi\" there">>}}},
+     {<<"comments">>,        <<"{ // here\n \"answer\": \"hi\" /* done */ }">>, s, {:ok, {answer: <<"hi">>}}},
+     {<<"truncated">>,       <<"{\"answer\":\"hi\"">>, s, {:ok, {answer: <<"hi">>}}},
+     {<<"python literals">>, <<"{\"answer\": None}">>, s, {:ok, {answer: <<>>}}},
+     {<<"two objects">>,     <<"e.g. {\"k\":\"v\"} is a shape.\n{\"answer\":\"hi\"}">>, s, {:ok, {answer: <<"hi">>}}},
+     {<<"wrapped result">>,  <<"{\"result\": {\"answer\":\"hi\"}}">>, s, {:ok, {answer: <<"hi">>}}}]
+  end
+
+  # stage 2: the JSON parses but the types are off
+  def self.coercion_cases()
+    [{<<"string to int">>,   <<"{\"n\": \"123\"}">>, {n: :int}, {:ok, {n: 123}}},
+     {<<"string to bool">>,  <<"{\"ok\": \"yes\"}">>, {ok: :bool}, {:ok, {ok: true}}},
+     {<<"float to int">>,    <<"{\"n\": 12.0}">>, {n: :int}, {:ok, {n: 12}}},
+     {<<"int to float">>,    <<"{\"n\": 3}">>, {n: :float}, {:ok, {n: 3.0}}},
+     {<<"scalar to list">>,  <<"{\"tags\": \"Amazon\"}">>, {tags: {:list, :string}}, {:ok, {tags: [<<"Amazon">>]}}},
+     {<<"null to list">>,    <<"{\"tags\": null}">>, {tags: {:list, :string}}, {:ok, {tags: []}}},
+     {<<"camelCase key">>,   <<"{\"sourceList\": [\"a\"]}">>, {source_list: {:list, :string}}, {:ok, {source_list: [<<"a">>]}}},
+     {<<"string to atom">>,  <<"{\"state\": \"in_progress\"}">>, {state: :atom}, {:ok, {state: :in_progress}}},
+     {<<"extra key dropped">>, <<"{\"answer\":\"hi\",\"note\":\"x\"}">>, {answer: :string}, {:ok, {answer: <<"hi">>}}},
+     {<<"nested list of maps">>, <<"{\"hits\":[{\"name\":\"a\",\"n\":\"1\"}]}">>,
+      {hits: {:list, {name: :string, n: :int}}}, {:ok, {hits: [{name: <<"a">>, n: 1}]}}},
+     {<<"prose is the String">>, <<"The BEAM is Erlang's virtual machine.">>, :string,
+      {:ok, <<"The BEAM is Erlang's virtual machine.">>}},
+     {<<"quoted String unwrapped">>, <<"\"just this\"">>, :string, {:ok, <<"just this">>}},
+     {<<"Int out of prose">>, <<"The answer is 42.">>, :int, {:ok, 42}},
+     {<<"Bool out of prose">>, <<"Yes, that is correct.">>, :bool, {:ok, true}},
+     # the point of scoring: a decoy with the RIGHT keys but a wrong-typed value
+     # must lose to the one that actually satisfies the schema
+     {<<"decoy loses to real">>, <<"Example: {\"n\": \"oops\"}\nAnswer: {\"n\": 7}">>, {n: :int}, {:ok, {n: 7}}},
+     {<<"list of int strings">>, <<"{\"ns\": [\"1\",\"2\"]}">>, {ns: {:list, :int}}, {:ok, {ns: [1, 2]}}},
+     {<<"non-JSON fence ignored">>, <<"```python\nprint(1)\n```\nResult: {\"n\": 7}">>, {n: :int}, {:ok, {n: 7}}}]
+  end
+
+  # the contract: a declared schema that cannot be met must FAIL, not degrade to text
+  def self.contract_cases()
+    [{<<"missing field errors">>, <<"{\"answer\":\"hi\"}">>, {answer: :string, sources: {:list, :string}},
+      {:error, [<<"value.sources is missing">>]}},
+     {<<"wrong type errors">>, <<"{\"n\": \"abc\"}">>, {n: :int},
+      {:error, [<<"value.n: expected int, got string">>]}},
+     {<<"no value at all errors">>, <<"I could not answer that.">>, {answer: :string, sources: {:list, :string}},
+      {:error, [<<"value: expected object, got string">>]}},
+     # a bare value for a one-field object is that field (BAML's ImpliedKey)
+     {<<"bare int implies key">>, <<"396">>, {answer: :int}, {:ok, {answer: 396}}},
+     {<<"prose implies key">>, <<"Paris, probably.">>, {answer: :string}, {:ok, {answer: <<"Paris, probably.">>}}},
+     {<<"nested path reported">>, <<"{\"hits\":[{\"name\":\"a\"}]}">>, {hits: {:list, {name: :string, n: :int}}},
+      {:error, [<<"value.hits[0].n is missing">>]}},
+     {<<":any passes text through">>, <<"anything at all">>, :any, {:ok, <<"anything at all">>}}]
+  end
+
+  def self.check(c)
+    {name, text, schema, expected} = c
+    got = simplify(parse(text, schema))
+    {got == expected, name, got, expected}
+  end
+
+  # keep expectations readable: an error is judged by its `missing` paths
+  def self.simplify(r)
+    match r
+      case {:error, {:schema_mismatch, info}}
+        {:error, maps::get(:missing, info)}
+      case x
+        x
+    end
+  end
+
+  def self.run_tests()
+    rs = lists::map({|c| check(c)}, cases())
+    lists::foreach({|r| report(r)}, rs)
+    bad = lists::filter({|r| erlang::element(1, r) == false}, rs)
+    io::format("~n~p/~p passed~n", [erlang::length(rs) - erlang::length(bad), erlang::length(rs)])
+    if bad == []
+      :ok
+    else
+      :failed
+    end
+  end
+
+  def self.report(r)
+    {ok, name, got, expected} = r
+    if ok
+      io::format("  ok   ~s~n", [name])
+    else
+      io::format("  FAIL ~s~n         got:      ~p~n         expected: ~p~n", [name, got, expected])
+    end
+  end
+end
