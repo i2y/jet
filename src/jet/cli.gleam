@@ -4,6 +4,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import jet/ast
 import jet/codegen/beam
 import jet/enum_check
 import jet/error
@@ -186,7 +187,23 @@ fn build_directory(dir: String, output_dir: Option(String)) -> Nil {
             <> dir
             <> " ...",
           )
-          let results = list.map(files, fn(file) { compile_one(file, output_dir) })
+          // Pass 1: parse every file before compiling any, so a `match` in one
+          // module can be checked against an `expose … -> enum(...)` declared in
+          // another. This is the check a per-module macro cannot reach, since a
+          // macro only ever sees its own expansion.
+          let parsed = list.map(files, fn(f) { #(f, parse_file(f)) })
+          let enums =
+            enum_check.collect_project(
+              list.filter_map(parsed, fn(p) {
+                case p.1 {
+                  Ok(#(_, m)) -> Ok(m)
+                  Error(_) -> Error(Nil)
+                }
+              }),
+            )
+          // Pass 2: check each module against the whole project, then compile.
+          let results =
+            list.map(parsed, fn(p) { compile_one(p.0, p.1, enums, output_dir) })
           let ok_count = list.count(results, result.is_ok)
           let err_count = list.count(results, fn(r) { !result.is_ok(r) })
           io.println(
@@ -212,9 +229,13 @@ fn build_directory(dir: String, output_dir: Option(String)) -> Nil {
 
 fn compile_one(
   file_path: String,
+  parsed: Result(#(String, ast.Module), error.JetError),
+  enums: enum_check.Enums,
   output_dir: Option(String),
 ) -> Result(String, String) {
-  case do_compile(file_path) {
+  let compiled =
+    result.try(parsed, fn(pair) { compile_parsed(pair.0, pair.1, enums) })
+  case compiled {
     Ok(#(module_name, binary)) -> {
       let beam_path = case output_dir {
         Some(out) -> out <> "/" <> module_name <> ".beam"
@@ -329,32 +350,44 @@ fn build_release(
 
 // --- Common helpers ---
 
+/// Source -> AST. Split out from do_compile so a directory build can parse every
+/// file BEFORE compiling any of them, which is what makes a cross-module check
+/// possible at all.
+fn parse_file(file_path: String) -> Result(#(String, ast.Module), error.JetError) {
+  let module_name = extract_module_name(file_path)
+  case simplifile.read(file_path) {
+    Ok(source) ->
+      case lexer.lex(source) {
+        Ok(tokens) ->
+          case parser.parse(token_filter.filter(tokens, module_name), module_name) {
+            Ok(module) -> Ok(#(module_name, module))
+            Error(e) -> Error(e)
+          }
+        Error(e) -> Error(e)
+      }
+    Error(_) -> Error(error.FileError(file_path, "Could not read file"))
+  }
+}
+
+fn compile_parsed(
+  module_name: String,
+  module: ast.Module,
+  enums: enum_check.Enums,
+) -> Result(#(String, BitArray), error.JetError) {
+  enum_check.check_with(module, enums)
+  case beam.compile(rebind.rename_module(module)) {
+    Ok(#(_mod_atom, binary)) -> Ok(#(module_name, binary))
+    Error(e) -> Error(e)
+  }
+}
+
 fn do_compile(
   file_path: String,
 ) -> Result(#(String, BitArray), error.JetError) {
-  let module_name = extract_module_name(file_path)
-  case simplifile.read(file_path) {
-    Ok(source) -> {
-      case lexer.lex(source) {
-        Ok(tokens) -> {
-          let filtered = token_filter.filter(tokens, module_name)
-          case parser.parse(filtered, module_name) {
-            Ok(module) -> {
-              enum_check.check(module)
-              let module = rebind.rename_module(module)
-              case beam.compile(module) {
-                Ok(#(_mod_atom, binary)) -> Ok(#(module_name, binary))
-                Error(e) -> Error(e)
-              }
-            }
-            Error(e) -> Error(e)
-          }
-        }
-        Error(e) -> Error(e)
-      }
-    }
-    Error(_) ->
-      Error(error.FileError(file_path, "Could not read file"))
+  case parse_file(file_path) {
+    Ok(#(module_name, module)) ->
+      compile_parsed(module_name, module, enum_check.collect_project([module]))
+    Error(e) -> Error(e)
   }
 }
 

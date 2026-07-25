@@ -227,10 +227,18 @@ getting them wrong is an error at the mistake rather than plausible nonsense:
 | `runner Fleet(member: …)` | an empty fleet, silently | `{:error, {:unknown_runner_options, …}}` — checked against each shape's own manifest, so shapes stay library-level |
 | a `match` missing an enum value | a runtime `badmatch`, eventually | a compile-time warning naming the value you forgot |
 
-The exhaustiveness check is intra-function: it connects `a = Agent.spawn()` and a
-`match a.method(…)` in the same body. Across function boundaries it stops — in a
-dynamic language nothing says what a parameter holds — and it is a warning, never
-an error. Runnable: [`examples/agent_enum_check.jet`](examples/agent_enum_check.jet).
+The exhaustiveness check connects `a = Agent.spawn()` and a `match a.method(…)` in
+the same function body; across function boundaries it stops, because in a dynamic
+language nothing says what a parameter holds. It is a warning, never an error.
+
+The **declaration** can live anywhere in the project, though: `jet build src/`
+parses every file before compiling any, so an `expose … -> enum(...)` in one
+module is checked against a `match` written in another. That is the case a macro
+cannot reach — Elixir compiles module by module, and a macro only ever sees its
+own expansion, so the two are never in view together.
+
+Runnable: [`examples/agent_enum_check.jet`](examples/agent_enum_check.jet) (one
+module) · [`examples/enum_xmodule/`](examples/enum_xmodule) (two).
 
 For an Ollama backend the schema can reach the model two ways —
 `runner Llm(structured: :constrained)` (the default: a JSON Schema compiled to a

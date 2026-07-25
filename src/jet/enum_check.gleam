@@ -24,11 +24,37 @@ import gleam/string
 import jet/ast.{type Expr, type TopLevel}
 
 /// Enum-valued methods, keyed by "Agent.method".
-type Enums =
+pub type Enums =
   Dict(String, List(String))
 
+/// One module in isolation -- what a single-file `jet Foo.jet` can see.
 pub fn check(module: ast.Module) -> Nil {
-  let enums = collect(module.body, dict.new())
+  check_with(module, collect(module.body, dict.new()))
+}
+
+/// Every enum-valued method across a whole project. `jet build src/` parses all
+/// files before compiling any, so a `match` in one module can be checked against
+/// an `expose … -> enum(...)` declared in another -- the case a per-module macro
+/// cannot reach, because it only ever sees its own expansion.
+///
+/// An agent name defined twice with DIFFERENT values is dropped rather than
+/// guessed at: a wrong warning is worse than a missing one.
+pub fn collect_project(modules: List(ast.Module)) -> Enums {
+  let #(table, ambiguous) =
+    list.fold(modules, #(dict.new(), set.new()), fn(acc, m) {
+      let #(table, bad) = acc
+      dict.fold(collect(m.body, dict.new()), #(table, bad), fn(acc2, k, v) {
+        let #(t, b) = acc2
+        case dict.get(t, k) {
+          Ok(existing) if existing != v -> #(t, set.insert(b, k))
+          _ -> #(dict.insert(t, k, v), b)
+        }
+      })
+    })
+  dict.filter(table, fn(k, _) { !set.contains(ambiguous, k) })
+}
+
+pub fn check_with(module: ast.Module, enums: Enums) -> Nil {
   case dict.is_empty(enums) {
     True -> Nil
     False -> list.each(module.body, fn(t) { check_toplevel(t, enums) })

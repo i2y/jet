@@ -358,10 +358,14 @@ and closed:
 | `runner Fleet(member: …)` | `{:error, {:unknown_runner_options, …}}`, checked against `<shape>::runner_opts_spec/0` — the manifest lives with the shape, never in the compiler, so adding a shape stays "one module + one dispatch line + its own spec" |
 
 And a `match` that omits a value of an `enum(...)` schema gets a compile-time
-warning naming it. The analysis is intra-function — it connects
-`a = Agent.spawn()` and `match a.method(…)` in the same body — and stops at
-function boundaries, where a dynamic language gives no way to know what a
-parameter holds. See [`examples/agent_enum_check.jet`](../examples/agent_enum_check.jet).
+warning naming it. The analysis connects `a = Agent.spawn()` and
+`match a.method(…)` in the same function body, and stops at function boundaries —
+in a dynamic language nothing says what a parameter holds.
+
+The declaration may live in any module: `jet build <dir>` parses every file before
+compiling any, so an `expose … -> enum(...)` in one module is checked against a
+`match` in another. See [`examples/agent_enum_check.jet`](../examples/agent_enum_check.jet)
+(one module) and [`examples/enum_xmodule/`](../examples/enum_xmodule) (two).
 
 #### Measured against the Elixir alternative
 

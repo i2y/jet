@@ -1,0 +1,11 @@
+# The DECLARATION lives here.
+#
+# See ../enum_xmodule/review.jet for the `match` that consumes it, and the README
+# note on why a per-module macro cannot connect the two.
+module assessors
+  agent Assessor
+    role "You classify a diff against the current code."
+    runner Fake(replies: {|_m, args| erlang::hd(args)})
+    expose assess(diff) -> enum(:stale, :current, :unrelated)
+  end
+end

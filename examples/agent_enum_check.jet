@@ -18,6 +18,10 @@
 # nothing in a dynamic language says what a parameter holds. That boundary is why
 # this is a targeted check over a declared, closed domain, and not a type system.
 #
+# The DECLARATION, though, may live anywhere in the project: `jet build src/`
+# parses every file before compiling any, so the enum can be declared in one
+# module and the match written in another -- see examples/enum_xmodule/.
+#
 #   ./jet -r agent_enum_check::run examples/agent_enum_check.jet
 module agent_enum_check
   agent Assessor

@@ -1,0 +1,33 @@
+# The MATCH lives here -- a different module from the `expose … -> enum(...)`.
+#
+# `jet build examples/enum_xmodule` parses every file before compiling any, so
+# the compiler can check this `match` against a vocabulary declared next door.
+# Delete the `case {:ok, :unrelated}` arm and rebuild: it names what you dropped.
+#
+# This is the check a macro cannot reach. Elixir compiles module by module and a
+# macro only ever sees its own expansion, so the declaration and the `match` are
+# never in view at the same time. (Compiler tracers can get there, but that is a
+# different, harder tool than the one people reach for.)
+#
+#   ./jet build examples/enum_xmodule
+#   ./jet -r review::run examples/enum_xmodule/review.jet
+module review
+  def self.run()
+    lists::foreach({|d| io::format("  ~-16s => ~s~n", [d, decide(d)])},
+                   ["stale", "current", "I'd say unrelated.", "banana"])
+  end
+
+  def self.decide(diff)
+    a = assessors::Assessor.spawn()
+    match a.assess(diff).await()
+      case {:ok, :stale}
+        "the diff predates the code"
+      case {:ok, :current}
+        "in sync"
+      case {:ok, :unrelated}
+        "touches nothing relevant"
+      case {:error, _}
+        "not one of the allowed values"
+    end
+  end
+end
