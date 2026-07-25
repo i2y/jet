@@ -378,15 +378,18 @@ module jet_agent
   # --- stub value synthesis (pretends to be a structured LLM response) ---
 
   def self.gen_value(schema)
-    if erlang::is_atom(schema)
-      gen_scalar(schema)
-    elsif jet_sap::enum?(schema)
-      erlang::hd(jet_sap::enum_values(schema))
-    elsif erlang::is_tuple(schema)
-      {_, elem_schema} = schema
+    s = jet_sap::strip_desc(schema)
+    if erlang::is_atom(s)
+      gen_scalar(s)
+    elsif jet_sap::optional?(s)
+      gen_value(jet_sap::opt_inner(s))
+    elsif jet_sap::enum?(s)
+      erlang::hd(jet_sap::enum_values(s))
+    elsif erlang::is_tuple(s)
+      {_, elem_schema} = s
       [gen_value(elem_schema)]
-    elsif erlang::is_map(schema)
-      maps::map({|_k, v| gen_value(v)}, schema)
+    elsif erlang::is_map(s)
+      maps::map({|_k, v| gen_value(v)}, s)
     else
       nil
     end

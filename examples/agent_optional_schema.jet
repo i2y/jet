@@ -1,0 +1,43 @@
+# Two field modifiers that carry most of a schema's real-world weight:
+#
+#   sources: [String]?  "URLs only, no titles"
+#            optional ---^   ^--- description, sent to the model
+#
+# `?` is not cosmetic. Schema-Aligned Parsing prices what a reply fails to
+# deliver: a missing REQUIRED field costs 100, a missing OPTIONAL one costs 1.
+# That gap is the whole meaning of the mark -- "the model legitimately left this
+# out" and "this is the wrong answer" stop being the same event.
+#
+# The description is the cheapest prompt improvement available: it travels with
+# the declaration, reaches the model as `"string // URLs only, no titles"` in the
+# compact prompt schema, and as JSON Schema's own `description` when the backend
+# constrains generation. You never write it twice.
+#
+#   ./jet -r agent_optional_schema::run examples/agent_optional_schema.jet
+module agent_optional_schema
+  agent Researcher
+    role "You research and cite."
+    runner Fake(replies: {|_m, args| erlang::hd(args)})   # echo the input back
+    expose research(reply) -> {answer:     String  "one sentence, no preamble",
+                               sources:   [String]? "URLs only, no titles",
+                               certainty:  Int?     "0-100, omit if unsure"}
+  end
+
+  def self.run()
+    a = agent_optional_schema::Researcher.spawn()
+    lists::foreach({|r| io::format("  ~-44s => ~P~n", [r, a.research(r).await(), 8])},
+                   ["{\"answer\":\"42\",\"sources\":[\"a\"],\"certainty\":90}",
+                    "{\"answer\":\"42\"}",                    # optionals absent: fine
+                    "{\"answer\":\"42\",\"sources\":null}",   # null == absent
+                    "{\"answer\":\"42\",\"certainty\":\"90\"}",
+                    "{\"sources\":[\"a\"]}"])                 # `answer` is REQUIRED
+
+    schema = {answer: {:desc, :string, <<"one sentence, no preamble">>},
+              sources: {:optional, {:desc, {:list, :string}, <<"URLs only">>}},
+              certainty: {:optional, :int}}
+    io::format("~nwhat the model is shown (compact):~n  ~ts~n",
+               [jet_json_ffi::encode(jet_sap::for_prompt(schema))])
+    io::format("~nwhat a constrained backend gets (JSON Schema):~n  ~ts~n",
+               [jet_json_ffi::encode(jet_llm::to_json_schema(schema))])
+  end
+end

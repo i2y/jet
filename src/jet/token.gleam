@@ -108,6 +108,7 @@ pub type Token {
   // Special
   At
   Amp
+  Question
   Backslash
   Caret
   Sharp
@@ -213,6 +214,7 @@ pub fn token_name(tok: Token) -> String {
     Semi -> ";"
     At -> "@"
     Amp -> "&"
+    Question -> "?"
     Backslash -> "\\"
     Caret -> "^"
     Sharp -> "#"

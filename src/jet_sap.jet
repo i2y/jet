@@ -48,14 +48,17 @@ module jet_sap
   end
 
   def self.conforms(value, schema)
-    if erlang::is_atom(schema)
-      conforms_scalar(value, schema)
-    elsif enum?(schema)
-      lists::member(value, enum_values(schema))
-    elsif erlang::is_tuple(schema)
-      conforms_list(value, schema)
-    elsif erlang::is_map(schema)
-      conforms_map(value, schema)
+    s = strip_desc(schema)
+    if erlang::is_atom(s)
+      conforms_scalar(value, s)
+    elsif optional?(s)
+      conforms(value, opt_inner(s))
+    elsif enum?(s)
+      lists::member(value, enum_values(s))
+    elsif erlang::is_tuple(s)
+      conforms_list(value, s)
+    elsif erlang::is_map(s)
+      conforms_map(value, s)
     else
       true
     end
@@ -83,7 +86,7 @@ module jet_sap
     if maps::is_key(k, value)
       conforms(maps::get(k, value), t)
     else
-      false
+      optional?(strip_desc(t))       # an absent OPTIONAL field is satisfied
     end
   end
 
@@ -144,12 +147,19 @@ module jet_sap
   end
 
   def self.elem_type(schema)
-    if erlang::is_tuple(schema)
-      {_, t} = schema
-      t
+    s = strip_desc(schema)
+    if optional?(s)
+      elem_type(opt_inner(s))
+    elsif erlang::is_tuple(s) and (not enum?(s))
+      elem_type_of_list(s)
     else
-      schema
+      s
     end
+  end
+
+  def self.elem_type_of_list(s)
+    {_, t} = s
+    strip_desc(t)
   end
 
   def self.substrings(b, t)
@@ -177,66 +187,65 @@ module jet_sap
     {v0, f0} = cand
     {v, f} = coerce(v0, schema)
     flags = lists::append(f0, f)
-    {v, flags, score(flags) + (unsatisfied(v, schema) * cost(:no_value))}
+    {v, flags, score(flags) + penalty(v, schema)}
   end
 
-  # How many schema LEAVES the value fails to satisfy. A value of the wrong shape
-  # entirely fails every leaf, so an object missing one field always beats prose
-  # that matched nothing.
-  def self.unsatisfied(value, schema)
-    if erlang::is_map(schema)
-      unsat_map(value, schema)
-    elsif enum?(schema)
-      if conforms(value, schema)
-        0
-      else
-        1
-      end
-    elsif erlang::is_tuple(schema)
-      unsat_list(value, schema)
-    elsif conforms(value, schema)
+  # What the value still fails to deliver, PRICED. A required leaf that is absent
+  # or wrong costs 100; an absent OPTIONAL leaf costs 1. That gap is the whole
+  # meaning of `?`: "the model left this out" is nearly free, "this is the wrong
+  # answer" is not, and a value of the wrong shape entirely fails every leaf.
+  def self.penalty(value, schema)
+    s = strip_desc(schema)
+    if erlang::is_map(s)
+      penalty_map(value, s)
+    elsif optional?(s)
+      penalty(value, opt_inner(s))
+    elsif erlang::is_tuple(s) and (not enum?(s))
+      penalty_list(value, s)
+    elsif conforms(value, s)
       0
     else
-      1
+      cost(:no_value)
     end
   end
 
-  def self.unsat_map(value, schema)
+  def self.penalty_map(value, schema)
     if erlang::is_map(value)
-      lists::foldl({|kv, acc| acc + unsat_field(value, kv)}, 0, maps::to_list(schema))
+      lists::foldl({|kv, acc| acc + penalty_field(value, kv)}, 0, maps::to_list(schema))
     else
-      leaves(schema)
+      max_penalty(schema)
     end
   end
 
-  def self.unsat_field(value, kv)
+  def self.penalty_field(value, kv)
     {k, t} = kv
     if maps::is_key(k, value)
-      unsatisfied(maps::get(k, value), t)
+      penalty(maps::get(k, value), t)
     else
-      leaves(t)
+      max_penalty(t)
     end
   end
 
-  def self.unsat_list(value, schema)
+  def self.penalty_list(value, schema)
     {_, t} = schema
     if erlang::is_list(value)
-      lists::foldl({|x, acc| acc + unsatisfied(x, t)}, 0, value)
+      lists::foldl({|x, acc| acc + penalty(x, t)}, 0, value)
     else
-      leaves(t)
+      max_penalty(t)
     end
   end
 
-  # how many scalar leaves a schema demands (a list counts as its element type)
-  def self.leaves(schema)
-    if erlang::is_map(schema)
-      lists::foldl({|kv, acc| acc + leaves(erlang::element(2, kv))}, 0, maps::to_list(schema))
-    elsif enum?(schema)
-      1
-    elsif erlang::is_tuple(schema)
-      leaves(erlang::element(2, schema))
+  # the cost when NOTHING matched: 100 per required leaf, 1 per optional one
+  def self.max_penalty(schema)
+    s = strip_desc(schema)
+    if optional?(s)
+      cost(:optional_no_value)
+    elsif erlang::is_map(s)
+      lists::foldl({|kv, acc| acc + max_penalty(erlang::element(2, kv))}, 0, maps::to_list(s))
+    elsif erlang::is_tuple(s) and (not enum?(s))
+      max_penalty(erlang::element(2, s))
     else
-      1
+      cost(:no_value)
     end
   end
 
@@ -313,8 +322,9 @@ module jet_sap
      object_to_string: 2,     # a scalar where text was asked for
      json_to_string: 2,       # a whole object re-encoded as text
      stripped_non_alnum: 3,   # sourceList / source-list matched source_list:
-     no_value: 100}           # charged per UNSATISFIED SCHEMA LEAF (see judge) --
-                              # two orders of magnitude above any repair above it
+     optional_no_value: 1,    # `T?` absent -- the model may legitimately omit it
+     no_value: 100}           # a REQUIRED leaf absent or wrong -- two orders of
+                              # magnitude above any repair above it
   end
 
   # --- step 3: schema-guided coercion, returning {value, flags} ---------------
@@ -324,16 +334,28 @@ module jet_sap
   # reshaping is recorded so the search can price it.
 
   def self.coerce(value, schema)
-    if erlang::is_atom(schema)
-      coerce_scalar(value, schema)
-    elsif enum?(schema)
-      coerce_enum(value, enum_values(schema))
-    elsif erlang::is_tuple(schema)
-      coerce_list(value, schema)
-    elsif erlang::is_map(schema)
-      coerce_map(value, schema)
+    s = strip_desc(schema)
+    if erlang::is_atom(s)
+      coerce_scalar(value, s)
+    elsif optional?(s)
+      coerce_optional(value, opt_inner(s))
+    elsif enum?(s)
+      coerce_enum(value, enum_values(s))
+    elsif erlang::is_tuple(s)
+      coerce_list(value, s)
+    elsif erlang::is_map(s)
+      coerce_map(value, s)
     else
       {value, []}
+    end
+  end
+
+  # `T?`: an explicit null means the same as absent, and the key is dropped.
+  def self.coerce_optional(value, t)
+    if value == :null
+      {:__jet_sap_absent__, [:string_to_null]}
+    else
+      coerce(value, t)
     end
   end
 
@@ -485,6 +507,44 @@ module jet_sap
   # costs substring_match -- but only when EXACTLY ONE allowed value appears, so
   # an ambiguous reply is reported rather than guessed at.
 
+  # --- the two field modifiers: `T?` and a description ------------------------
+  #
+  #   {note: String?,  sources: [String] "URLs only, no titles"}
+  #
+  # `?` wraps the type as {:optional, T}; a description wraps it as
+  # {:desc, T, text}. Both are peeled off before any structural dispatch, so
+  # every other rule in this module sees only the underlying type.
+
+  def self.described?(schema)
+    erlang::is_tuple(schema) and (erlang::tuple_size(schema) == 3) and
+      (erlang::element(1, schema) == :desc)
+  end
+
+  def self.strip_desc(schema)
+    if described?(schema)
+      erlang::element(2, schema)
+    else
+      schema
+    end
+  end
+
+  def self.desc_of(schema)
+    if described?(schema)
+      erlang::element(3, schema)
+    else
+      nil
+    end
+  end
+
+  def self.optional?(schema)
+    erlang::is_tuple(schema) and (erlang::tuple_size(schema) == 2) and
+      (erlang::element(1, schema) == :optional)
+  end
+
+  def self.opt_inner(schema)
+    erlang::element(2, schema)
+  end
+
   def self.enum?(schema)
     erlang::is_tuple(schema) and (erlang::tuple_size(schema) == 2) and
       (erlang::element(1, schema) == :enum)
@@ -504,15 +564,49 @@ module jet_sap
   # is the form that goes in the prompt, so it should read like a shape, not like
   # an internal representation -- and it costs far fewer tokens than JSON Schema.
   def self.for_prompt(schema)
-    if enum?(schema)
-      enum_text(schema)
-    elsif erlang::is_tuple(schema)
-      {_, t} = schema
-      [for_prompt(t)]
-    elsif erlang::is_map(schema)
-      maps::map({|_k, v| for_prompt(v)}, schema)
+    annotate(for_prompt_bare(strip_desc(schema)), desc_of(schema))
+  end
+
+  def self.for_prompt_bare(s)
+    if optional?(s)
+      for_prompt(opt_inner(s))
+    elsif enum?(s)
+      enum_text(s)
+    elsif erlang::is_map(s)
+      maps::from_list(lists::map({|kv| prompt_field(kv)}, maps::to_list(s)))
+    elsif erlang::is_tuple(s)
+      [for_prompt(erlang::element(2, s))]
     else
-      schema
+      s
+    end
+  end
+
+  # an optional field is marked on the KEY -- `{"note?": "string"}` reads exactly
+  # like the declaration and costs one character
+  def self.prompt_field(kv)
+    {k, t} = kv
+    if optional?(strip_desc(t))
+      {opt_key(k), for_prompt(t)}
+    else
+      {k, for_prompt(t)}
+    end
+  end
+
+  def self.opt_key(k)
+    erlang::binary_to_atom(
+      erlang::iolist_to_binary([erlang::atom_to_binary(k, :utf8), "?"]), :utf8)
+  end
+
+  # a description rides along with the type: "string // one sentence, no preamble"
+  def self.annotate(rendered, d)
+    if d == nil
+      rendered
+    elsif erlang::is_atom(rendered) or erlang::is_binary(rendered)
+      erlang::iolist_to_binary([to_bin(rendered), " // ", to_bin(d)])
+    elsif erlang::is_list(rendered) and (erlang::length(rendered) == 1)
+      [annotate(erlang::hd(rendered), d)]     # [T] -- describe the element
+    else
+      rendered
     end
   end
 
@@ -662,20 +756,17 @@ module jet_sap
   end
 
   def self.miss(value, schema, path)
-    if erlang::is_map(schema)
-      miss_map(value, schema, path)
-    elsif enum?(schema)
-      if conforms(value, schema)
-        []
-      else
-        [describe(path, label(schema), value)]
-      end
-    elsif erlang::is_tuple(schema)
-      miss_list(value, schema, path)
-    elsif conforms(value, schema)
+    s = strip_desc(schema)
+    if erlang::is_map(s)
+      miss_map(value, s, path)
+    elsif optional?(s)
+      miss(value, opt_inner(s), path)
+    elsif erlang::is_tuple(s) and (not enum?(s))
+      miss_list(value, s, path)
+    elsif conforms(value, s)
       []
     else
-      [describe(path, label(schema), value)]
+      [describe(path, label(s), value)]
     end
   end
 
@@ -692,6 +783,8 @@ module jet_sap
     p = erlang::iolist_to_binary([path, ".", erlang::atom_to_binary(k, :utf8)])
     if maps::is_key(k, value)
       miss(maps::get(k, value), t, p)
+    elsif optional?(strip_desc(t))
+      []                               # optional: absence is not a failure
     else
       [erlang::iolist_to_binary([p, " is missing"])]
     end
@@ -723,8 +816,8 @@ module jet_sap
   def self.label(schema)
     if erlang::is_atom(schema)
       erlang::atom_to_binary(schema, :utf8)
-    elsif enum?(schema)
-      erlang::iolist_to_binary(["one of ", enum_text(schema)])
+    elsif enum?(strip_desc(schema))
+      erlang::iolist_to_binary(["one of ", enum_text(strip_desc(schema))])
     else
       <<"value">>
     end
@@ -856,7 +949,23 @@ module jet_sap
      {<<"enum ambiguous errors">>, <<"maybe stale or current">>, {:enum, [:stale, :current]},
       {:error, [<<"value: expected one of stale|current, got string">>]}},
      {<<"enum unknown errors">>, <<"banana">>, {:enum, [:stale, :current]},
-      {:error, [<<"value: expected one of stale|current, got string">>]}}]
+      {:error, [<<"value: expected one of stale|current, got string">>]}},
+     # `T?` -- an absent optional is fine; an absent REQUIRED field still is not
+     {<<"optional absent ok">>, <<"{\"answer\":\"hi\"}">>,
+      {answer: :string, note: {:optional, :string}}, {:ok, {answer: <<"hi">>}}},
+     {<<"optional null dropped">>, <<"{\"answer\":\"hi\",\"note\":null}">>,
+      {answer: :string, note: {:optional, :string}}, {:ok, {answer: <<"hi">>}}},
+     {<<"optional present coerced">>, <<"{\"answer\":\"hi\",\"n\":\"7\"}">>,
+      {answer: :string, n: {:optional, :int}}, {:ok, {answer: <<"hi">>, n: 7}}},
+     {<<"optional does not excuse required">>, <<"{\"note\":\"x\"}">>,
+      {answer: :string, note: {:optional, :string}},
+      {:error, [<<"value.answer is missing">>]}},
+     # a description is prompt-only: it must not change what parses
+     {<<"description is inert">>, <<"{\"answer\":\"hi\"}">>,
+      {answer: {:desc, :string, <<"one sentence">>}}, {:ok, {answer: <<"hi">>}}},
+     {<<"described optional absent">>, <<"{\"answer\":\"hi\"}">>,
+      {answer: :string, note: {:optional, {:desc, :string, <<"why">>}}},
+      {:ok, {answer: <<"hi">>}}}]
   end
 
   # the contract: a declared schema that cannot be met must FAIL, not degrade to text

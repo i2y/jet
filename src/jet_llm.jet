@@ -467,21 +467,44 @@ module jet_llm
   # --- a real JSON Schema from the Jet schema literal (String/Int/[T]/{k:T}) ---
 
   def self.to_json_schema(schema)
-    if erlang::is_atom(schema)
-      scalar_schema(schema)
-    elsif jet_sap::enum?(schema)
+    with_desc(to_json_schema_bare(jet_sap::strip_desc(schema)), jet_sap::desc_of(schema))
+  end
+
+  # a field description becomes JSON Schema's own `description`, where a model
+  # provider already knows to look for it
+  def self.with_desc(js, d)
+    if (d == nil) or (not erlang::is_map(js))
+      js
+    else
+      maps::put(:description, jet_backend::to_bin(d), js)
+    end
+  end
+
+  def self.to_json_schema_bare(s)
+    if erlang::is_atom(s)
+      scalar_schema(s)
+    elsif jet_sap::optional?(s)
+      to_json_schema(jet_sap::opt_inner(s))
+    elsif jet_sap::enum?(s)
       {type: "string",
-       enum: lists::map({|a| erlang::atom_to_binary(a, :utf8)}, jet_sap::enum_values(schema))}
-    elsif erlang::is_tuple(schema)
-      {_, elem} = schema
+       enum: lists::map({|a| erlang::atom_to_binary(a, :utf8)}, jet_sap::enum_values(s))}
+    elsif erlang::is_tuple(s)
+      {_, elem} = s
       {type: "array", items: to_json_schema(elem)}
-    elsif erlang::is_map(schema)
+    elsif erlang::is_map(s)
       {type: "object",
-       properties: maps::map({|_k, v| to_json_schema(v)}, schema),
-       required: maps::keys(schema)}
+       properties: maps::map({|_k, v| to_json_schema(v)}, s),
+       required: required_keys(s)}
     else
       {type: "string"}
     end
+  end
+
+  # `T?` fields are simply left out of `required`, which is exactly what the
+  # grammar then permits the model to omit
+  def self.required_keys(s)
+    lists::filter({|k| (not jet_sap::optional?(jet_sap::strip_desc(maps::get(k, s))))},
+                  maps::keys(s))
   end
 
   def self.scalar_schema(t)

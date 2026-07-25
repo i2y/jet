@@ -1510,20 +1510,84 @@ const schema_scalars: List(String) = [
   "string", "int", "float", "bool", "atom", "any", "turnresult",
 ]
 
+/// A schema type, plus the two suffixes a field may carry:
+///
+///     {note: String?,  sources: [String] "URLs only, no titles"}
+///          optional ---^                 ^--- description, into the prompt
+///
+/// `?` marks a value that may be absent -- an absent optional costs almost
+/// nothing in the SAP score, while an absent REQUIRED field costs 100, which is
+/// the whole difference between "the model left it out" and "this is the wrong
+/// answer". The description is the cheapest prompt improvement there is: the
+/// model is told what the field means where the shape is declared, once.
 fn parse_schema(parser: Parser) -> ParseResult(Expr) {
+  case parse_schema_base(parser) {
+    Ok(#(schema, parser)) -> {
+      let line = schema_line(schema)
+      // `T?` on a scalar arrives inside the name (`?` is an identifier char);
+      // after `]`, `}` or `)` it is a standalone token.
+      let #(schema, parser) = case peek_token(parser) {
+        Some(token.Question) -> {
+          let #(_, parser) = advance(parser)
+          #(wrap_schema("optional", schema, line), parser)
+        }
+        _ -> #(schema, parser)
+      }
+      case peek(parser) {
+        Some(#(token.Str(text), _)) -> {
+          let #(_, parser) = advance(parser)
+          Ok(#(
+            ast.TupleLit(
+              [ast.AtomLit("desc", line), schema, ast.StrLit(text, line)],
+              line,
+            ),
+            parser,
+          ))
+        }
+        _ -> Ok(#(schema, parser))
+      }
+    }
+    Error(e) -> Error(e)
+  }
+}
+
+fn wrap_schema(tag: String, inner: Expr, line: Int) -> Expr {
+  ast.TupleLit([ast.AtomLit(tag, line), inner], line)
+}
+
+fn schema_line(schema: Expr) -> Int {
+  case schema {
+    ast.AtomLit(_, line) -> line
+    ast.TupleLit(_, line) -> line
+    ast.MapExpr(_, line) -> line
+    _ -> 0
+  }
+}
+
+fn parse_schema_base(parser: Parser) -> ParseResult(Expr) {
   case peek(parser) {
     // `enum(:a, :b, :c)` -- a closed set of atoms. Written before the scalar
     // check because `enum` is not itself a type name.
     Some(#(token.Name("enum"), Position(line))) -> parse_enum_schema(parser, line)
     Some(#(token.Name(tname), Position(line))) -> {
       let #(_, parser) = advance(parser)
-      let lowered = string.lowercase(tname)
+      // `String?` lexes as one name, so the marker is split off here
+      let #(base, optional) = case string.ends_with(tname, "?") {
+        True -> #(string.drop_end(tname, 1), True)
+        False -> #(tname, False)
+      }
+      let lowered = string.lowercase(base)
       case list.contains(schema_scalars, lowered) {
-        True -> Ok(#(ast.AtomLit(lowered, line), parser))
+        True ->
+          case optional {
+            True ->
+              Ok(#(wrap_schema("optional", ast.AtomLit(lowered, line), line), parser))
+            False -> Ok(#(ast.AtomLit(lowered, line), parser))
+          }
         False ->
           Error(error.ParseError(
             line,
-            "a schema type: String, Int, Float, Bool, Atom, Any, TurnResult, [T] or {k: T}",
+            "a schema type: String, Int, Float, Bool, Atom, Any, TurnResult, enum(:a, :b), [T], {k: T} -- with optional `T?` and an optional \"description\"",
             tname,
           ))
       }

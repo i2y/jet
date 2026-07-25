@@ -86,6 +86,10 @@ fn async_marker(body: Expr) -> Result(#(String, List(String)), Nil) {
 
 fn enum_values(schema: Expr) -> Result(List(String), Nil) {
   case schema {
+    // a description wraps the type; an OPTIONAL enum is skipped, since absence
+    // is then legitimate and "you forgot a value" would be the wrong advice
+    ast.TupleLit([ast.AtomLit("desc", _), inner, _], _) -> enum_values(inner)
+    ast.TupleLit([ast.AtomLit("optional", _), _], _) -> Error(Nil)
     ast.TupleLit([ast.AtomLit("enum", _), ast.ListLit(vs, _)], _) ->
       Ok(
         list.filter_map(vs, fn(v) {

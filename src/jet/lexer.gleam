@@ -63,6 +63,7 @@ fn lex_char(state: LexerState, char: String, rest: String) -> LexResult {
     ";" -> emit(state, rest, token.Semi)
     "@" -> emit(state, rest, token.At)
     "&" -> emit(state, rest, token.Amp)
+    "?" -> emit(state, rest, token.Question)
     "\\" -> emit(state, rest, token.Backslash)
     "^" -> emit(state, rest, token.Caret)
     "/" -> emit(state, rest, token.Slash)
