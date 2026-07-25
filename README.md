@@ -141,6 +141,32 @@ ported from the design of [BAML](https://boundaryml.com/blog/schema-aligned-pars
 reference implementation. Its test suite is the list of things models actually do:
 `./jet -r jet_sap::run_tests src/jet_sap.jet`.
 
+A schema type is `String` · `Int` · `Float` · `Bool` · `Atom` · `[T]` · `{k: T}` ·
+**`enum(:a, :b, :c)`**. An enum is a *closed set*, which is where matching a
+model's answer pays off most: `stale`, `"current"`, `UNRELATED` and `I'd say
+stale.` all land on the right value, while `stale or current` is **reported as
+ambiguous rather than guessed**.
+
+### What the compiler checks — without a type system
+
+Dynamic typing is the right choice here: no type system can promise what an LLM
+returns, the BEAM's mailbox is untyped, and `Architect`/`Flow` *generate their
+topology at runtime*, which a static type could not express. But some things are
+declared, closed, and already in the AST — so they are checked, and the cost of
+getting them wrong is an error at the mistake rather than plausible nonsense:
+
+| you write | what used to happen | what happens now |
+|---|---|---|
+| `-> {answer: Strng}` | the typo became an atom that conformed to **everything** | parse error naming the valid types |
+| `runner Fleeet(...)` | fell through to the stub runner, which **synthesizes** a schema-conforming value — a typo returned fabricated data that looked like success | `{:error, {:unknown_runner, …}}` listing the known runners |
+| `runner Fleet(member: …)` | an empty fleet, silently | `{:error, {:unknown_runner_options, …}}` — checked against each shape's own manifest, so shapes stay library-level |
+| a `match` missing an enum value | a runtime `badmatch`, eventually | a compile-time warning naming the value you forgot |
+
+The exhaustiveness check is intra-function: it connects `a = Agent.spawn()` and a
+`match a.method(…)` in the same body. Across function boundaries it stops — in a
+dynamic language nothing says what a parameter holds — and it is a warning, never
+an error. Runnable: [`examples/agent_enum_check.jet`](examples/agent_enum_check.jet).
+
 For an Ollama backend the schema can reach the model two ways —
 `runner Llm(structured: :constrained)` (the default: a JSON Schema compiled to a
 sampling grammar, so the shape is guaranteed) or `structured: :prompt` (the compact

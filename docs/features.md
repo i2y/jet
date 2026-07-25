@@ -327,6 +327,26 @@ degrades to raw text, which used to turn a type error into a crash far from its
 cause. Run its test suite, which is a list of things models actually do, with
 `./jet -r jet_sap::run_tests src/jet_sap.jet`.
 
+A schema type is `String` · `Int` · `Float` · `Bool` · `Atom` · `[T]` · `{k: T}` ·
+`enum(:a, :b, :c)`. An enum is a closed set, so SAP can match a model's answer to
+one of its values — exact, quoted, case-folded, or named inside a sentence — and
+report an ambiguous or unknown answer instead of guessing at it.
+
+Three things that used to fail silently are now errors, because they are declared
+and closed:
+
+| you write | what happens |
+|---|---|
+| `-> {answer: Strng}` | parse error naming the valid types (it used to become an atom that conformed to everything) |
+| `runner Fleeet(...)` | `{:error, {:unknown_runner, …}}` (it used to fall through to the stub runner, which *synthesizes* a conforming value — a typo returned fabricated data) |
+| `runner Fleet(member: …)` | `{:error, {:unknown_runner_options, …}}`, checked against `<shape>::runner_opts_spec/0` — the manifest lives with the shape, never in the compiler, so adding a shape stays "one module + one dispatch line + its own spec" |
+
+And a `match` that omits a value of an `enum(...)` schema gets a compile-time
+warning naming it. The analysis is intra-function — it connects
+`a = Agent.spawn()` and `match a.method(…)` in the same body — and stops at
+function boundaries, where a dynamic language gives no way to know what a
+parameter holds. See [`examples/agent_enum_check.jet`](../examples/agent_enum_check.jet).
+
 Because the repair happens in-process, there is **no retry on schema mismatch**: a
 retry costs a round trip and usually reproduces the same output. (Transport
 failures *are* retried with backoff, in `jet_plan::retry` — a different failure.)
