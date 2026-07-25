@@ -40,9 +40,29 @@ Runnable: [`examples/pitch.jet`](examples/pitch.jet) (the first GIF) · [`exampl
 
 These same agents also run **inside your editor** ([over ACP](#agents-in-your-editor-over-acp)) and in a **web UI** ([Jet Console](#or-in-a-web-ui-jet-console)).
 
-## Why not Elixir?
+## Why a language, and not an Elixir library?
 
-Elixir has no method syntax: `Point.dist(p)` and `GenServer.call(pid, :dist)` are different constructs at the skeleton of the language, so no macro can make the equation above true. In Jet, `x.method()` is one dispatch — resolved at runtime (`jet_runtime::call_method/3`) whether the receiver is a plain value, a process, or an LLM-backed agent. Features can be macros; uniformity can't — that's why Jet is a language, not a library.
+The honest version of this argument, since the flattering one doesn't survive contact with anyone who knows Elixir.
+
+**Elixir could do most of this.** Protocols already dispatch on the first argument, so one call can be uniform across a struct and a PID. Macros could generate the `agent` form, the gen_server behind it, the state threading, the futures — and macros run at compile time, so they could even emit the warnings. Nearly every feature below is expressible as a library, and the missing `x.method()` is notation, not capability.
+
+What a library cannot do is **stop you**.
+
+In a library every safeguard is a function you may call, and the underlying primitive stays one keystroke away. In a language it can be the only path there is. That is the difference between a convention and a guarantee:
+
+| | as a library | in Jet |
+|---|---|---|
+| a declared `-> Type` | validated if you remember to call the validator | every runner and every shape funnels through [one parser](#the-schema-is-a-contract--schema-aligned-parsing); the `agent` surface has no path around it |
+| a reply that can't satisfy the schema | whatever the caller wrote — often the raw text, failing far from its cause | `{:error, {:schema_mismatch, …}}`, naming the field, at the cause |
+| a mistyped runner name | your dispatch's fallback, if it has one | an error listing the known runners — never fabricated data |
+| a mistyped type name or option key | a runtime surprise, or nothing at all | rejected at compile time, or before the turn runs |
+| a `match` missing an enum value | found in production | a compiler warning naming the value |
+
+None of that is clever. It is simply **not optional** — and *not optional* is the one thing a language sells that a library can't.
+
+The notation follows from that decision rather than justifying it: once the agent is a first-class form, `x.method()` spanning a value, a process and an agent is just what the object model already looks like. [`expose`](#agents) is literally the same keyword for an `actor` and an `agent`; the return type is the only difference.
+
+**Why not Gleam,** then, given Jet's own compiler is written in it? Gleam has no macros, by design — so the `agent` form couldn't be a library there even in principle. And a static type can't promise what an LLM returns, nor describe a topology that [`Architect` and `Flow`](#collaboration-shapes--swap-the-topology-keep-the-interface) *generate at runtime*. Jet is dynamically typed on purpose, and pays for it with [targeted checks](#what-the-compiler-checks--without-a-type-system) over the parts that are declared and closed.
 
 ## Agents
 
