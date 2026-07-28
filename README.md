@@ -1,3 +1,5 @@
+**English** | [日本語](README.ja.md)
+
 <img src="https://github.com/i2y/jet/raw/master/jet_logo.png" width="300px"/>
 
 # An agent is a file
