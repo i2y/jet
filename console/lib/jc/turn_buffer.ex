@@ -13,7 +13,8 @@ defmodule Jc.TurnBuffer do
   """
   use GenServer
 
-  def start_link(_), do: GenServer.start_link(__MODULE__, %{sub: nil, bufs: %{}}, name: __MODULE__)
+  def start_link(_),
+    do: GenServer.start_link(__MODULE__, %{sub: nil, bufs: %{}}, name: __MODULE__)
 
   @impl true
   def init(state), do: {:ok, state}

@@ -10,7 +10,8 @@ defmodule Jc.Terminals do
 
   @cap 200_000
 
-  def start_link(_), do: GenServer.start_link(__MODULE__, %{sub: nil, terms: %{}}, name: __MODULE__)
+  def start_link(_),
+    do: GenServer.start_link(__MODULE__, %{sub: nil, terms: %{}}, name: __MODULE__)
 
   @impl true
   def init(state), do: {:ok, state}
@@ -19,7 +20,8 @@ defmodule Jc.Terminals do
   def attach(pid), do: GenServer.call(__MODULE__, {:attach, pid})
 
   @doc "ensure a PTY exists for tid (spawn in cwd at cols×rows if not); returns its scrollback to replay."
-  def ensure(tid, cwd, cols \\ 120, rows \\ 30), do: GenServer.call(__MODULE__, {:ensure, tid, cwd, cols, rows})
+  def ensure(tid, cwd, cols \\ 120, rows \\ 30),
+    do: GenServer.call(__MODULE__, {:ensure, tid, cwd, cols, rows})
 
   def input(tid, data), do: GenServer.cast(__MODULE__, {:input, tid, data})
   def close(tid), do: GenServer.cast(__MODULE__, {:close, tid})
@@ -47,8 +49,10 @@ defmodule Jc.Terminals do
         cmd = "stty cols #{c} rows #{r}; exec #{shell}"
 
         port =
-          Port.open({:spawn_executable, script_bin()},
-            [:binary, :exit_status, {:cd, cwd}, args: script_args(cmd)])
+          Port.open(
+            {:spawn_executable, script_bin()},
+            [:binary, :exit_status, {:cd, cwd}, args: script_args(cmd)]
+          )
 
         {:reply, "", %{s | terms: Map.put(s.terms, tid, %{port: port, buf: ""})}}
     end
@@ -57,8 +61,15 @@ defmodule Jc.Terminals do
   @impl true
   def handle_cast({:input, tid, data}, s) do
     case Map.get(s.terms, tid) do
-      %{port: port} -> try do Port.command(port, data) rescue _ -> :ok end
-      _ -> :ok
+      %{port: port} ->
+        try do
+          Port.command(port, data)
+        rescue
+          _ -> :ok
+        end
+
+      _ ->
+        :ok
     end
 
     {:noreply, s}
@@ -76,8 +87,11 @@ defmodule Jc.Terminals do
         dev = Map.get(t, :dev) || pty_device(port)
 
         if dev do
-          System.cmd("stty", [stty_flag(), dev, "cols", Integer.to_string(cols), "rows", Integer.to_string(rows)],
-            stderr_to_stdout: true)
+          System.cmd(
+            "stty",
+            [stty_flag(), dev, "cols", Integer.to_string(cols), "rows", Integer.to_string(rows)],
+            stderr_to_stdout: true
+          )
         end
 
         {:noreply, %{s | terms: Map.put(s.terms, tid, Map.put(t, :dev, dev))}}
@@ -91,8 +105,15 @@ defmodule Jc.Terminals do
 
   def handle_cast({:close, tid}, s) do
     case Map.get(s.terms, tid) do
-      %{port: port} -> try do Port.close(port) rescue _ -> :ok end
-      _ -> :ok
+      %{port: port} ->
+        try do
+          Port.close(port)
+        rescue
+          _ -> :ok
+        end
+
+      _ ->
+        :ok
     end
 
     {:noreply, %{s | terms: Map.delete(s.terms, tid)}}
@@ -102,7 +123,8 @@ defmodule Jc.Terminals do
   # that pid's controlling tty (e.g. "ttys006" -> /dev/ttys006, or Linux "pts/3" -> /dev/pts/3).
   defp pty_device(port) do
     with {:os_pid, spid} <- :erlang.port_info(port, :os_pid),
-         {child, 0} <- System.cmd("pgrep", ["-P", Integer.to_string(spid)], stderr_to_stdout: true),
+         {child, 0} <-
+           System.cmd("pgrep", ["-P", Integer.to_string(spid)], stderr_to_stdout: true),
          shpid when shpid != "" <- child |> String.split() |> List.first(),
          {tty, 0} <- System.cmd("ps", ["-o", "tty=", "-p", shpid], stderr_to_stdout: true),
          tty = String.trim(tty),
@@ -115,8 +137,10 @@ defmodule Jc.Terminals do
 
   defp stty_flag do
     case :os.type() do
-      {:unix, :darwin} -> "-f"   # BSD stty: operate on the given file/device
-      _ -> "-F"                  # GNU stty (Linux)
+      # BSD stty: operate on the given file/device
+      {:unix, :darwin} -> "-f"
+      # GNU stty (Linux)
+      _ -> "-F"
     end
   end
 

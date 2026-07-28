@@ -10,7 +10,18 @@ defmodule Jc.ThreadStore do
   """
   use GenServer
 
-  @keys [:projects, :threads, :current, :current_project, :last_thread, :next, :next_project, :new_backend, :theme, :traces]
+  @keys [
+    :projects,
+    :threads,
+    :current,
+    :current_project,
+    :last_thread,
+    :next,
+    :next_project,
+    :new_backend,
+    :theme,
+    :traces
+  ]
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
 
@@ -20,7 +31,10 @@ defmodule Jc.ThreadStore do
   @doc "persist the LiveView's assigns (only the thread/project keys are kept)."
   def put(assigns), do: GenServer.cast(__MODULE__, {:put, Map.take(assigns, @keys)})
 
-  defp path, do: System.get_env("JET_CONSOLE_STATE") || Path.join(System.user_home!(), ".jet_console.threads")
+  defp path,
+    do:
+      System.get_env("JET_CONSOLE_STATE") ||
+        Path.join(System.user_home!(), ".jet_console.threads")
 
   @impl true
   def init(_) do

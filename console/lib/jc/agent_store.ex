@@ -8,7 +8,8 @@ defmodule Jc.AgentStore do
   server restart.
   """
 
-  def jet_root, do: System.get_env("JET_ROOT") || :persistent_term.get({:jc, :jet_root}, File.cwd!())
+  def jet_root,
+    do: System.get_env("JET_ROOT") || :persistent_term.get({:jc, :jet_root}, File.cwd!())
 
   @doc "the shipped, editable built-in agents (builtin.jet)."
   def builtin_dir, do: System.get_env("JET_AGENTS_DIR") || Path.join(jet_root(), "console/agents")

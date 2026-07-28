@@ -33,7 +33,10 @@ if config_env() == :prod do
     System.get_env("SECRET_KEY_BASE") ||
       (
         secret_path =
-          Path.join(to_string(:filename.basedir(:user_config, ~c"jet_console")), "secret_key_base")
+          Path.join(
+            to_string(:filename.basedir(:user_config, ~c"jet_console")),
+            "secret_key_base"
+          )
 
         case File.read(secret_path) do
           {:ok, s} when byte_size(s) >= 64 ->

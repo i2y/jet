@@ -39,7 +39,8 @@ defmodule JcWeb.McpController do
       "tools" => [
         %{
           "name" => "approve",
-          "description" => "Permission prompt: approve or deny a tool use, routed to the Jet Console UI.",
+          "description" =>
+            "Permission prompt: approve or deny a tool use, routed to the Jet Console UI.",
           "inputSchema" => %{
             "type" => "object",
             "properties" => %{
@@ -75,7 +76,10 @@ defmodule JcWeb.McpController do
   defp ask(token, tool_name, input) do
     case token && Jc.NativePerm.lookup(token) do
       {:ok, pid} ->
-        send(pid, {:native_permission, %{title: title_for(tool_name, input), kind: tool_name}, self()})
+        send(
+          pid,
+          {:native_permission, %{title: title_for(tool_name, input), kind: tool_name}, self()}
+        )
 
         receive do
           {:native_permission_decision, d} -> d
@@ -89,14 +93,19 @@ defmodule JcWeb.McpController do
   end
 
   defp title_for(tool_name, input) when is_map(input) do
-    hint = input["command"] || input["file_path"] || input["path"] || input["url"] || input["pattern"] || ""
+    hint =
+      input["command"] || input["file_path"] || input["path"] || input["url"] || input["pattern"] ||
+        ""
+
     if hint == "" or not is_binary(hint), do: tool_name, else: "#{tool_name}: #{hint}"
   end
 
   defp title_for(tool_name, _), do: tool_name
 
   defp result(id, r), do: %{"jsonrpc" => "2.0", "id" => id, "result" => r}
-  defp error(id, code, msg), do: %{"jsonrpc" => "2.0", "id" => id, "error" => %{"code" => code, "message" => msg}}
+
+  defp error(id, code, msg),
+    do: %{"jsonrpc" => "2.0", "id" => id, "error" => %{"code" => code, "message" => msg}}
 
   defp put_session_header(conn) do
     sid =

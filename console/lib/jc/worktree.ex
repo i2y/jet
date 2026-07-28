@@ -7,7 +7,8 @@ defmodule Jc.Worktree do
   """
 
   @doc "is `dir` inside a git work tree?"
-  def repo?(dir), do: is_binary(dir) and match?({_, 0}, sys(dir, ["rev-parse", "--is-inside-work-tree"]))
+  def repo?(dir),
+    do: is_binary(dir) and match?({_, 0}, sys(dir, ["rev-parse", "--is-inside-work-tree"]))
 
   @doc "create a worktree + branch for thread `id` off `dir`'s repo -> {:ok, %{path, branch, base}} | {:error, msg}"
   def create(dir, id) do

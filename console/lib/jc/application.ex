@@ -7,7 +7,8 @@ defmodule Jc.Application do
 
   @impl true
   def start(_type, _args) do
-    augment_path()  # so a launched binary finds the user's CLI tools (claude, etc.) — see below
+    # so a launched binary finds the user's CLI tools (claude, etc.) — see below
+    augment_path()
 
     # resolve the Jet repo root ONCE at boot (cwd is the console/ dir then; it changes per-thread
     # later) and cache it. Defaults to the parent of console/ (i.e. the cloned jet repo); override
@@ -15,9 +16,12 @@ defmodule Jc.Application do
     :persistent_term.put({:jc, :jet_root}, System.get_env("JET_ROOT") || Path.expand(".."))
 
     add_jet_code_paths()
-    Jc.Settings.apply_env()      # point jet_settings' env vars at the user's saved config before agents spawn
-    Jc.AgentBuilder.regenerate() # (re)generate custom_agents.jet from saved configs, then load all agents
-    set_mcp_base()               # tell native jet_claude where to point claude's permission MCP tool
+    # point jet_settings' env vars at the user's saved config before agents spawn
+    Jc.Settings.apply_env()
+    # (re)generate custom_agents.jet from saved configs, then load all agents
+    Jc.AgentBuilder.regenerate()
+    # tell native jet_claude where to point claude's permission MCP tool
+    set_mcp_base()
 
     children = [
       JcWeb.Telemetry,
@@ -47,7 +51,8 @@ defmodule Jc.Application do
   defp augment_path do
     sh = System.get_env("SHELL") || "/bin/sh"
 
-    with {out, 0} <- System.cmd(sh, ["-lc", "printf 'JCPATH=%s' \"$PATH\""], stderr_to_stdout: true),
+    with {out, 0} <-
+           System.cmd(sh, ["-lc", "printf 'JCPATH=%s' \"$PATH\""], stderr_to_stdout: true),
          [_, p] <- Regex.run(~r/JCPATH=(.+)/, out) do
       extra = String.split(String.trim(p), ":", trim: true)
       cur = String.split(System.get_env("PATH") || "", ":", trim: true)
