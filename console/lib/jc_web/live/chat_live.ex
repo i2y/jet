@@ -191,51 +191,6 @@ defmodule JcWeb.ChatLive do
     end
   end
 
-  # add `dir` as a new project, make it current, persist.
-  defp add_project(socket, dir) do
-    id = socket.assigns.next_project
-    cd_to(dir)
-
-    commit(
-      assign(socket,
-        projects: Map.put(socket.assigns.projects, id, %{id: id, name: Path.basename(dir), dir: dir}),
-        last_thread: remember_current(socket),
-        current_project: id, next_project: id + 1, current: nil, proj_error: nil))
-  end
-
-  # A GitHub repo reference typed into "new project" -> the arg for `gh repo clone` (a github URL or
-  # the bare owner/repo shorthand), or nil for an ordinary path. The shorthand is exactly one slash
-  # and no leading "/", "~" or "." — so "~/a/b" and "/a/b" stay local directory paths.
-  defp clone_ref(d) do
-    cond do
-      Regex.match?(~r{^(https?://|git@)\S+}, d) and String.contains?(d, "github") -> d
-      # owner/repo: owner starts with an alnum/underscore (so "./x", "../x", "-x/y" stay local paths)
-      Regex.match?(~r{^\w[\w.-]*/[\w.-]+$}, d) -> d
-      true -> nil
-    end
-  end
-
-  defp gh_path, do: System.find_executable("gh")
-
-  # clone in the background (so the UI never freezes) into ~/<repo>, then message the result back.
-  defp start_clone(socket, ref) do
-    base = System.user_home() || Jc.AgentStore.jet_root()
-    name = ref |> String.split(["/", ":"], trim: true) |> List.last() |> String.replace_suffix(".git", "")
-    dest = Path.join(base, name)
-    me = self()
-
-    if File.exists?(dest) do
-      {:noreply, assign(socket, proj_error: "#{dest} already exists — open it as a directory instead")}
-    else
-      Task.start(fn ->
-        res = System.cmd(gh_path() || "gh", ["repo", "clone", ref, dest], stderr_to_stdout: true)
-        send(me, {:clone_done, ref, dest, res})
-      end)
-
-      {:noreply, assign(socket, proj_error: "cloning #{ref} → #{dest} …")}
-    end
-  end
-
   def handle_event("select_project", %{"id" => id}, socket) do
     pid = String.to_integer(id)
     cd_to(socket.assigns.projects[pid][:dir])
@@ -426,32 +381,6 @@ defmodule JcWeb.ChatLive do
   # this when the input mounts with no cached commands. No-op once commands are cached/persisted.
   def handle_event("probe_commands", _p, socket), do: {:noreply, probe_current_commands(socket)}
 
-  # spawn a no-prompt ACP probe for the current thread's backend if its commands aren't cached yet.
-  # Called on thread activation (select/new/switch) AND by the input hook, since the hook's updated()
-  # only fires when data-commands changes (which it doesn't when switching between two empty backends).
-  defp probe_current_commands(socket) do
-    cur = socket.assigns.current
-    t = cur && socket.assigns.threads[cur]
-
-    if t do
-      cached = Map.get(socket.assigns.acp_commands, t.backend)
-      # push THIS thread's backend commands to the hook directly (don't rely on data-commands
-      # re-rendering, which LiveView skips on a thread switch that doesn't touch @acp_commands)
-      socket = push_event(socket, "acp_commands", %{commands: cached || []})
-
-      if cached == nil do
-        cd_to(thread_cwd(t, socket.assigns.projects))
-        t = ensure_agent(t)
-        if t.agent, do: :erlang.spawn(:jet_console, :run_to_tagged, [t.agent, :chat, [:jet_list_commands], self(), cur])
-        assign(socket, threads: Map.put(socket.assigns.threads, cur, t))
-      else
-        socket
-      end
-    else
-      socket
-    end
-  end
-
   # "!cmd" -> run a shell command in this thread's cwd (worktree/project) and show output inline,
   # without involving the agent. Quick one-offs; use the 🖥 terminal for long-running/interactive.
   def handle_event("send", %{"message" => "!" <> cmd}, socket) when cmd != "" do
@@ -513,26 +442,6 @@ defmodule JcWeb.ChatLive do
   # the unified Agents panel (Builder / Backends / Files share one tabbed modal)
   def handle_event("close_agents_panel", _p, socket),
     do: {:noreply, assign(socket, editing: nil, settings: nil, builder: nil)}
-
-  # the shared tab strip atop the Agents panel (each tab opens its section; opens are exclusive)
-  defp agents_tabbar(assigns) do
-    ~H"""
-    <div style="display:flex;align-items:center;gap:.15rem;padding:.45rem .6rem;border-bottom:1px solid var(--bd);background:var(--panel);flex-shrink:0">
-      <button type="button" phx-click="open_builder" style={agents_tab_style(@active == :builder)}>🤖 Builder</button>
-      <button type="button" phx-click="open_settings" style={agents_tab_style(@active == :backends)}>🔌 Backends</button>
-      <button type="button" phx-click="open_agents" style={agents_tab_style(@active == :files)}>✎ Agent files</button>
-      <span style="margin-left:auto"></span>
-      <button type="button" phx-click="close_agents_panel" title="Close" style="border:0;background:none;cursor:pointer;color:var(--mut);font-size:1.05rem;padding:.1rem .5rem">✕</button>
-    </div>
-    """
-  end
-
-  defp agents_tab_style(active) do
-    base = "border:0;border-radius:.4rem .4rem 0 0;cursor:pointer;padding:.4rem .9rem;font-size:.85rem;"
-    if active,
-      do: base <> "background:var(--card);color:var(--tx);font-weight:600",
-      else: base <> "background:none;color:var(--mut)"
-  end
 
   def handle_event("edit_file", %{"file" => file}, socket),
     do: {:noreply, assign(socket, editing: load_editing(file))}
@@ -615,19 +524,6 @@ defmodule JcWeb.ChatLive do
     {:noreply, assign(socket, settings: %{s | saved: "✓ Saved — new threads (or re-pick the agent) use these."})}
   end
 
-  defp settings_state(saved) do
-    form = Map.merge(Jc.Settings.defaults(), Map.take(saved, Jc.Settings.keys()))
-
-    %{
-      form: form,
-      ollama: Jc.Settings.ollama_models(form["ollama_url"]),
-      acp: Jc.Settings.acp_path(form["coding_drive"]),
-      saved: nil
-    }
-  end
-
-  defp merge_form(form, params), do: Map.merge(form, Map.take(params, Jc.Settings.keys()))
-
   # --- no-code agent builder ------------------------------------------------
   def handle_event("open_builder", _p, socket),
     do: {:noreply, assign(socket, builder: %{list: Jc.AgentBuilder.load(), form: nil, saved: nil, error: nil}, editing: nil, settings: nil)}
@@ -676,107 +572,6 @@ defmodule JcWeb.ChatLive do
     {:noreply, assign(socket, builder: %{socket.assigns.builder | list: list, form: nil, saved: "✓ Deleted.", error: nil})}
   end
 
-  def handle_info(:refresh_catalog, socket), do: {:noreply, assign(socket, agents: AgentStore.catalog())}
-
-  # a background `gh repo clone` finished: open the clone on success, else show gh's error
-  def handle_info({:clone_done, _ref, dest, {_out, 0}}, socket), do: add_project(socket, dest)
-
-  def handle_info({:clone_done, ref, _dest, {out, _code}}, socket),
-    do: {:noreply, assign(socket, proj_error: "gh clone #{ref} failed: #{String.trim(String.slice(to_string(out), 0, 300))}")}
-
-  defp new_agent_form do
-    %{"key" => "", "label" => "", "type" => "simple", "backend" => "drives",
-      "drives" => "claude-code-acp", "model" => "",
-      "role" => "You are a helpful assistant.", "tool_fuel" => "12", "tools" => [],
-      "runner" => "Goal", "via" => "Architect", "accept" => "", "max_rounds" => "3",
-      "surface" => false, "members_text" => "", "rmodels_text" => "",
-      "router" => "", "checker" => ""}
-  end
-
-  defp form_of_cfg(cfg) do
-    new_agent_form()
-    |> Map.merge(Map.take(cfg, ~w(key label type backend drives model role runner via accept router checker)))
-    |> Map.put("tool_fuel", to_string(cfg["tool_fuel"] || "12"))
-    |> Map.put("max_rounds", to_string(cfg["max_rounds"] || "3"))
-    |> Map.put("surface", cfg["surface"] == true)
-    |> Map.put("tools", cfg["tools"] || [])
-    |> Map.put("members_text", members_to_text(cfg["members"] || []))
-    |> Map.put("rmodels_text", rmodels_to_text(cfg["rmodels"] || []))
-  end
-
-  defp norm_agent_form(params) do
-    params
-    |> Map.put_new("tools", [])
-    |> Map.update("surface", false, &(&1 in ["true", "on", true]))
-  end
-
-  defp cfg_of_form(form) do
-    key = String.trim(form["key"] || "")
-
-    cond do
-      key == "" ->
-        {:error, "Key is required."}
-
-      not Regex.match?(~r/^[a-z][a-z0-9_]*$/, key) ->
-        {:error, "Key must be lowercase letters/digits/underscore, starting with a letter."}
-
-      true ->
-        {:ok,
-         %{
-           "key" => key, "label" => nonblank(form["label"]) || key, "type" => form["type"],
-           "backend" => form["backend"], "model" => form["model"], "drives" => form["drives"],
-           "role" => form["role"], "tool_fuel" => int_or(form["tool_fuel"], 12),
-           "tools" => form["tools"] || [], "runner" => form["runner"], "via" => form["via"],
-           "accept" => form["accept"], "max_rounds" => int_or(form["max_rounds"], 3),
-           "surface" => form["surface"] == true,
-           "members" => parse_members(form["members_text"]),
-           "rmodels" => parse_rmodels(form["rmodels_text"]),
-           "router" => form["router"], "checker" => form["checker"]
-         }}
-    end
-  end
-
-  defp members_to_text(list), do: Enum.map_join(list, "\n", fn m -> "#{m["name"]}: #{m["role"]}" end)
-
-  defp parse_members(text) do
-    (text || "")
-    |> String.split("\n", trim: true)
-    |> Enum.with_index(1)
-    |> Enum.map(fn {line, i} ->
-      case String.split(line, ":", parts: 2) do
-        [name, role] -> %{"name" => String.trim(name), "role" => String.trim(role)}
-        [role] -> %{"name" => "Member#{i}", "role" => String.trim(role)}
-      end
-    end)
-  end
-
-  defp rmodels_to_text(list),
-    do: Enum.map_join(list, "\n", fn m -> [m["name"], m["tier"], m["lang"], m["good_at"]] |> Enum.map(&(&1 || "")) |> Enum.join(" | ") end)
-
-  defp parse_rmodels(text) do
-    (text || "")
-    |> String.split("\n", trim: true)
-    |> Enum.map(fn line ->
-      [name, tier, lang, good] = (String.split(line, "|") ++ ["", "", "", ""]) |> Enum.take(4) |> Enum.map(&String.trim/1)
-      %{"name" => name, "tier" => tier, "lang" => lang, "good_at" => good}
-    end)
-    |> Enum.reject(&(&1["name"] == ""))
-  end
-
-  defp nonblank(v) when is_binary(v), do: if(String.trim(v) == "", do: nil, else: String.trim(v))
-  defp nonblank(_), do: nil
-  defp int_or(v, _d) when is_integer(v), do: v
-  defp int_or(v, d) when is_binary(v) do
-    case Integer.parse(v) do
-      {i, _} -> i
-      _ -> d
-    end
-  end
-  defp int_or(_, d), do: d
-
-  defp inp,
-    do: "width:100%;margin-top:.15rem;padding:.3rem .45rem;border:1px solid var(--bd2);border-radius:.3rem;background:var(--panel);color:var(--tx);font-size:.82rem;font-family:ui-monospace,monospace"
-
   def handle_event("files_cd", %{"dir" => d}, socket) do
     f = socket.assigns.files
     target = Path.expand(d)
@@ -812,26 +607,6 @@ defmodule JcWeb.ChatLive do
 
     {:noreply, assign(socket, files: files)}
   end
-
-  # classify a file so we never render binary bytes as text (which crashes the render)
-  defp file_kind(ext, content) do
-    cond do
-      ext in ~w(.png .jpg .jpeg .gif .svg .webp .ico .bmp .avif) -> :image
-      not String.valid?(content) -> :binary
-      true -> :text
-    end
-  end
-
-  @image_mimes %{".png" => "image/png", ".jpg" => "image/jpeg", ".jpeg" => "image/jpeg",
-                 ".gif" => "image/gif", ".svg" => "image/svg+xml", ".webp" => "image/webp",
-                 ".ico" => "image/x-icon", ".bmp" => "image/bmp", ".avif" => "image/avif"}
-
-  defp image_data_uri(ext, content),
-    do: "data:" <> Map.get(@image_mimes, ext, "application/octet-stream") <> ";base64," <> Base.encode64(content)
-
-  defp human_size(b) when b >= 1_000_000, do: "#{Float.round(b / 1_000_000, 1)} MB"
-  defp human_size(b) when b >= 1_000, do: "#{div(b, 1000)} KB"
-  defp human_size(b), do: "#{b} B"
 
   def handle_event("toggle_file_mode", _p, socket) do
     f = socket.assigns.files
@@ -878,25 +653,6 @@ defmodule JcWeb.ChatLive do
   def handle_event("show_structure", _p, socket),
     do: {:noreply, assign(probe_structure(socket), dock_tab: :structure)}
 
-  defp probe_structure(socket) do
-    cur = socket.assigns.current
-    t = cur && socket.assigns.threads[cur]
-
-    if t do
-      cd_to(thread_cwd(t, socket.assigns.projects))
-      t = ensure_agent(t)
-      if t.agent, do: :erlang.spawn(:jet_console, :run_to_tagged, [t.agent, :chat, [:jet_describe], self(), cur])
-      assign(socket, structure: :loading, threads: Map.put(socket.assigns.threads, cur, t))
-    else
-      socket
-    end
-  end
-
-  # re-probe the structure for the now-current thread, but only if the panel is already open
-  defp maybe_reprobe_structure(socket) do
-    if socket.assigns.structure, do: probe_structure(socket), else: socket
-  end
-
   def handle_event("close_structure", _p, socket), do: {:noreply, assign(socket, structure: nil)}
 
   def handle_event("close_terminal", _p, socket) do
@@ -932,81 +688,13 @@ defmodule JcWeb.ChatLive do
     {:noreply, socket}
   end
 
-  # the file tree's root: the current thread's worktree (if isolated) or its project folder.
-  defp files_root(socket) do
-    t = socket.assigns.current && socket.assigns.threads[socket.assigns.current]
-    (t && thread_cwd(t, socket.assigns.projects)) || File.cwd!()
-  end
+  def handle_info(:refresh_catalog, socket), do: {:noreply, assign(socket, agents: AgentStore.catalog())}
 
-  defp files_at(root, dir) do
-    entries =
-      case File.ls(dir) do
-        {:ok, names} ->
-          names
-          |> Enum.reject(&String.starts_with?(&1, "."))
-          |> Enum.map(fn n -> %{name: n, dir?: File.dir?(Path.join(dir, n))} end)
-          |> Enum.sort_by(fn e -> {not e.dir?, String.downcase(e.name)} end)
+  # a background `gh repo clone` finished: open the clone on success, else show gh's error
+  def handle_info({:clone_done, _ref, dest, {_out, 0}}, socket), do: add_project(socket, dest)
 
-        _ -> []
-      end
-
-    %{root: root, dir: dir, entries: entries, file: nil, content: "", ext: "", kind: :text, size: 0, mode: :source, gen: 0, saved: nil}
-  end
-
-  defp ctx_open(socket) do
-    dir = project_dir(socket.assigns.projects, socket.assigns.current_project) || File.cwd!()
-    cd_to(dir)
-    files = for f <- ["AGENTS.md", "CLAUDE.md", "README.md"], File.exists?(Path.join(dir, f)), do: %{id: f, label: f, kind: :file, desc: ""}
-    skills = for {name, desc} <- ctx_skills(), do: %{id: "skill:" <> name, label: name, kind: :skill, name: name, desc: desc}
-    ctx = %{dir: dir, items: files ++ skills, current: nil, content: ""}
-
-    case ctx.items do
-      [first | _] -> ctx_load(%{ctx | current: first.id})
-      [] -> ctx
-    end
-  end
-
-  defp ctx_skills do
-    try do
-      :jet_skills.catalog([]) |> Enum.map(fn {id, desc} -> {to_s(id), to_s(desc)} end)
-    rescue
-      _ -> []
-    end
-  end
-
-  defp ctx_load(ctx) do
-    content =
-      case Enum.find(ctx.items, &(&1.id == ctx.current)) do
-        %{kind: :file, id: name} ->
-          case File.read(Path.join(ctx.dir, name)) do
-            {:ok, c} -> c
-            _ -> ""
-          end
-
-        %{kind: :skill, name: name} ->
-          cd_to(ctx.dir)
-          try do
-            to_s(:jet_skills.body([], name))
-          rescue
-            _ -> "(could not load skill)"
-          end
-
-        _ -> ""
-      end
-
-    %{ctx | content: content}
-  end
-
-  defp load_editing(nil), do: %{file: nil, content: "", error: nil, saved: nil, files: AgentStore.files()}
-
-  defp load_editing(file) do
-    content = case AgentStore.read(file) do
-      {:ok, c} -> c
-      _ -> ""
-    end
-
-    %{file: file, content: content, error: nil, saved: nil, files: AgentStore.files()}
-  end
+  def handle_info({:clone_done, ref, _dest, {out, _code}}, socket),
+    do: {:noreply, assign(socket, proj_error: "gh clone #{ref} failed: #{String.trim(String.slice(to_string(out), 0, 300))}")}
 
   # --- stream events ------------------------------------------------------
   @impl true
@@ -1114,6 +802,318 @@ defmodule JcWeb.ChatLive do
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  # add `dir` as a new project, make it current, persist.
+  defp add_project(socket, dir) do
+    id = socket.assigns.next_project
+    cd_to(dir)
+
+    commit(
+      assign(socket,
+        projects: Map.put(socket.assigns.projects, id, %{id: id, name: Path.basename(dir), dir: dir}),
+        last_thread: remember_current(socket),
+        current_project: id, next_project: id + 1, current: nil, proj_error: nil))
+  end
+
+  # A GitHub repo reference typed into "new project" -> the arg for `gh repo clone` (a github URL or
+  # the bare owner/repo shorthand), or nil for an ordinary path. The shorthand is exactly one slash
+  # and no leading "/", "~" or "." — so "~/a/b" and "/a/b" stay local directory paths.
+  defp clone_ref(d) do
+    cond do
+      Regex.match?(~r{^(https?://|git@)\S+}, d) and String.contains?(d, "github") -> d
+      # owner/repo: owner starts with an alnum/underscore (so "./x", "../x", "-x/y" stay local paths)
+      Regex.match?(~r{^\w[\w.-]*/[\w.-]+$}, d) -> d
+      true -> nil
+    end
+  end
+
+  defp gh_path, do: System.find_executable("gh")
+
+  # clone in the background (so the UI never freezes) into ~/<repo>, then message the result back.
+  defp start_clone(socket, ref) do
+    base = System.user_home() || Jc.AgentStore.jet_root()
+    name = ref |> String.split(["/", ":"], trim: true) |> List.last() |> String.replace_suffix(".git", "")
+    dest = Path.join(base, name)
+    me = self()
+
+    if File.exists?(dest) do
+      {:noreply, assign(socket, proj_error: "#{dest} already exists — open it as a directory instead")}
+    else
+      Task.start(fn ->
+        res = System.cmd(gh_path() || "gh", ["repo", "clone", ref, dest], stderr_to_stdout: true)
+        send(me, {:clone_done, ref, dest, res})
+      end)
+
+      {:noreply, assign(socket, proj_error: "cloning #{ref} → #{dest} …")}
+    end
+  end
+
+  # spawn a no-prompt ACP probe for the current thread's backend if its commands aren't cached yet.
+  # Called on thread activation (select/new/switch) AND by the input hook, since the hook's updated()
+  # only fires when data-commands changes (which it doesn't when switching between two empty backends).
+  defp probe_current_commands(socket) do
+    cur = socket.assigns.current
+    t = cur && socket.assigns.threads[cur]
+
+    if t do
+      cached = Map.get(socket.assigns.acp_commands, t.backend)
+      # push THIS thread's backend commands to the hook directly (don't rely on data-commands
+      # re-rendering, which LiveView skips on a thread switch that doesn't touch @acp_commands)
+      socket = push_event(socket, "acp_commands", %{commands: cached || []})
+
+      if cached == nil do
+        cd_to(thread_cwd(t, socket.assigns.projects))
+        t = ensure_agent(t)
+        if t.agent, do: :erlang.spawn(:jet_console, :run_to_tagged, [t.agent, :chat, [:jet_list_commands], self(), cur])
+        assign(socket, threads: Map.put(socket.assigns.threads, cur, t))
+      else
+        socket
+      end
+    else
+      socket
+    end
+  end
+
+  # the shared tab strip atop the Agents panel (each tab opens its section; opens are exclusive)
+  defp agents_tabbar(assigns) do
+    ~H"""
+    <div style="display:flex;align-items:center;gap:.15rem;padding:.45rem .6rem;border-bottom:1px solid var(--bd);background:var(--panel);flex-shrink:0">
+      <button type="button" phx-click="open_builder" style={agents_tab_style(@active == :builder)}>🤖 Builder</button>
+      <button type="button" phx-click="open_settings" style={agents_tab_style(@active == :backends)}>🔌 Backends</button>
+      <button type="button" phx-click="open_agents" style={agents_tab_style(@active == :files)}>✎ Agent files</button>
+      <span style="margin-left:auto"></span>
+      <button type="button" phx-click="close_agents_panel" title="Close" style="border:0;background:none;cursor:pointer;color:var(--mut);font-size:1.05rem;padding:.1rem .5rem">✕</button>
+    </div>
+    """
+  end
+
+  defp agents_tab_style(active) do
+    base = "border:0;border-radius:.4rem .4rem 0 0;cursor:pointer;padding:.4rem .9rem;font-size:.85rem;"
+    if active,
+      do: base <> "background:var(--card);color:var(--tx);font-weight:600",
+      else: base <> "background:none;color:var(--mut)"
+  end
+
+  defp settings_state(saved) do
+    form = Map.merge(Jc.Settings.defaults(), Map.take(saved, Jc.Settings.keys()))
+
+    %{
+      form: form,
+      ollama: Jc.Settings.ollama_models(form["ollama_url"]),
+      acp: Jc.Settings.acp_path(form["coding_drive"]),
+      saved: nil
+    }
+  end
+
+  defp merge_form(form, params), do: Map.merge(form, Map.take(params, Jc.Settings.keys()))
+
+  defp new_agent_form do
+    %{"key" => "", "label" => "", "type" => "simple", "backend" => "drives",
+      "drives" => "claude-code-acp", "model" => "",
+      "role" => "You are a helpful assistant.", "tool_fuel" => "12", "tools" => [],
+      "runner" => "Goal", "via" => "Architect", "accept" => "", "max_rounds" => "3",
+      "surface" => false, "members_text" => "", "rmodels_text" => "",
+      "router" => "", "checker" => ""}
+  end
+
+  defp form_of_cfg(cfg) do
+    new_agent_form()
+    |> Map.merge(Map.take(cfg, ~w(key label type backend drives model role runner via accept router checker)))
+    |> Map.put("tool_fuel", to_string(cfg["tool_fuel"] || "12"))
+    |> Map.put("max_rounds", to_string(cfg["max_rounds"] || "3"))
+    |> Map.put("surface", cfg["surface"] == true)
+    |> Map.put("tools", cfg["tools"] || [])
+    |> Map.put("members_text", members_to_text(cfg["members"] || []))
+    |> Map.put("rmodels_text", rmodels_to_text(cfg["rmodels"] || []))
+  end
+
+  defp norm_agent_form(params) do
+    params
+    |> Map.put_new("tools", [])
+    |> Map.update("surface", false, &(&1 in ["true", "on", true]))
+  end
+
+  defp cfg_of_form(form) do
+    key = String.trim(form["key"] || "")
+
+    cond do
+      key == "" ->
+        {:error, "Key is required."}
+
+      not Regex.match?(~r/^[a-z][a-z0-9_]*$/, key) ->
+        {:error, "Key must be lowercase letters/digits/underscore, starting with a letter."}
+
+      true ->
+        {:ok,
+         %{
+           "key" => key, "label" => nonblank(form["label"]) || key, "type" => form["type"],
+           "backend" => form["backend"], "model" => form["model"], "drives" => form["drives"],
+           "role" => form["role"], "tool_fuel" => int_or(form["tool_fuel"], 12),
+           "tools" => form["tools"] || [], "runner" => form["runner"], "via" => form["via"],
+           "accept" => form["accept"], "max_rounds" => int_or(form["max_rounds"], 3),
+           "surface" => form["surface"] == true,
+           "members" => parse_members(form["members_text"]),
+           "rmodels" => parse_rmodels(form["rmodels_text"]),
+           "router" => form["router"], "checker" => form["checker"]
+         }}
+    end
+  end
+
+  defp members_to_text(list), do: Enum.map_join(list, "\n", fn m -> "#{m["name"]}: #{m["role"]}" end)
+
+  defp parse_members(text) do
+    (text || "")
+    |> String.split("\n", trim: true)
+    |> Enum.with_index(1)
+    |> Enum.map(fn {line, i} ->
+      case String.split(line, ":", parts: 2) do
+        [name, role] -> %{"name" => String.trim(name), "role" => String.trim(role)}
+        [role] -> %{"name" => "Member#{i}", "role" => String.trim(role)}
+      end
+    end)
+  end
+
+  defp rmodels_to_text(list),
+    do: Enum.map_join(list, "\n", fn m -> [m["name"], m["tier"], m["lang"], m["good_at"]] |> Enum.map(&(&1 || "")) |> Enum.join(" | ") end)
+
+  defp parse_rmodels(text) do
+    (text || "")
+    |> String.split("\n", trim: true)
+    |> Enum.map(fn line ->
+      [name, tier, lang, good] = (String.split(line, "|") ++ ["", "", "", ""]) |> Enum.take(4) |> Enum.map(&String.trim/1)
+      %{"name" => name, "tier" => tier, "lang" => lang, "good_at" => good}
+    end)
+    |> Enum.reject(&(&1["name"] == ""))
+  end
+
+  defp nonblank(v) when is_binary(v), do: if(String.trim(v) == "", do: nil, else: String.trim(v))
+  defp nonblank(_), do: nil
+  defp int_or(v, _d) when is_integer(v), do: v
+  defp int_or(v, d) when is_binary(v) do
+    case Integer.parse(v) do
+      {i, _} -> i
+      _ -> d
+    end
+  end
+  defp int_or(_, d), do: d
+
+  defp inp,
+    do: "width:100%;margin-top:.15rem;padding:.3rem .45rem;border:1px solid var(--bd2);border-radius:.3rem;background:var(--panel);color:var(--tx);font-size:.82rem;font-family:ui-monospace,monospace"
+
+  # classify a file so we never render binary bytes as text (which crashes the render)
+  defp file_kind(ext, content) do
+    cond do
+      ext in ~w(.png .jpg .jpeg .gif .svg .webp .ico .bmp .avif) -> :image
+      not String.valid?(content) -> :binary
+      true -> :text
+    end
+  end
+
+  @image_mimes %{".png" => "image/png", ".jpg" => "image/jpeg", ".jpeg" => "image/jpeg",
+                 ".gif" => "image/gif", ".svg" => "image/svg+xml", ".webp" => "image/webp",
+                 ".ico" => "image/x-icon", ".bmp" => "image/bmp", ".avif" => "image/avif"}
+
+  defp image_data_uri(ext, content),
+    do: "data:" <> Map.get(@image_mimes, ext, "application/octet-stream") <> ";base64," <> Base.encode64(content)
+
+  defp human_size(b) when b >= 1_000_000, do: "#{Float.round(b / 1_000_000, 1)} MB"
+  defp human_size(b) when b >= 1_000, do: "#{div(b, 1000)} KB"
+  defp human_size(b), do: "#{b} B"
+
+  defp probe_structure(socket) do
+    cur = socket.assigns.current
+    t = cur && socket.assigns.threads[cur]
+
+    if t do
+      cd_to(thread_cwd(t, socket.assigns.projects))
+      t = ensure_agent(t)
+      if t.agent, do: :erlang.spawn(:jet_console, :run_to_tagged, [t.agent, :chat, [:jet_describe], self(), cur])
+      assign(socket, structure: :loading, threads: Map.put(socket.assigns.threads, cur, t))
+    else
+      socket
+    end
+  end
+
+  # re-probe the structure for the now-current thread, but only if the panel is already open
+  defp maybe_reprobe_structure(socket) do
+    if socket.assigns.structure, do: probe_structure(socket), else: socket
+  end
+
+  # the file tree's root: the current thread's worktree (if isolated) or its project folder.
+  defp files_root(socket) do
+    t = socket.assigns.current && socket.assigns.threads[socket.assigns.current]
+    (t && thread_cwd(t, socket.assigns.projects)) || File.cwd!()
+  end
+
+  defp files_at(root, dir) do
+    entries =
+      case File.ls(dir) do
+        {:ok, names} ->
+          names
+          |> Enum.reject(&String.starts_with?(&1, "."))
+          |> Enum.map(fn n -> %{name: n, dir?: File.dir?(Path.join(dir, n))} end)
+          |> Enum.sort_by(fn e -> {not e.dir?, String.downcase(e.name)} end)
+
+        _ -> []
+      end
+
+    %{root: root, dir: dir, entries: entries, file: nil, content: "", ext: "", kind: :text, size: 0, mode: :source, gen: 0, saved: nil}
+  end
+
+  defp ctx_open(socket) do
+    dir = project_dir(socket.assigns.projects, socket.assigns.current_project) || File.cwd!()
+    cd_to(dir)
+    files = for f <- ["AGENTS.md", "CLAUDE.md", "README.md"], File.exists?(Path.join(dir, f)), do: %{id: f, label: f, kind: :file, desc: ""}
+    skills = for {name, desc} <- ctx_skills(), do: %{id: "skill:" <> name, label: name, kind: :skill, name: name, desc: desc}
+    ctx = %{dir: dir, items: files ++ skills, current: nil, content: ""}
+
+    case ctx.items do
+      [first | _] -> ctx_load(%{ctx | current: first.id})
+      [] -> ctx
+    end
+  end
+
+  defp ctx_skills do
+    try do
+      :jet_skills.catalog([]) |> Enum.map(fn {id, desc} -> {to_s(id), to_s(desc)} end)
+    rescue
+      _ -> []
+    end
+  end
+
+  defp ctx_load(ctx) do
+    content =
+      case Enum.find(ctx.items, &(&1.id == ctx.current)) do
+        %{kind: :file, id: name} ->
+          case File.read(Path.join(ctx.dir, name)) do
+            {:ok, c} -> c
+            _ -> ""
+          end
+
+        %{kind: :skill, name: name} ->
+          cd_to(ctx.dir)
+          try do
+            to_s(:jet_skills.body([], name))
+          rescue
+            _ -> "(could not load skill)"
+          end
+
+        _ -> ""
+      end
+
+    %{ctx | content: content}
+  end
+
+  defp load_editing(nil), do: %{file: nil, content: "", error: nil, saved: nil, files: AgentStore.files()}
+
+  defp load_editing(file) do
+    content = case AgentStore.read(file) do
+      {:ok, c} -> c
+      _ -> ""
+    end
+
+    %{file: file, content: content, error: nil, saved: nil, files: AgentStore.files()}
+  end
 
   defp update_thread(socket, tid, fun) do
     case socket.assigns.threads[tid] do
