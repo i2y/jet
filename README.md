@@ -437,11 +437,22 @@ isolate a thread in its own git worktree.
 
 ![Jet Console — a Forge agent on the native Claude CLI driving a Pipeline team, with the live plan + tool-activity panel on the right, a markdown conversation, and a clean project/thread sidebar](docs/img/console-hero.png)
 
+**No install.** A self-contained binary for each OS is committed in the repo — ERTS, the app and
+the Jet stdlib bundled by [Burrito](https://github.com/burrito-elixir/burrito). No Elixir, no
+Erlang, no Node, and no environment variables: it generates and persists its own secret on first
+run.
+
+```sh
+./console/burrito_out/jc_macos start     # jc_linux · jc_windows.exe → http://localhost:4000
+```
+
+Or from source, if you have Elixir:
+
 ```sh
 cd console && mix setup && mix phx.server   # → http://localhost:4000
 ```
 
-More screenshots — the [parallel-threads board, the no-code agent builder, the file viewer, and the terminal](console/README.md#screenshots).
+More screenshots — the [parallel-threads board, the no-code agent builder, the file viewer, and the terminal](console/README.md#screenshots). Building the binaries yourself: [`console/README.md`](console/README.md#single-binary-per-os-burrito).
 
 ## Language Features
 

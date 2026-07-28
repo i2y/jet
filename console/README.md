@@ -190,9 +190,13 @@ The manual steps the script automates:
    ```
 3. Run the binary (self-extracts on first run; nothing else needed):
    ```sh
-   SECRET_KEY_BASE=$(openssl rand -base64 48) PHX_SERVER=true PORT=4000 PHX_HOST=localhost \
-     ./burrito_out/jc_macos start
+   ./burrito_out/jc_macos start
    ```
+   No environment variables: `config/runtime.exs` generates and persists a
+   `SECRET_KEY_BASE` under the user config dir when one isn't set, so a
+   distributable binary launches on a bare machine. An explicit
+   `SECRET_KEY_BASE` (a shared or hosted deploy) still wins, and
+   `JET_CONSOLE_BIND_ALL=1` / `PORT=…` are there when you want them.
 
 Verified: a **~17 MB** `jc_macos` Mach-O arm64 binary (v0.4.0) that boots and serves the **full**
 console standalone — the cleaned agent catalog, file viewer, terminal, highlight + mermaid all
