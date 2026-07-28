@@ -3,6 +3,10 @@ defmodule JcWeb.ChatLive do
   use JcWeb, :live_view
   alias Jc.AgentStore
 
+  # jet_console / jet_skills are compiled from src/*.jet to .beam and loaded from a runtime
+  # code path, so they are legitimately absent when THIS module is compiled.
+  @compile {:no_warn_undefined, [:jet_console, :jet_skills]}
+
   @impl true
   def mount(_params, _session, socket) do
     conn = connected?(socket)
@@ -1171,15 +1175,8 @@ defmodule JcWeb.ChatLive do
     end
   end
 
-  defp apply_event(blocks, {:tool_call, info}) when is_map(info) do
-    id = to_s(Map.get(info, :id) || Map.get(info, :title) || "tool")
-    status = to_s(Map.get(info, :status) || "…")
-
-    case Enum.find_index(blocks, &(&1.type == :tool and &1.id == id)) do
-      nil -> blocks ++ [%{type: :tool, id: id, status: status}]
-      idx -> List.replace_at(blocks, idx, %{type: :tool, id: id, status: status})
-    end
-  end
+  # NB: no {:tool_call, …} clause -- handle_info/2 intercepts those above and folds them into the
+  # trace tree instead, so a tool call is never a conversation block.
 
   defp apply_event(blocks, {:plan, items}) when is_list(items) do
     plan = %{type: :plan, items: Enum.map(items, &plan_item/1)}
@@ -1472,14 +1469,6 @@ defmodule JcWeb.ChatLive do
     end
   end
 
-  defp dot(s) do
-    cond do
-      String.contains?(s, "complet") -> "#22a06b"
-      String.contains?(s, "fail") -> "#d04437"
-      true -> "#d9a23b"
-    end
-  end
-
   defp plan_items(nil), do: []
   defp plan_items(p), do: p.items
   defp by_id(map), do: map |> Map.values() |> Enum.sort_by(& &1.id)
@@ -1531,7 +1520,6 @@ defmodule JcWeb.ChatLive do
     <% proj = @projects[@current_project] %>
     <% blocks = (cur && cur.blocks) || [] %>
     <% conv = Enum.filter(blocks, &(&1.type in [:user, :agent, :thought, :thinking, :marker, :edit, :shell])) %>
-    <% tools = Enum.filter(blocks, &(&1.type == :tool)) %>
     <% plan = Enum.find(blocks, &(&1.type == :plan)) %>
     <div class={if @theme == :dark, do: "jc dark", else: "jc"} style="display:flex;height:100vh;font-family:ui-sans-serif,system-ui;color:var(--tx);background:var(--bg);font-size:14px">
     <style>
@@ -1590,8 +1578,7 @@ defmodule JcWeb.ChatLive do
               </form>
             <% else %>
               <button phx-click="select" phx-value-id={t.id}
-                style={"flex:1;min-width:0;text-align:left;border:0;border-radius:.4rem;padding:.4rem .55rem;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#{if t.id == @current, do: "var(--sel)", else: "transparent"}"}>
-<span title={to_string(thread_status(t))} style={"display:inline-block;width:.5rem;height:.5rem;border-radius:50%;margin-right:.45rem;vertical-align:middle;flex-shrink:0;#{status_dot_style(thread_status(t))}"}></span><%= t.title %></button>
+                style={"flex:1;min-width:0;text-align:left;border:0;border-radius:.4rem;padding:.4rem .55rem;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#{if t.id == @current, do: "var(--sel)", else: "transparent"}"}><span title={to_string(thread_status(t))} style={"display:inline-block;width:.5rem;height:.5rem;border-radius:50%;margin-right:.45rem;vertical-align:middle;flex-shrink:0;#{status_dot_style(thread_status(t))}"}></span><%= t.title %></button>
               <button phx-click="rename_start" phx-value-id={t.id} title="Rename" style="border:0;background:none;cursor:pointer;color:var(--mut);padding:.1rem .2rem">✎</button>
               <button phx-click="del_thread" phx-value-id={t.id} data-confirm="Delete this thread?" title="Delete" style="border:0;background:none;cursor:pointer;color:#c66;padding:.1rem .25rem">×</button>
             <% end %>
@@ -1669,7 +1656,7 @@ defmodule JcWeb.ChatLive do
         <%!-- the message input hugs the conversation; the terminal/structure dock sits BELOW it --%>
         <form :if={cur} phx-submit="send" style="display:flex;gap:.5rem;align-items:flex-end;padding:.6rem 1rem;border-top:1px solid var(--bd)">
           <textarea name="message" id="agent-msg" phx-hook="SlashMenu" data-commands={Jason.encode!(Map.get(@acp_commands, cur[:backend], []))} placeholder="Ask the agent…  (type / for commands · Shift+Enter for newline)" autocomplete="off" rows="1" style="flex:1;box-sizing:border-box;padding:.5rem .7rem;border:1px solid var(--bd2);border-radius:.5rem;resize:none;font-family:inherit;font-size:inherit;line-height:1.4;max-height:160px;overflow-y:auto"></textarea>
-          <button type="submit" disabled={cur && cur.running} style="padding:.5rem 1rem;border:0;border-radius:.5rem;background:#0b66c3;color:#fff">Send</button>
+          <button type="submit" disabled={cur.running} style="padding:.5rem 1rem;border:0;border-radius:.5rem;background:#0b66c3;color:#fff">Send</button>
         </form>
         <%!-- bottom dock: resizable (drag the top edge), tabbed when terminal + structure both open --%>
         <div :if={Map.has_key?(@terminals, @current) || @structure} id="dock" phx-hook="DockResize" style="flex-shrink:0;display:flex;flex-direction:column;border-top:1px solid var(--bd2);height:var(--dock-h,20rem);min-height:120px">
