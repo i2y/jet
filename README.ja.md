@@ -56,7 +56,7 @@ LLM の `Fleet` runner も同じことをします。
 
 実行可能な例は [`examples/pitch.jet`](examples/pitch.jet)（1つ目の GIF）、[`examples/fleet.jet`](examples/fleet.jet)（フリート）、[`examples/fleet_dist.jet`](examples/fleet_dist.jet)（2ノード、自己修復）です。
 
-これらを[エディタから動かす](#エディタの中のエージェントacp-経由)方法と、[Jet Console](#web-ui-で動かすjet-console) については後述します。
+同じフリートが、[エディタの中](#エディタの中のエージェントacp-経由)でも [Jet Console](#web-ui-で動かすjet-console) でもそのまま動きます。
 
 ## `object = actor = agent`
 
@@ -94,7 +94,7 @@ protocol は第1引数でディスパッチするので、struct と PID を同�
 マクロはコンパイル時に走るので、警告すら出せます。
 以下の機能のほぼ全てはライブラリで表現可能で、欠けている `x.method()` は記法であって能力ではありません。
 
-ライブラリにできないのは、**あなたを止めること**です。
+ライブラリにできないのは、**書き手を止めること**です。
 
 ライブラリでは、あらゆる安全装置は「呼べば効く関数」であり、下位のプリミティブは常に1キーストローク先にあります。
 言語なら、それが唯一の経路になりえます。
@@ -213,7 +213,7 @@ expose research(question) -> {answer: String, sources: [String], confidence: Int
 ひとつの応答のあらゆる読み方のうち最も安いものが勝ち、データを持っていることが小さな修正の山より優先されるので、フィールドが1つ欠けたオブジェクトが「何も一致しなかった散文」に負けることはありません。
 
 それでも満たせないスキーマは、原因の場所で失敗します。
-3フレーム先でクラッシュする binary をあなたのコードに渡したりはしません。
+3フレーム先でクラッシュする binary を呼び出し側に渡したりはしません。
 
 これは全 runner と全シェイプに効きます（[`src/jet_sap.jet`](src/jet_sap.jet)）。
 [BAML](https://boundaryml.com/blog/schema-aligned-parsing) のリファレンス実装の設計から移植したものです。
@@ -269,7 +269,7 @@ Elixir はモジュール単位でコンパイルし、マクロは自分の展�
 Ollama バックエンドでは、スキーマがモデルに届く経路が2つあります。
 `runner Llm(structured: :constrained)` は既定で、JSON Schema をサンプリング文法にコンパイルするので形が保証されます。
 `structured: :prompt` はコンパクトなスキーマをプロンプトに入れ、`jet_sap` が修復します。
-どちらが勝つかはモデルごとなので、他人のベンチマークを継承するより、あなたのモデルで測る価値があります。
+どちらが勝つかはモデルごとなので、他人のベンチマークを継承するより、手元のモデルで測る価値があります。
 [`examples/sap_structured_ab.jet`](examples/sap_structured_ab.jet) が同じタスクで両方を走らせ、スキーマ適合率、回答の正しさ、レイテンシを報告します。
 
 ### エージェントのテスト
@@ -282,7 +282,7 @@ end
 ````
 
 `Fake` は決め打ちのテキストで答えますが、そのテキストは本物の応答と同じパースを通ります。
-なのでテストが固定するのは、モックに言い含めた答えではなく、モデルが雑なときにあなたのプログラムが実際に受け取るものです。
+なのでテストが固定するのは、モックに言い含めた答えではなく、モデルが雑なときに呼び出し側が実際に受け取るものです。
 `replies:` は値、`{method: reply}` のマップ、`fn(method, args)` のいずれも取ります。
 モデルも API キーもネットワークも要りません。
 
@@ -349,7 +349,7 @@ N 人のエージェントが同じタスクをそれぞれの git worktree で�
 単一の `model:` の代わりに、反復するシェイプ（`Goal` と `Refine`）に階層順の `models:` プールと `select:` モードを与えます。
 `:escalate` はまず安いモデルで試し、チェックが結果を却下したときだけ強いモデルに上げます。
 `:route` は安価なルータが各モデルのプロフィールを読み、タスクごとに最適なものを選びます。
-プールはあなたが選んだ Ollama モデルや ACP エージェントで構成されるので、大きなモデルはそれに値するときだけ動きます（[escalate](examples/acp_goal_escalate_demo.jet)、[route](examples/acp_goal_route_demo.jet)）。
+プールは自分で選んだ Ollama モデルや ACP エージェントで構成されるので、大きなモデルはそれに値するときだけ動きます（[escalate](examples/acp_goal_escalate_demo.jet)、[route](examples/acp_goal_route_demo.jet)）。
 
 ![Flow — 生成されたデータフローグラフ: designer がトポロジを組み、独立ノードが並列に走り、sink が結合する](flow.gif)
 
@@ -373,7 +373,6 @@ stdio のサーバループはまだ CLI に配線されていません。
 同じ `agent` が本物のエディタの中で動きます。
 `jet acp-serve Module::Agent::method file.jet` が [Agent Client Protocol](https://agentclientprotocol.com) 上に公開するので、任意の ACP クライアントが駆動できます。
 応答はトークン単位でストリームし、セッションは記憶し、plan と tool 呼び出しはネイティブに描画されます。
-1行のものから監督付きフリートまで、3つのエージェントで段階的に見ていきます。
 
 **1. Hello, agent**：本物のローカル LLM、ストリーミング、会話メモリつき。
 
@@ -386,7 +385,7 @@ end
 ```
 
 **2. 本物のエージェント**：ディスクに触れずにファイルについて答えます。
-ターンの途中で、同じ ACP 接続を通してあなたのエディタに読み取りを依頼します。
+ターンの途中で、同じ ACP 接続を通してエディタ側に読み取りを依頼します。
 
 ```ruby
 agent Reader
