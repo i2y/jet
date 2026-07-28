@@ -658,6 +658,22 @@ timer::sleep(1000)
 lists::sort([3, 1, 2])  # => [1, 2, 3]
 ```
 
+There is no `import`. BEAM module names are global and resolved at run time, so a
+qualified call is complete on its own — which is why Erlang needs no import
+either. `alias` shortens the name without hiding it:
+
+```ruby
+alias jet_backend as B
+
+B::to_bin(topic)        # reads jet_backend::to_bin(topic)
+```
+
+A pure rename at parse time: the call site stays **qualified**, so `B::` is still
+visibly a remote call and one line at the top of the file says what it is. The
+other half of `import` — pulling names in unqualified, so a reader can't tell a
+local call from a remote one — is what Erlang's own `-import` is discouraged for,
+and Jet doesn't offer it.
+
 ### Higher-Order Functions
 
 ```ruby

@@ -34,9 +34,8 @@ pub type Token {
   In
   Do
   End
-  Import
+  Alias
   Include
-  Require
   Export
   ExportAll
   Record
@@ -146,9 +145,8 @@ pub fn token_name(tok: Token) -> String {
     In -> "in"
     Do -> "do"
     End -> "end"
-    Import -> "import"
+    Alias -> "alias"
     Include -> "include"
-    Require -> "require"
     Export -> "export"
     ExportAll -> "export_all"
     Record -> "record"

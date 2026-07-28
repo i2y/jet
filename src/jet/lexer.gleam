@@ -640,9 +640,8 @@ fn keyword_or_name(name: String) -> Token {
     "in" -> token.In
     "do" -> token.Do
     "end" -> token.End
-    "import" -> token.Import
+    "alias" -> token.Alias
     "include" -> token.Include
-    "require" -> token.Require
     "export" -> token.Export
     "export_all" -> token.ExportAll
     "record" -> token.Record
