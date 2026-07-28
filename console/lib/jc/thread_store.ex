@@ -10,7 +10,7 @@ defmodule Jc.ThreadStore do
   """
   use GenServer
 
-  @keys [:projects, :threads, :current, :current_project, :next, :next_project, :new_backend, :theme, :traces]
+  @keys [:projects, :threads, :current, :current_project, :last_thread, :next, :next_project, :new_backend, :theme, :traces]
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
 

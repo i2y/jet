@@ -195,6 +195,7 @@ defmodule JcWeb.ChatLive do
     commit(
       assign(socket,
         projects: Map.put(socket.assigns.projects, id, %{id: id, name: Path.basename(dir), dir: dir}),
+        last_thread: remember_current(socket),
         current_project: id, next_project: id + 1, current: nil, proj_error: nil))
   end
 
@@ -234,7 +235,17 @@ defmodule JcWeb.ChatLive do
   def handle_event("select_project", %{"id" => id}, socket) do
     pid = String.to_integer(id)
     cd_to(socket.assigns.projects[pid][:dir])
-    commit(assign(socket, current_project: pid, current: first_thread_of(socket.assigns.threads, pid)))
+    last = remember_current(socket)
+
+    socket =
+      assign(socket,
+        current_project: pid,
+        last_thread: last,
+        current: thread_for_project(socket.assigns.threads, pid, last))
+
+    # a project switch IS a thread switch, so it gets the same treatment `select`
+    # gives one: the new thread's slash commands and structure, not the old one's.
+    commit(maybe_reprobe_structure(probe_current_commands(socket)))
   end
 
   def handle_event("select", %{"id" => id}, socket),
@@ -292,6 +303,7 @@ defmodule JcWeb.ChatLive do
     threads = Map.drop(socket.assigns.threads, doomed_ids)
     terminals = Map.drop(socket.assigns.terminals, doomed_ids)
     projects = Map.delete(socket.assigns.projects, pid)
+    last = Map.delete(last_thread(socket), pid)
 
     current_project =
       if socket.assigns.current_project == pid do
@@ -312,7 +324,7 @@ defmodule JcWeb.ChatLive do
 
     commit(
       assign(socket,
-        projects: projects, threads: threads, terminals: terminals,
+        projects: projects, threads: threads, terminals: terminals, last_thread: last,
         current_project: current_project, current: current, proj_error: nil))
   end
 
@@ -1111,6 +1123,26 @@ defmodule JcWeb.ChatLive do
     if is_pid(t.run_pid), do: Process.exit(t.run_pid, :kill)
     if is_pid(t.agent), do: Process.exit(t.agent, :kill)
     :ok
+  end
+
+  # Which thread to open when a project becomes current. Leaving a project records
+  # the thread that was open in it, so coming back reopens that one rather than
+  # whatever sorts first. Persisted with the rest of the state, so a reload keeps it.
+  defp last_thread(socket), do: Map.get(socket.assigns, :last_thread, %{})
+
+  defp remember_current(socket) do
+    case {socket.assigns.current_project, socket.assigns.current} do
+      {p, t} when not is_nil(p) and not is_nil(t) -> Map.put(last_thread(socket), p, t)
+      _ -> last_thread(socket)
+    end
+  end
+
+  # the remembered thread, if it still exists and is still in this project
+  defp thread_for_project(threads, pid, last) do
+    case Map.get(threads, Map.get(last, pid)) do
+      %{project_id: ^pid, id: id} -> id
+      _ -> first_thread_of(threads, pid)
+    end
   end
 
   defp first_thread_of(threads, pid) do
