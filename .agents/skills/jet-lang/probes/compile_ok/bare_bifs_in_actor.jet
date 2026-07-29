@@ -1,0 +1,10 @@
+module bare_bifs_in_actor
+  # Kernel.jet wraps the common BIFs, so they need no erlang:: inside an actor method.
+  actor W
+    def initialize()
+    end
+    def probe(t, l)
+      {element(1, t), length(l), hd(l), integer_to_list(7)}
+    end
+  end
+end

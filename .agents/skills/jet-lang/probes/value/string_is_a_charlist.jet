@@ -1,0 +1,8 @@
+module string_is_a_charlist
+  # "..." is an Erlang char list; <<"...">> is a binary. They are not equal.
+  def self.run()
+    io::format("~p~n", [erlang::is_list("hi")])
+    io::format("~p~n", [erlang::is_binary(<<"hi">>)])
+    io::format("~p~n", ["hi" == <<"hi">>])
+  end
+end

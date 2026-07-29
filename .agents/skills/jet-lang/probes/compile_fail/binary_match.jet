@@ -1,0 +1,6 @@
+module binary_match
+  # `match` is a reserved keyword, so binary::match is unreachable.
+  def self.run()
+    binary::match(<<"ab">>, <<"a">>)
+  end
+end

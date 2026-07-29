@@ -1,0 +1,6 @@
+module div_operator
+  # `div` is not a Jet operator.
+  def self.run()
+    7 div 2
+  end
+end

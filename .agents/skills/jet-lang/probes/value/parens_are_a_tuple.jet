@@ -1,0 +1,6 @@
+module parens_are_a_tuple
+  # A parenthesised comma list is a TUPLE, not a grouping.
+  def self.run()
+    io::format("~p~n", [(1, 2, 3)])
+  end
+end

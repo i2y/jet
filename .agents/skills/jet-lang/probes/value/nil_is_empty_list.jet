@@ -1,0 +1,18 @@
+module nil_is_empty_list
+  # `nil` in Jet source IS the empty list. `:nil` is the atom. JSON null decodes
+  # to the atom `null` -- so `v == nil` never matches a decoded JSON null.
+  def self.run()
+    io::format("~p~n", [nil == []])
+    io::format("~p~n", [nil == :nil])
+    io::format("~p~n", [decoded_null() == nil])
+    io::format("~p~n", [decoded_null()])
+  end
+  def self.decoded_null()
+    match jet_json_ffi::decode(<<"{\"k\":null}">>)
+      case {:ok, m}
+        maps::get(<<"k">>, m, :missing)
+      case _
+        :decode_failed
+    end
+  end
+end

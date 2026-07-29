@@ -1,0 +1,11 @@
+module star_list_pattern
+  # `[h, *rest]` is how you destructure a list.
+  def self.run(l)
+    match l
+      case [h, *rest]
+        {h, rest}
+      case _
+        :empty
+    end
+  end
+end

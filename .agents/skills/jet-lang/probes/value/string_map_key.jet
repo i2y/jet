@@ -1,0 +1,9 @@
+module string_map_key
+  # THE DANGEROUS ONE: a string literal as a map key compiles, then silently
+  # becomes the atom `unknown`. Use maps::from_list for dotted/binary keys.
+  def self.run()
+    io::format("~p~n", [{"a.b": 1}])
+    io::format("~p~n", [maps::from_list([{<<"a.b">>, 1}])])
+    io::format("~p~n", [{ab: 1}])
+  end
+end

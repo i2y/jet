@@ -1,0 +1,13 @@
+# The Fake-runner agent from references/agents.md -- run for real, since the whole
+# point of Fake is that an agent program is testable with no model, key or network.
+module doc_example_fake
+  agent Desk
+    role "You are a parts desk."
+    runner Fake(replies: "{\"answer\": \"4217\"}")
+    expose ask(q) -> {answer: String}
+  end
+
+  def self.run()
+    io::format("~p~n", [doc_example_fake::Desk.spawn().ask("how much?").await()])
+  end
+end

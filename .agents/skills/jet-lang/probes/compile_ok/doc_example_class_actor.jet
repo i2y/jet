@@ -1,0 +1,28 @@
+# The class and actor from references/language.md, verbatim.
+module doc_example_class_actor
+  class Point
+    def initialize(x, y)
+      @x = x
+      @y = y
+    end
+    def dist()
+      math::sqrt(@x * @x + @y * @y)
+    end
+  end
+
+  actor Counter
+    def initialize()
+      @total = 0
+    end
+    def add(n)
+      @total = @total + n
+      @total
+    end
+    def on_message(msg)
+      :ok
+    end
+    def on_terminate(reason)
+      :ok
+    end
+  end
+end

@@ -1,0 +1,21 @@
+# The agent from SKILL.md's "A file that compiles" section, verbatim.
+module weather
+  agent Forecaster
+    model "ollama:qwen3.6:35b-a3b"          # or: drives "claude-code-acp"
+    role "You report the weather plainly."
+    tool lookup(city: String), "Current conditions for a city" do |c|
+      <<"sunny, 22C">>
+    end
+    expose report(city) -> {summary: String, celsius: Int}
+  end
+
+  def self.run()
+    f = weather::Forecaster.spawn()
+    match f.report("Kyoto").await()
+      case {:ok, r}
+        io::format("~ts (~p C)~n", [maps::get(:summary, r), maps::get(:celsius, r)])
+      case {:error, reason}
+        io::format("failed: ~p~n", [reason])
+    end
+  end
+end

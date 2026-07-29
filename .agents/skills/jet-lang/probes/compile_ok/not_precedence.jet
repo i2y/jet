@@ -1,0 +1,10 @@
+module not_precedence
+  # `not` binds TIGHTER than and/or. Defensive parens are unnecessary.
+  def self.run(x, y)
+    if not x and not y
+      1
+    else
+      2
+    end
+  end
+end

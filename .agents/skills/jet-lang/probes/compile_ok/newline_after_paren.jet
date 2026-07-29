@@ -1,0 +1,8 @@
+module newline_after_paren
+  # A newline right after `(` is fine, in every position.
+  def self.f(
+    a, b)
+    maps::get(
+      :k, maps::new(), a + b)
+  end
+end

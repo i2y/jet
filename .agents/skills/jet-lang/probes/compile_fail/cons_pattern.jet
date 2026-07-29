@@ -1,0 +1,11 @@
+module cons_pattern
+  # `|` is the infix pipe operator, so a cons pattern is an illegal_pattern.
+  def self.run(l)
+    match l
+      case [h | rest]
+        h
+      case _
+        0
+    end
+  end
+end

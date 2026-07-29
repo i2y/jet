@@ -1,0 +1,6 @@
+module agent_as_map_key
+  # `agent` is a reserved keyword: not usable as an identifier, a parameter, or a map key.
+  def self.run()
+    {agent: 1}
+  end
+end

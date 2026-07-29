@@ -1,0 +1,7 @@
+module outer
+  module inner
+    def self.run()
+      1
+    end
+  end
+end

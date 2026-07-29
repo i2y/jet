@@ -1,0 +1,19 @@
+module is_list_bare_in_actor
+  # The is_* type tests are deliberately NOT Kernel-wrapped (they would shadow the
+  # guard BIFs), so in an EXPRESSION position they dispatch as a method and fail.
+  # Write erlang::is_list(x) outside a guard.
+  actor W
+    def initialize()
+    end
+    def probe(x)
+      if is_list(x)
+        :list
+      else
+        :other
+      end
+    end
+  end
+  def self.run()
+    is_list_bare_in_actor::W.spawn().probe([1])
+  end
+end

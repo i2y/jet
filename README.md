@@ -19,7 +19,7 @@ end
 jet acp-serve sage::Sage::answer sage.jet
 ```
 
-That file is now an agent **inside your editor**: any [ACP](https://agentclientprotocol.com) client drives it, replies stream token by token, the session remembers, and plans and tool calls render natively. Add a `catalog/0` and drop the same file in `console/agents/` and it appears in a **[web UI](#or-in-a-web-ui-jet-console)** too, recompiled and hot-loaded when you save.
+That file is now an agent **inside your editor**: any [ACP](https://agentclientprotocol.com) client drives it, replies stream token by token, the session remembers, and plans and tool calls render natively. Swap the command for `jet mcp-serve` and the same file is an **[MCP](#mcp-both-directions) server** instead — tools, resources and prompts, all of them the agent. Add a `catalog/0` and drop the file in `console/agents/` and it appears in a **[web UI](#or-in-a-web-ui-jet-console)** too, recompiled and hot-loaded when you save.
 
 **You don't rewrite your system in Jet.** The unit of adoption is one file — the same unit as a config file, with a compiler and a supervisor behind it.
 
@@ -790,6 +790,18 @@ $ ./jet acp-serve Module::Agent::method Foo.jet
 
 See [Agents in your editor](#agents-in-your-editor-over-acp) for the demos and an example config.
 
+### Serving an agent over MCP
+
+The same agent, the same lack of boilerplate, for any [MCP](https://modelcontextprotocol.io) client.
+Its exposed methods and its `tool`s become tools, its role/composition/memory become resources, and
+its `skills` become prompts:
+
+```sh
+$ ./jet mcp-serve Module::Agent::method Foo.jet
+```
+
+See [MCP, both directions](#mcp-both-directions).
+
 ### Building a project
 
 ```sh
@@ -827,6 +839,21 @@ $ ./jet -r jet_architect::run_tests src/jet_architect.jet  # the Architect shape
 To test **your own** agents, give them the `Fake` runner: canned replies that still
 go through the real schema parse, so no model, API key or network is involved —
 see [Testing an agent](#testing-an-agent--no-model-no-key-no-network).
+
+### Letting a coding agent write Jet
+
+Jet is new, so it is essentially absent from every model's training data — and because it *looks*
+like Ruby, an agent will confidently write Ruby-shaped code that doesn't compile. Copy the
+[`jet-lang`](.agents/skills/jet-lang) Agent Skill into the project you're writing `.jet` files in:
+
+```sh
+$ mkdir -p .agents/skills && cp -R /path/to/jet/.agents/skills/jet-lang .agents/skills/
+```
+
+Inside a Jet checkout there is nothing to install — and since `jet_skills` scans that same
+`.agents/skills`, a **Jet agent** can load it and write Jet too. Every factual claim it makes is
+pinned by a probe (`.agents/skills/jet-lang/probes/run.sh`), because the compiler, not a document,
+is the authority on what Jet accepts.
 
 ## Influences
 

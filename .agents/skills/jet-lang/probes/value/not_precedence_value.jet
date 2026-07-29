@@ -1,0 +1,14 @@
+module not_precedence_value
+  # Both forms agree: `not` binds tighter than and/or.
+  def self.run()
+    io::format("~p~n", [bare(true, true)])
+    io::format("~p~n", [parens(true, true)])
+    io::format("~p~n", [not 1 == 2])
+  end
+  def self.bare(x, y)
+    not x and not y
+  end
+  def self.parens(x, y)
+    (not x) and (not y)
+  end
+end

@@ -1,0 +1,11 @@
+module actor_without_initialize
+  # An `actor` needs an explicit initialize; only `agent` gets one synthesised.
+  actor W
+    def probe()
+      :ok
+    end
+  end
+  def self.run()
+    actor_without_initialize::W.spawn().probe()
+  end
+end

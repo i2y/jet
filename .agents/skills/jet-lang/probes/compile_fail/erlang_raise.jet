@@ -1,0 +1,6 @@
+module erlang_raise
+  # `raise` is a reserved keyword, so the qualified call cannot be written.
+  def self.run()
+    erlang::raise(:error, :boom, [])
+  end
+end

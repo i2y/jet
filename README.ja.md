@@ -20,7 +20,8 @@ jet acp-serve sage::Sage::answer sage.jet
 ```
 
 このファイルは、もうあなたのエディタの中のエージェントです。
-任意の [ACP](https://agentclientprotocol.com) クライアントが駆動でき、応答はトークン単位でストリームし、セッションは記憶し、plan と tool 呼び出しはネイティブに描画されます。
+任意の [ACP](https://agentclientprotocol.com) クライアントがそのエージェントを駆動でき、応答はトークン単位でストリームし、セッションは記憶し、plan と tool 呼び出しはネイティブに描画されます。
+コマンドを `jet mcp-serve` に変えれば、同じファイルが [MCP](#mcp双方向) サーバになります（tools・resources・prompts のいずれもエージェント自身です）。
 `catalog/0` を足して同じファイルを `console/agents/` に置けば、[Web UI](#web-ui-で動かすjet-console) にも現れ、保存すると再コンパイルされてホットロードされます。
 
 **あなたのシステムを Jet で書き直す必要はありません。**
@@ -797,6 +798,17 @@ $ ./jet acp-serve Module::Agent::method Foo.jet
 
 デモと設定例は[エディタの中のエージェント](#エディタの中のエージェントacp-経由)を参照してください。
 
+### エージェントを MCP でサーブする
+
+同じエージェントを、同じくボイラープレート無しで、任意の [MCP](https://modelcontextprotocol.io) クライアントに公開します。
+expose したメソッドと `tool` が tools に、role・構成・メモリが resources に、`skills` が prompts になります。
+
+```sh
+$ ./jet mcp-serve Module::Agent::method Foo.jet
+```
+
+詳細は [MCP、双方向](#mcp双方向)を参照してください。
+
 ### プロジェクトのビルド
 
 ```sh
@@ -835,6 +847,21 @@ $ ./jet -r jet_architect::run_tests src/jet_architect.jet  # Architect シェイ
 
 自分のエージェントをテストするには `Fake` runner を与えてください。
 決め打ちの応答が本物のスキーマパースを通るので、モデルも API キーもネットワークも要りません（[エージェントのテスト](#エージェントのテスト)を参照）。
+
+### コーディングエージェントに Jet を書かせる
+
+Jet は新しいので、どのモデルの学習データにもほぼ含まれていません。
+しかも Ruby に似ているため、エージェントは Ruby 風の、コンパイルできないコードを自信を持って書きます。
+`.jet` を書くプロジェクトに [`jet-lang`](.agents/skills/jet-lang) Agent Skill をコピーしてください。
+
+```sh
+$ mkdir -p .agents/skills && cp -R /path/to/jet/.agents/skills/jet-lang .agents/skills/
+```
+
+Jet のチェックアウト内ではインストールは不要です。
+また `jet_skills` が同じ `.agents/skills` を走査するので、**Jet エージェント自身**がこのスキルを読んで Jet を書くこともできます。
+記載されている事実はすべて probe で裏付けられています（`.agents/skills/jet-lang/probes/run.sh`）。
+何が Jet で通るかの権威は文書ではなくコンパイラだからです。
 
 ## 影響を受けたもの
 
