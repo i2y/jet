@@ -8,6 +8,47 @@ module jet_policy
   #     jet_policy::gate(req, <<"run">>, {|r| jet_policy::deny_tokens(r, jet_policy::default_deny())})
   #   end
 
+  # --- the ONE place a permission request is SHAPED -------------------------------------
+  #
+  # Two callers ask an agent's on_approval to decide: jet_acp (an external ACP agent's
+  # session/request_permission) and jet_llm (the native tool gate). They used to build the
+  # map independently, and drifted -- ACP delivered `kind` as a Jet string while the native
+  # gate delivered a binary, so the documented `case "execute"` fired on one path and
+  # silently allowed everything on the other. Both go through here now, for the same reason
+  # jet_sap is the only place a schema is enforced.
+  #
+  # `kind` and `title` are Jet STRINGS (char lists), because that is the form every
+  # documented policy matches. `extra` carries the caller-specific fields through (the
+  # native gate's name/args, ACP's tool_call_id/options/raw) and never overrides these two.
+  def self.request(kind, title, extra)
+    maps::merge(extra, {kind: to_text(kind), title: to_text(title)})
+  end
+
+  # a binary or an atom (a `tool …, :execute` declaration) becomes a Jet string; nil and an
+  # existing string pass through untouched.
+  def self.to_text(v)
+    if v == nil
+      nil
+    elsif erlang::is_binary(v)
+      erlang::binary_to_list(v)
+    elsif erlang::is_atom(v)
+      erlang::atom_to_list(v)
+    else
+      v
+    end
+  end
+
+  # What a tool DOES, for the native gate: its declared `, :kind`, else "other". Guessing a
+  # kind from the tool's name would be exactly the kind of silent wrongness this module
+  # exists to prevent, so an undeclared tool says "other" rather than pretending.
+  def self.tool_kind(t)
+    if erlang::is_map(t)
+      to_text(maps::get(:kind, t, :other))
+    else
+      "other"
+    end
+  end
+
   def self.allow_all(_req)
     :allow
   end

@@ -18,17 +18,18 @@ agent Researcher
   skills "./skills"                             # a dir of SKILL.md dirs
   mcp "npx -y @modelcontextprotocol/server-filesystem /tmp"
   tool web_search                               # a peer agent / function / MCP tool
-  tool price(item: String), "Catalog price" do |i|
+  tool price(item: String), "Catalog price", :fetch do |i|
     4217
   end
 
   expose research(question) -> {answer: String, sources: [String]}
 
   def on_approval(req)                          # permission policy
-    if reviewer::executes?(req.get(:kind))      # normalise -- see the warning below
-      :deny
-    else
-      :allow
+    match req.get(:kind)                        # a tool's declared `, :kind`
+      case "execute"
+        :deny
+      case _
+        :allow
     end
   end
 end
@@ -128,32 +129,46 @@ end
 
 Prefer this to mocks. See `examples/agent_fake_test.jet` in the Jet repo.
 
-## Normalise `:kind` in on_approval
+## Declare what a tool does
 
-The two paths that call `on_approval` disagree on the type of `:kind`, and a policy that matches
-only one form **silently allows everything** on the other:
-
-| Caller | `:kind` arrives as |
-|---|---|
-| an ACP agent's permission request | a **char list** (`jet_acp` converts it), so `case "execute"` fires |
-| the native tool gate on an `Llm` agent | a **binary** (`<<"execute">>`), so `case "execute"` does not fire |
-
-So normalise before deciding, rather than matching a literal:
+Both callers of `on_approval` — an ACP agent's permission request and the native tool gate —
+deliver `:kind` in the same form (a Jet string), built in one place by `jet_policy::request`. So the
+plain literal match works on either path:
 
 ```jet
-def self.executes?(kind)
-  k = if erlang::is_binary(kind)
-    kind
-  elsif erlang::is_atom(kind)
-    erlang::atom_to_binary(kind, :utf8)
-  else
-    erlang::iolist_to_binary(kind)
+def on_approval(req)
+  match req.get(:kind)
+    case "execute"
+      :deny
+    case _
+      :allow
   end
-  lists::any({|w| binary::split(k, w) != [k]}, [<<"execute">>, <<"command">>, <<"terminal">>, <<"shell">>])
 end
 ```
 
-(`binary::split` rather than `binary::match`, which is unreachable — `match` is a keyword.)
+For that to mean anything on a native tool, say what the tool does. A `tool` takes an optional
+`, :kind` alongside its optional description, in either order:
+
+```jet
+tool run(cmd: String), "Run a shell command", :execute do |c|
+  os::cmd(erlang::binary_to_list(c))
+end
+tool peek(path: String), :read, "Read a file" do |p|
+  file::read_file(p)
+end
+tool plain(x: String) do |x|            # undeclared -> "other"
+  x
+end
+```
+
+An undeclared tool reports `"other"`, not `"execute"`: guessing a kind from a tool's name would be
+the kind of silent wrongness this whole file is about. Use ACP's vocabulary — `:execute`, `:read`,
+`:edit`, `:fetch`, `:search`, `:other` — so one policy reads the same for a native tool and for an
+external agent's request.
+
+`jet_policy` also has data-driven policies that gate on the tool's **name** and arguments rather
+than its kind (`gate`, `deny_tokens`, `allow_prefixes`, `default_deny`), which is what the shipped
+built-in agents use.
 
 ## Memory
 

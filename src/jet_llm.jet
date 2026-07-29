@@ -332,7 +332,7 @@ module jet_llm
   def self.invoke_tool(name, args, tools)
     match find_tool(name, tools)
       case {:ok, t}
-        if approved?(name, args)
+        if approved?(name, args, t)
           run_tool(name, args, t)
         else
           erlang::iolist_to_binary(["tool '", name, "' was denied by the agent's approve policy"])
@@ -380,13 +380,17 @@ module jet_llm
     end
   end
 
-  # native tool permission: if the agent defined `approve` (its pid is stashed by run_ollama),
-  # ask its on_approval(req) before each tool call; only an explicit :deny blocks. Agents
-  # without approve stash no pid -> tools run ungated (as before).
-  def self.approved?(name, args)
+  # native tool permission: if the agent defined `on_approval` (its pid is stashed by
+  # run_ollama), ask it before each tool call; only an explicit :deny blocks. Agents without
+  # one stash no pid -> tools run ungated (as before). The request is shaped by
+  # jet_policy::request, the same builder the ACP path uses, so a policy written once works
+  # on both -- and `kind` is the tool's DECLARED `, :kind`, not a blanket "execute".
+  def self.approved?(name, args, t)
     approver = erlang::get(:__approve_agent__)
     if erlang::is_pid(approver)
-      match jet_runtime::call_method(approver, :on_approval, [{title: name, name: name, kind: <<"execute">>, args: args}])
+      match jet_runtime::call_method(approver, :on_approval,
+                                     [jet_policy::request(jet_policy::tool_kind(t), name,
+                                                          {name: name, args: args})])
         case :deny
           false
         case _

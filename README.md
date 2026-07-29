@@ -151,8 +151,8 @@ end
   - **`-> TurnResult`** — the *work* the agent did (`.text` / `.ok?` / `.edits` / `.commands` / `.plan` / `.files` / `.tool_calls`), not a coerced schema.
   - (`ask m(...)` and `task m(...)` are the older spellings, still accepted.)
 - **`runner X(...)`** is the one backend form. **`model X`** and **`drives "cmd"`** are shorthands for `runner Llm(model: X)` and `runner Acp(command: "cmd")` — an in-process LLM turn, or an external [ACP](https://agentclientprotocol.com) agent (Claude Code via `claude-code-acp`, Codex via `npx @zed-industries/codex-acp`, …), or `drives "claude"` to drive the Claude Code CLI **directly**, no adapter. Sessions persist (memory), output streams, fs/terminal are sandboxed. Every collaboration shape and `Fake` are the same form.
-- **`tool …`** — other agents / functions / MCP servers the agent can call.
-- **`def on_approval(req)`** — gate the agent's permission requests (`:allow` / `:deny`); the same `on_*` callback convention as `on_terminate` / `on_message`.
+- **`tool …`** — other agents / functions / MCP servers the agent can call. An optional `, :kind` (`:execute` / `:read` / `:edit` / `:fetch` / …) says what it *does*, which is what `on_approval` gates on; undeclared reads as `"other"` rather than guessing.
+- **`def on_approval(req)`** — gate the agent's permission requests (`:allow` / `:deny`); the same `on_*` callback convention as `on_terminate` / `on_message`. One policy covers both an external ACP agent's request and a native tool call — both are shaped by `jet_policy::request`, so `req.get(:kind)` reads the same either way.
 - **`.stream do |ev|`** — structured turn events: `{:text, _}` `{:thought, _}` `{:tool_call, _}` `{:plan, _}` `{:usage, _}` `{:prompt, _}`. `{:prompt, …}` carries the **request as actually sent** (`system` / `input` / `model`), for every runner and every shape member — so iterating on a prompt means reading it, not inferring it.
 
 See [`docs/agent_design.md`](docs/agent_design.md) and the [ACP protocol sequences](docs/acp_sequence.md).

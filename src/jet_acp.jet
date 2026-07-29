@@ -1031,11 +1031,10 @@ module jet_acp
     params = maps::get(<<"params">>, msg, nil)
     if erlang::is_map(params)
       tc = maps::get(<<"toolCall">>, params, nil)
-      {kind: bin_to_str(tc_get(tc, <<"kind">>)),
-       title: bin_to_str(tc_get(tc, <<"title">>)),
-       tool_call_id: tc_get(tc, <<"toolCallId">>),
-       options: maps::get(<<"options">>, params, []),
-       raw: params}
+      jet_policy::request(tc_get(tc, <<"kind">>), tc_get(tc, <<"title">>),
+                         {tool_call_id: tc_get(tc, <<"toolCallId">>),
+                          options: maps::get(<<"options">>, params, []),
+                          raw: params})
     else
       {kind: nil, title: nil, tool_call_id: nil, options: [], raw: nil}
     end
@@ -1046,14 +1045,6 @@ module jet_acp
       maps::get(key, tc, nil)
     else
       nil
-    end
-  end
-
-  def self.bin_to_str(b)
-    if erlang::is_binary(b)
-      erlang::binary_to_list(b)
-    else
-      b
     end
   end
 

@@ -182,8 +182,8 @@ end
   - **`-> TurnResult`**：エージェントがした仕事（`.text` / `.ok?` / `.edits` / `.commands` / `.plan` / `.files` / `.tool_calls`）であって、スキーマに強制された値ではありません。
   - `ask m(...)` と `task m(...)` は旧表記で、引き続き使えます。
 - **`runner X(...)`**：唯一のバックエンド形式。`model X` と `drives "cmd"` はその短縮形で、それぞれ `runner Llm(model: X)` と `runner Acp(command: "cmd")` を意味します。プロセス内の LLM ターン、または外部の [ACP](https://agentclientprotocol.com) エージェント（`claude-code-acp` 経由の Claude Code、`npx @zed-industries/codex-acp` 経由の Codex など）を動かし、`drives "claude"` なら Claude Code CLI をアダプタなしで直接駆動します。セッションは永続し（メモリ）、出力はストリームし、fs と terminal はサンドボックス化されます。あらゆる協調シェイプと `Fake` も同じ形式です。
-- **`tool …`**：エージェントが呼べる他のエージェント、関数、MCP サーバ。
-- **`def on_approval(req)`**：エージェントの権限リクエストをゲートします（`:allow` / `:deny`）。`on_terminate` や `on_message` と同じ `on_*` コールバック規約です。
+- **`tool …`**：エージェントが呼べる他のエージェント、関数、MCP サーバ。任意の `, :kind`（`:execute` / `:read` / `:edit` / `:fetch` など）でそのツールが**何をするか**を宣言でき、`on_approval` はこれを見てゲートします。未宣言は推測せず `"other"` になります。
+- **`def on_approval(req)`**：エージェントの権限リクエストをゲートします（`:allow` / `:deny`）。`on_terminate` や `on_message` と同じ `on_*` コールバック規約です。外部 ACP エージェントのリクエストと native のツール呼び出しは、どちらも `jet_policy::request` が同じ形に整えるので、`req.get(:kind)` の読み方は共通で、ポリシーは1つで両方を覆います。
 - **`.stream do |ev|`**：構造化されたターンイベント（`{:text, _}` `{:thought, _}` `{:tool_call, _}` `{:plan, _}` `{:usage, _}` `{:prompt, _}`）。`{:prompt, …}` は実際に送信されたリクエスト（`system` / `input` / `model`）を、全 runner と全シェイプメンバーについて運びます。プロンプトの改善が、推測ではなく実物を読む作業になります。
 
 詳しくは [`docs/agent_design.md`](docs/agent_design.md) と [ACP プロトコルのシーケンス](docs/acp_sequence.md)（いずれも英語）を参照してください。

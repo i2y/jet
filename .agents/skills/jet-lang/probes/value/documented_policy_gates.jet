@@ -1,0 +1,32 @@
+module documented_policy_gates
+  # The end-to-end point of routing both callers through jet_policy::request: the policy
+  # every doc and example shows now actually gates a native tool, and gates only the tools
+  # whose declared kind matches -- instead of gating nothing (the old type mismatch) or
+  # everything (a blanket "execute" for every tool).
+  def self.run()
+    io::format("~p~n", [decide({name: :run, kind: :execute})])
+    io::format("~p~n", [decide({name: :peek, kind: :read})])
+    io::format("~p~n", [decide({name: :plain})])
+    io::format("~p~n", [decide_acp()])
+  end
+
+  # verbatim the policy body from the README and docs/agent_design.md
+  def self.policy(req)
+    match req.get(:kind)
+      case "execute"
+        :deny
+      case _
+        :allow
+    end
+  end
+
+  def self.decide(t)
+    policy(jet_policy::request(jet_policy::tool_kind(t), <<"run">>,
+                               {name: <<"run">>, args: maps::new()}))
+  end
+
+  def self.decide_acp()
+    policy(jet_acp::build_approval_req(maps::from_list([{<<"params">>,
+      maps::from_list([{<<"toolCall">>, maps::from_list([{<<"kind">>, <<"execute">>}])}])}])))
+  end
+end

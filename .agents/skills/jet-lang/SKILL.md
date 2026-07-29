@@ -65,11 +65,6 @@ module is the local idiom.
 
 **A parenthesised comma list is a tuple.** `(1, 2, 3)` is `{1,2,3}`, not a grouping.
 
-**A permission policy that matches `case "execute"` may gate nothing.** The two callers of
-`on_approval` disagree on the type of `:kind` — an ACP request delivers a char list, the native tool
-gate delivers a binary — so a literal match fires on one path and silently allows everything on the
-other. Normalise the value first; `references/agents.md` has the helper.
-
 **A plain `def` inside a module gets an implicit `self`, so it exports at arity + 1.**
 
 ```jet
@@ -179,7 +174,7 @@ Every factual claim above has a probe. Run them against the compiler you actuall
 .agents/skills/jet-lang/probes/run.sh
 ```
 
-29 probes, four kinds: must-not-compile (the trap is real), must-compile (the trap was fixed),
+31 probes, four kinds: must-not-compile (the trap is real), must-compile (the trap was fixed),
 must-print-its-`.expected` (the silent traps), and compiles-but-fails-at-run-time. A failure means
 a sentence here has become false — **fix the prose, not the probe**. If you discover a new trap,
 add a probe with it, so the next reader gets a claim that is checked rather than remembered.

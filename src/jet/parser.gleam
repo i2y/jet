@@ -1277,41 +1277,76 @@ fn parse_tool_names(parser: Parser, acc: List(Expr)) -> #(List(Expr), Parser) {
   }
 }
 
-/// An optional `, "description"` after a tool's name/params. Consumes the comma ONLY
-/// when a string follows it (2-token lookahead) -- a `, <name>` is the tool-list
-/// separator and is left for parse_tool_names.
-fn parse_opt_desc(parser: Parser) -> #(Option(#(String, Int)), Parser) {
+/// The optional suffixes after a tool's name/params, in either order:
+///   `, "description"`   what the model is told the tool does
+///   `, :kind`           what the tool DOES (:execute / :read / :edit / :fetch / …), which
+///                       an agent's on_approval policy gates on
+/// The comma is consumed ONLY when a string or an atom follows it (2-token lookahead) --
+/// a `, <name>` is the tool-list separator and belongs to parse_tool_names.
+fn parse_tool_suffixes(
+  parser: Parser,
+  desc: Option(#(String, Int)),
+  kind: Option(#(String, Int)),
+) -> #(Option(#(String, Int)), Option(#(String, Int)), Parser) {
   case peek_token(parser), peek2_token(parser) {
     Some(token.Comma), Some(token.Str(_)) -> {
       let #(_, parser) = advance(parser)
       case peek(parser) {
         Some(#(token.Str(s), Position(sline))) -> {
           let #(_, parser) = advance(parser)
-          #(Some(#(s, sline)), parser)
+          parse_tool_suffixes(parser, Some(#(s, sline)), kind)
         }
-        _ -> #(None, parser)
+        _ -> #(desc, kind, parser)
       }
     }
-    _, _ -> #(None, parser)
+    Some(token.Comma), Some(token.Atom(_)) -> {
+      let #(_, parser) = advance(parser)
+      case peek(parser) {
+        Some(#(token.Atom(a), Position(aline))) -> {
+          let #(_, parser) = advance(parser)
+          parse_tool_suffixes(parser, desc, Some(#(a, aline)))
+        }
+        _ -> #(desc, kind, parser)
+      }
+    }
+    _, _ -> #(desc, kind, parser)
+  }
+}
+
+/// A `, :kind` suffix as a descriptor field, when one was given.
+fn kind_field(kind: Option(#(String, Int))) -> List(Expr) {
+  case kind {
+    Some(#(k, kline)) -> [
+      ast.MapFieldAtom("kind", ast.AtomLit(k, kline), kline),
+    ]
+    None -> []
   }
 }
 
 /// A bare `name` tool with an optional `, "desc"`. Without a desc it stays a plain atom
 /// (back-compat); with one it becomes a {name, desc} descriptor.
 fn parse_bare_tool(parser: Parser, name: String, line: Int) -> #(Expr, Parser) {
-  let #(desc_opt, parser) = parse_opt_desc(parser)
-  case desc_opt {
-    Some(#(s, sline)) -> #(
-      ast.MapExpr(
-        [
-          ast.MapFieldAtom("name", ast.AtomLit(name, line), line),
+  let #(desc_opt, kind_opt, parser) = parse_tool_suffixes(parser, None, None)
+  case desc_opt, kind_opt {
+    None, None -> #(ast.AtomLit(name, line), parser)
+    _, _ -> {
+      let desc = case desc_opt {
+        Some(#(s, sline)) -> [
           ast.MapFieldAtom("desc", ast.StrLit(value: s, line: sline), sline),
-        ],
-        line,
-      ),
-      parser,
-    )
-    None -> #(ast.AtomLit(name, line), parser)
+        ]
+        None -> []
+      }
+      #(
+        ast.MapExpr(
+          list.append(
+            [ast.MapFieldAtom("name", ast.AtomLit(name, line), line), ..desc],
+            kind_field(kind_opt),
+          ),
+          line,
+        ),
+        parser,
+      )
+    }
   }
 }
 
@@ -1320,7 +1355,7 @@ fn parse_bare_tool(parser: Parser, name: String, line: Int) -> #(Expr, Parser) {
 /// optional; without a do-block, impl is nil (declaration only).
 fn parse_tool_sig(parser: Parser, name: String, line: Int) -> #(Expr, Parser) {
   let #(params, parser) = parse_tool_params(advance(parser).1, [])
-  let #(desc_opt, parser) = parse_opt_desc(parser)
+  let #(desc_opt, kind_opt, parser) = parse_tool_suffixes(parser, None, None)
   let #(impl, parser) = case peek_token(parser) {
     Some(token.Do) ->
       case parse_block_lambda(parser) {
@@ -1335,14 +1370,14 @@ fn parse_tool_sig(parser: Parser, name: String, line: Int) -> #(Expr, Parser) {
     ast.MapFieldAtom("param_names", param_names_list(params, line), line),
     ast.MapFieldAtom("impl", impl, line),
   ]
-  let fields = case desc_opt {
+  let with_desc = case desc_opt {
     Some(#(s, sline)) ->
       list.append(base, [
         ast.MapFieldAtom("desc", ast.StrLit(value: s, line: sline), sline),
       ])
     None -> base
   }
-  #(ast.MapExpr(fields, line), parser)
+  #(ast.MapExpr(list.append(with_desc, kind_field(kind_opt)), line), parser)
 }
 
 /// The param NAMES in DECLARATION order (params is [MapFieldAtom(name, type), ...]).

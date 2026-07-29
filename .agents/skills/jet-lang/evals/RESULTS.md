@@ -73,9 +73,18 @@ was **five new verified traps** and, more valuably, **two corrections to the ski
   assignable expression. Both forms are now pinned (`compile_fail/if_with_do.jet`,
   `compile_ok/if_as_expression.jet`).
 - The `on_approval` example in `references/agents.md` was **silently broken in the general case**.
-  It matched `case "execute"`, which works for an ACP request (a char list) but never fires for the
-  native tool gate (a binary) — a policy that gates nothing. Now pinned by
-  `value/approval_kind_types.jet`, with a normalising helper in the reference.
+  It matched `case "execute"`, which works for an ACP request (a char list) but never fired for the
+  native tool gate (a binary) — a policy that gates nothing.
+
+  That one turned out to be a bug in Jet rather than in the skill, and it was fixed at the root:
+  `jet_policy::request` is now the single place a permission request is shaped, and a `tool` can
+  declare `, :kind`. So the documented policy works on both paths, and an undeclared tool reports
+  `"other"` instead of a blanket `"execute"`. Pinned by `value/approval_request_agrees.jet` and
+  `value/documented_policy_gates.jet`.
+
+  Worth recording how nearly that was missed: the first probe written for it compared *literals*
+  (`erlang::is_binary(<<"execute">>)`), which is a tautology — it passed before and after the fix.
+  A probe that cannot fail is not evidence. It now calls both builders and compares them.
 
 That is the loop earning its keep: the eval found defects in the skill, not just gaps in it.
 

@@ -1,0 +1,19 @@
+module approval_request_agrees
+  # Both callers of on_approval must shape :kind identically, so ONE policy works on both.
+  # They used to disagree (ACP: a char list, the native tool gate: a binary), which made the
+  # documented `case "execute"` silently allow everything on the native path. jet_policy is
+  # now the single builder. This asserts the AGREEMENT, by calling both builders -- an
+  # earlier version of this probe compared literals instead and so passed either way.
+  def self.run()
+    acp = jet_acp::build_approval_req(acp_msg())
+    nat = jet_policy::request(jet_policy::tool_kind({name: :run, kind: :execute}),
+                              <<"run">>, {name: <<"run">>, args: maps::new()})
+    io::format("~p~n", [maps::get(:kind, acp)])
+    io::format("~p~n", [maps::get(:kind, nat)])
+    io::format("~p~n", [maps::get(:kind, acp) == maps::get(:kind, nat)])
+  end
+  def self.acp_msg()
+    maps::from_list([{<<"params">>,
+      maps::from_list([{<<"toolCall">>, maps::from_list([{<<"kind">>, <<"execute">>}])}])}])
+  end
+end

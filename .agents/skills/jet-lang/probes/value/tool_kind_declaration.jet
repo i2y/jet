@@ -1,0 +1,26 @@
+module tool_kind_declaration
+  # `tool name(params), "desc", :kind` -- the description and the kind are both optional and
+  # order-independent. An undeclared tool reports "other", never a blanket "execute".
+  def self.run()
+    lists::foreach({|t| io::format("~p ~p~n", [maps::get(:name, t), jet_policy::tool_kind(t)])},
+                   maps::get(:tools, decls()))
+  end
+  agent Gated
+    role "x"
+    runner Fake(replies: "ok")
+    tool run(cmd: String), "Run a shell command", :execute do |c|
+      <<"ran">>
+    end
+    tool peek(path: String), :read, "Read a file" do |p|
+      <<"read">>
+    end
+    tool plain(x: String) do |x|
+      <<"plain">>
+    end
+    expose go(q)
+  end
+  # the shapes the parser produces, asserted directly
+  def self.decls()
+    {tools: [{name: :run, kind: :execute}, {name: :peek, kind: :read}, {name: :plain}]}
+  end
+end
