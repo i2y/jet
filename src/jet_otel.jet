@@ -304,15 +304,35 @@ module jet_otel
   def self.close_span(id, parent, label, status, ms)
     match erlang::get({:__otel_span__, id})
       case :undefined
-        # never opened: a one-shot node. Give it a real (if instant) span at `ms` ago, so
-        # it still shows up in the trace.
-        finish({new_id(8), parent_span(parent), to_bin(label),
+        # never opened: a one-shot node (trace_node(label, "ok"), as Debate/Refine/Architect
+        # create their members). Give it a real, if instant, span at `ms` ago.
+        sid = new_id(8)
+        record_closed(id, sid)
+        finish({sid, parent_span(parent), to_bin(label),
                 erlang::system_time(:nanosecond) - ms_ns(ms), maps::new()},
                status, maps::new())
       case h
         erlang::erase({:__otel_span__, id})
         erlang::put(:__otel_open__, lists::delete(id, open_keys()))
+        record_closed(id, erlang::element(1, h))
         finish(h, status, maps::new())
+    end
+  end
+
+  # A shape reports a node ONCE and then nests work under it (trace_set_parent), so a span
+  # has to stay resolvable as a parent after it closes -- otherwise every child of a
+  # one-shot node is re-parented to the turn root and the tree flattens. Kept in the turn
+  # worker's own dictionary, which dies with the turn.
+  def self.record_closed(id, span_id)
+    erlang::put({:__otel_done__, id}, span_id)
+  end
+
+  def self.closed_span(id)
+    match erlang::get({:__otel_done__, id})
+      case :undefined
+        nil
+      case s
+        s
     end
   end
 
@@ -329,7 +349,12 @@ module jet_otel
   def self.parent_span(parent)
     match erlang::get({:__otel_span__, parent})
       case :undefined
-        root_span()
+        match closed_span(parent)      # a node already reported (one-shot, or since closed)
+          case nil
+            root_span()
+          case s
+            s
+        end
       case h
         erlang::element(1, h)
     end
@@ -352,12 +377,7 @@ module jet_otel
   end
 
   def self.shape_span()
-    match erlang::get({:__otel_span__, jet_acp::cur_parent()})
-      case :undefined
-        root_span()
-      case h
-        erlang::element(1, h)
-    end
+    parent_span(jet_acp::cur_parent())
   end
 
   def self.push(s)
