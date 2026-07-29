@@ -1,0 +1,708 @@
+module jet_otel
+  # OpenTelemetry export for the agent runtime.
+  #
+  # Jet already builds a span tree while it runs: jet_acp::emit_trace gives every shape node
+  # a stable id, a parent link and elapsed ms, and jet_usage counts tokens. This module is
+  # the ONE place that turns those into OTLP spans and ships them -- so no shape, runner or
+  # example had to change to become observable.
+  #
+  # Configured the standard way, and OFF at zero cost unless an endpoint is set:
+  #   OTEL_EXPORTER_OTLP_ENDPOINT         base, e.g. http://localhost:4318
+  #   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT  full traces URL; overrides the base
+  #   OTEL_EXPORTER_OTLP_HEADERS          "k=v,k2=v2" (auth for a hosted collector)
+  #   OTEL_SERVICE_NAME                   service.name (default "jet")
+  #   OTEL_SDK_DISABLED=true              off regardless
+  # Transport is OTLP/HTTP + JSON -- the encoding every collector accepts, with no protobuf
+  # dependency -- POSTed by a background batching process, so a turn never waits on export.
+  #
+  # The trace it produces:
+  #   jet.agent.turn                one root span per turn (jet_agent::run_turn)
+  #     <shape / member spans>      every jet_acp::emit_trace id, nested by its parent link
+  #       chat <model>              one per backend call, carrying gen_ai.* attributes
+  #       tool <name>               one per tool invocation
+  # Spans are recorded only in a process that HAS a turn context. A shape member runs in its
+  # own process and would otherwise start a second, orphaned trace; its work is already the
+  # parent's member span, and jet_otel::context/adopt is there for a shape that wants to
+  # link the two explicitly.
+
+  # --- configuration (read once per process, then cached) ---
+
+  def self.enabled?()
+    match erlang::get(:__otel_on__)
+      case :undefined
+        on = compute_enabled?()
+        erlang::put(:__otel_on__, on)
+        on
+      case v
+        v
+    end
+  end
+
+  def self.compute_enabled?()
+    (not disabled?()) and (traces_endpoint() != nil)
+  end
+
+  def self.disabled?()
+    match os::getenv("OTEL_SDK_DISABLED")
+      case false
+        false
+      case v
+        erlang::iolist_to_binary(string::lowercase(v)) == <<"true">>
+    end
+  end
+
+  # OTLP/HTTP appends /v1/traces to the base endpoint; a traces-specific endpoint is used
+  # verbatim, as the specification requires.
+  def self.traces_endpoint()
+    match getenv_bin("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+      case nil
+        base_endpoint()
+      case url
+        url
+    end
+  end
+
+  def self.base_endpoint()
+    match getenv_bin("OTEL_EXPORTER_OTLP_ENDPOINT")
+      case nil
+        nil
+      case base
+        erlang::iolist_to_binary([strip_slash(base), "/v1/traces"])
+    end
+  end
+
+  def self.strip_slash(b)
+    if binary::last(b) == 47
+      binary::part(b, 0, erlang::byte_size(b) - 1)
+    else
+      b
+    end
+  end
+
+  def self.service_name()
+    match getenv_bin("OTEL_SERVICE_NAME")
+      case nil
+        <<"jet">>
+      case n
+        n
+    end
+  end
+
+  # OTEL_EXPORTER_OTLP_HEADERS is "k1=v1,k2=v2" -- the standard way to carry a collector's
+  # auth token without a Jet-specific variable.
+  def self.headers()
+    match getenv_bin("OTEL_EXPORTER_OTLP_HEADERS")
+      case nil
+        []
+      case raw
+        lists::filtermap({|p| header_pair(p)}, binary::split(raw, <<",">>, [:global]))
+    end
+  end
+
+  def self.header_pair(p)
+    match binary::split(trim(p), <<"=">>)
+      case [k, v]
+        {true, {trim(k), trim(v)}}
+      case _
+        false
+    end
+  end
+
+  def self.trim(b)
+    erlang::iolist_to_binary(string::trim(b))
+  end
+
+  def self.getenv_bin(name)
+    match os::getenv(name)
+      case false
+        nil
+      case ""
+        nil
+      case v
+        erlang::iolist_to_binary(v)
+    end
+  end
+
+  # --- turn context: one trace per agent turn ---
+
+  # Start the root span. Called by jet_agent::run_turn in the worker process, so every span
+  # the turn produces lands in one trace. A no-op (and nil) when export is off.
+  def self.start_turn(name, attrs)
+    if enabled?()
+      trace_id = new_id(16)
+      erlang::put(:__otel_trace__, trace_id)
+      erlang::put(:__otel_stack__, [])
+      root = span_start(name, attrs)
+      erlang::put(:__otel_root__, span_id_of(root))
+      root
+    else
+      nil
+    end
+  end
+
+  def self.end_turn(root, status, attrs)
+    if root == nil
+      :ok
+    else
+      close_open_spans()
+      span_end(root, status, attrs)
+      erlang::erase(:__otel_trace__)
+      erlang::erase(:__otel_root__)
+      # nudge the exporter so a finished turn's trace ships now instead of waiting out the
+      # batch timer -- asynchronously, because telemetry must never slow a turn down. A
+      # short-lived script that exits immediately should call jet_otel::flush/0.
+      exporter() ! :__flush_async__
+      :ok
+    end
+  end
+
+  # a turn that ends while shape spans are still open (a crash, a cancel) must not drop
+  # them -- close what is open, marked as such, so the trace shows where it stopped.
+  def self.close_open_spans()
+    lists::foreach({|k| close_dangling(k)}, open_keys())
+    erlang::erase(:__otel_open__)
+  end
+
+  def self.open_keys()
+    match erlang::get(:__otel_open__)
+      case :undefined
+        []
+      case ks
+        ks
+    end
+  end
+
+  def self.close_dangling(k)
+    match erlang::get({:__otel_span__, k})
+      case :undefined
+        :ok
+      case h
+        erlang::erase({:__otel_span__, k})
+        finish(h, "unfinished", maps::new())
+    end
+  end
+
+  def self.trace_id()
+    match erlang::get(:__otel_trace__)
+      case :undefined
+        nil
+      case t
+        t
+    end
+  end
+
+  def self.root_span()
+    match erlang::get(:__otel_root__)
+      case :undefined
+        nil
+      case s
+        s
+    end
+  end
+
+  # the current {trace_id, span_id}, for a shape that wants to continue this trace in
+  # another process (pass it across, then adopt/1 there).
+  def self.context()
+    if trace_id() == nil
+      nil
+    else
+      {trace_id(), cur_span()}
+    end
+  end
+
+  def self.adopt(ctx)
+    match ctx
+      case {t, s}
+        erlang::put(:__otel_on__, true)
+        erlang::put(:__otel_trace__, t)
+        erlang::put(:__otel_root__, s)
+        erlang::put(:__otel_stack__, [])
+        :ok
+      case _
+        :ok
+    end
+  end
+
+  # --- spans ---
+
+  # a span handle: {span_id, parent_id, name, start_ns, attrs}
+  def self.span_start(name, attrs)
+    if trace_id() == nil
+      nil
+    else
+      {new_id(8), cur_span(), to_bin(name), erlang::system_time(:nanosecond), attrs}
+    end
+  end
+
+  def self.span_id_of(h)
+    if h == nil
+      nil
+    else
+      erlang::element(1, h)
+    end
+  end
+
+  def self.span_end(h, status, attrs)
+    if h == nil
+      :ok
+    else
+      finish(h, status, attrs)
+    end
+  end
+
+  # run `f` inside a span; the span ends "ok", or "error" with the reason attached if `f`
+  # raises -- and the exception is re-raised, so instrumentation never changes behaviour.
+  def self.with_span(name, attrs, f)
+    if not enabled?()
+      erlang::apply(f, [])
+    else
+      h = span_start(name, attrs)
+      push(span_id_of(h))
+      try
+        out = erlang::apply(f, [])
+        pop()
+        span_end(h, "ok", maps::new())
+        out
+      catch e
+        pop()
+        span_end(h, "error", maps::from_list([{<<"error.type">>, to_bin(io_lib::format("~p", [e.get(:reason)]))}]))
+        # re-raise with the original class and stack: instrumentation must never change
+        # what the program does. (`raise` is a Jet keyword, so erlang:raise/3 goes via apply.)
+        erlang::apply(:erlang, :raise, [e.get(:class), e.get(:reason), e.get(:stacktrace)])
+      end
+    end
+  end
+
+  # --- the shape span tree: driven straight off jet_acp::emit_trace ---
+
+  # `id` is the shape's own stable node id, `parent` its parent node id (both jet-side).
+  # "running" opens a span; any other status closes it. A node that is only ever reported
+  # once (emit_trace_once) still gets a span, with no duration.
+  def self.on_trace(id, parent, label, status, ms)
+    if enabled?() and (trace_id() != nil)
+      if status == "running"
+        open_span(id, parent, label)
+      else
+        close_span(id, parent, label, status, ms)
+      end
+    else
+      :ok
+    end
+  end
+
+  def self.open_span(id, parent, label)
+    if erlang::get({:__otel_span__, id}) == :undefined
+      erlang::put({:__otel_span__, id},
+                  {new_id(8), parent_span(parent), to_bin(label),
+                   erlang::system_time(:nanosecond), maps::new()})
+      erlang::put(:__otel_open__, [id] ++ open_keys())
+    else
+      :ok
+    end
+  end
+
+  def self.close_span(id, parent, label, status, ms)
+    match erlang::get({:__otel_span__, id})
+      case :undefined
+        # never opened: a one-shot node. Give it a real (if instant) span at `ms` ago, so
+        # it still shows up in the trace.
+        finish({new_id(8), parent_span(parent), to_bin(label),
+                erlang::system_time(:nanosecond) - ms_ns(ms), maps::new()},
+               status, maps::new())
+      case h
+        erlang::erase({:__otel_span__, id})
+        erlang::put(:__otel_open__, lists::delete(id, open_keys()))
+        finish(h, status, maps::new())
+    end
+  end
+
+  def self.ms_ns(ms)
+    if erlang::is_integer(ms)
+      ms * 1000000
+    else
+      0
+    end
+  end
+
+  # a jet node id maps to the otel span opened for it; an unknown or absent parent falls
+  # back to the turn's root span.
+  def self.parent_span(parent)
+    match erlang::get({:__otel_span__, parent})
+      case :undefined
+        root_span()
+      case h
+        erlang::element(1, h)
+    end
+  end
+
+  # --- the current-span stack (so a backend/tool span nests inside its shape node) ---
+
+  # Which span a new child belongs to, innermost first:
+  #   1. an explicit with_span scope (a backend call, a tool) -- the tightest enclosure;
+  #   2. the shape's own current node (jet_acp::trace_set_parent), so a member's tokens
+  #      land on that member rather than on the turn;
+  #   3. the turn's root.
+  def self.cur_span()
+    match erlang::get(:__otel_stack__)
+      case [s, *_]
+        s
+      case _
+        shape_span()
+    end
+  end
+
+  def self.shape_span()
+    match erlang::get({:__otel_span__, jet_acp::cur_parent()})
+      case :undefined
+        root_span()
+      case h
+        erlang::element(1, h)
+    end
+  end
+
+  def self.push(s)
+    if s == nil
+      :ok
+    else
+      erlang::put(:__otel_stack__, [s] ++ stack())
+    end
+  end
+
+  def self.pop()
+    match stack()
+      case [_s, *rest]
+        erlang::put(:__otel_stack__, rest)
+      case _
+        :ok
+    end
+  end
+
+  def self.stack()
+    match erlang::get(:__otel_stack__)
+      case :undefined
+        []
+      case s
+        s
+    end
+  end
+
+  # --- usage: token counts land on the span that made the call ---
+
+  # jet_usage::note calls this for every metered API call. Attributes go on a zero-duration
+  # child span rather than mutating an already-open one -- a span is immutable once queued,
+  # and this keeps per-call numbers separate from the turn total.
+  def self.note_usage(u)
+    if enabled?() and (trace_id() != nil)
+      finish({new_id(8), cur_span(), usage_name(u), erlang::system_time(:nanosecond), usage_attrs(u)},
+             "ok", maps::new())
+    else
+      :ok
+    end
+  end
+
+  def self.usage_name(u)
+    erlang::iolist_to_binary(["gen_ai.usage ", to_bin(maps::get(:model, u, <<"?">>))])
+  end
+
+  # the gen_ai.* semantic conventions, so a standard OTel dashboard reads Jet's numbers
+  # without a Jet-specific mapping.
+  def self.usage_attrs(u)
+    base = maps::from_list([{<<"gen_ai.operation.name">>, <<"chat">>},
+                            {<<"gen_ai.system">>, gen_ai_system(maps::get(:source, u, nil))},
+                            {<<"jet.backend.source">>, to_bin(maps::get(:source, u, <<"unknown">>))},
+                            {<<"gen_ai.usage.input_tokens">>, maps::get(:input, u, 0)},
+                            {<<"gen_ai.usage.output_tokens">>, maps::get(:output, u, 0)},
+                            {<<"jet.usage.scope">>, to_bin(maps::get(:scope, u, :call))}])
+    with_opt(with_opt(with_opt(base, <<"gen_ai.response.model">>, maps::get(:model, u, nil)),
+                      <<"jet.usage.cost_usd">>, maps::get(:cost_usd, u, nil)),
+             <<"jet.member">>, maps::get(:member, u, nil))
+  end
+
+  # jet_usage's :source names the code PATH that reported the numbers (:claude = the
+  # Anthropic API, :claude_cli = the `claude` CLI). gen_ai.system wants the PROVIDER, and
+  # the OpenTelemetry registry spells that `anthropic` -- so normalize to it, and keep the
+  # finer-grained source on jet.backend.source rather than losing the distinction.
+  def self.gen_ai_system(source)
+    match source
+      case :claude
+        <<"anthropic">>
+      case :claude_cli
+        <<"anthropic">>
+      case nil
+        <<"unknown">>
+      case s
+        to_bin(s)
+    end
+  end
+
+  # the whole-turn total, as attributes on the root span. Empty when nothing was metered
+  # (a pure-ACP turn reports no tokens) -- an all-zeros span would read like a real
+  # measurement of zero.
+  #
+  # The provider-identifying attributes are dropped here on purpose: jet_usage's
+  # accumulator keeps only the LATEST model/source, so on a mixed turn (a Fleet with one
+  # Ollama member and one Claude member) they would attribute EVERY token to whichever
+  # reported last. The per-call spans carry the right provider; the turn keeps the totals.
+  def self.turn_usage_attrs(total)
+    if erlang::is_map(total) and (maps::size(total) > 0)
+      maps::without([<<"gen_ai.system">>, <<"gen_ai.response.model">>,
+                     <<"gen_ai.operation.name">>, <<"jet.backend.source">>],
+                    usage_attrs(maps::put(:scope, :turn, total)))
+    else
+      maps::new()
+    end
+  end
+
+  def self.with_opt(m, k, v)
+    if v == nil
+      m
+    else
+      maps::put(k, v, m)
+    end
+  end
+
+  # --- W3C trace context, for outbound HTTP (the provider, or an OTel-aware gateway) ---
+
+  # "00-<trace-id>-<span-id>-01"; nil when there is nothing to propagate.
+  def self.traceparent()
+    t = trace_id()
+    s = cur_span()
+    if (t == nil) or (s == nil)
+      nil
+    else
+      erlang::iolist_to_binary(["00-", t, "-", s, "-01"])
+    end
+  end
+
+  # add the traceparent header to an outbound header list, or return it unchanged.
+  def self.with_traceparent(hdrs)
+    match traceparent()
+      case nil
+        hdrs
+      case tp
+        lists::append(hdrs, [{<<"traceparent">>, tp}])
+    end
+  end
+
+  # --- span completion -> the exporter ---
+
+  def self.finish(h, status, extra)
+    {sid, parent, name, start_ns, attrs} = h
+    exporter() ! {:span, {traceId: trace_id(), spanId: sid, parentSpanId: parent,
+                          name: name, startTimeUnixNano: start_ns,
+                          endTimeUnixNano: erlang::system_time(:nanosecond),
+                          attributes: maps::merge(attrs, extra), status: status}}
+    :ok
+  end
+
+  def self.new_id(bytes)
+    binary::encode_hex(rand::bytes(bytes), :lowercase)
+  end
+
+  # --- the exporter: one process, batching, never on a turn's critical path ---
+
+  def self.exporter()
+    match erlang::whereis(:jet_otel_exporter)
+      case :undefined
+        start_exporter()
+      case p
+        p
+    end
+  end
+
+  # a race between two turns starting the exporter is resolved by register/2 failing for
+  # the loser, which then uses the winner.
+  def self.start_exporter()
+    p = erlang::spawn(:jet_otel, :exporter_loop, [[], config_snapshot()])
+    try
+      erlang::register(:jet_otel_exporter, p)
+      p
+    catch _e
+      erlang::exit(p, :kill)
+      erlang::whereis(:jet_otel_exporter)
+    end
+  end
+
+  # the exporter runs in its own process, where the env is not re-read per span.
+  def self.config_snapshot()
+    {url: traces_endpoint(), headers: headers(), service: service_name()}
+  end
+
+  def self.batch_size()
+    128
+  end
+
+  def self.flush_ms()
+    2000
+  end
+
+  def self.exporter_loop(acc, cfg)
+    receive
+      case {:span, s}
+        acc2 = [s] ++ acc
+        if erlang::length(acc2) >= batch_size()
+          send_batch(acc2, cfg)
+          exporter_loop([], cfg)
+        else
+          exporter_loop(acc2, cfg)
+        end
+      case {:flush, from, ref}
+        send_batch(acc, cfg)
+        from ! {ref, :ok}
+        exporter_loop([], cfg)
+      case :__flush_async__
+        send_batch(acc, cfg)
+        exporter_loop([], cfg)
+      case :__stop__
+        send_batch(acc, cfg)
+    after flush_ms()
+      send_batch(acc, cfg)
+      exporter_loop([], cfg)
+    end
+  end
+
+  # block until everything queued has been POSTed -- for a short-lived script that would
+  # otherwise exit before the timer fires.
+  def self.flush()
+    if erlang::whereis(:jet_otel_exporter) == :undefined
+      :ok
+    else
+      ref = erlang::make_ref()
+      :jet_otel_exporter ! {:flush, erlang::self(), ref}
+      receive
+        case {r, :ok} if r == ref
+          :ok
+      after 10000
+        :timeout
+      end
+    end
+  end
+
+  # export failures are swallowed on purpose: a collector being down must never take an
+  # agent turn with it. (Set JET_OTEL_DEBUG to see them.)
+  def self.send_batch(spans, cfg)
+    if spans == []
+      :ok
+    else
+      try
+        post(maps::get(:url, cfg), maps::get(:headers, cfg),
+             jet_json_ffi::encode(payload(lists::reverse(spans), maps::get(:service, cfg))))
+      catch e
+        debug(e)
+      end
+    end
+  end
+
+  def self.post(url, hdrs, body)
+    all = lists::append([{<<"content-type">>, <<"application/json">>}], hdrs)
+    if plain?(url)
+      jet_http_ffi::post_plain(url, all, body)
+    else
+      jet_http_ffi::ensure_started()
+      jet_http_ffi::post(url, all, body)
+    end
+  end
+
+  def self.plain?(url)
+    match binary::split(url, <<"https://">>)
+      case [<<>>, _rest]
+        false
+      case _
+        true
+    end
+  end
+
+  def self.debug(e)
+    match os::getenv("JET_OTEL_DEBUG")
+      case false
+        :ok
+      case _
+        io::format("[jet_otel] export failed: ~p~n", [e])
+    end
+  end
+
+  # --- OTLP/HTTP JSON ---
+
+  def self.payload(spans, service)
+    {resourceSpans: [{resource: {attributes: [attr(<<"service.name">>, service),
+                                              attr(<<"telemetry.sdk.name">>, <<"jet">>),
+                                              attr(<<"telemetry.sdk.language">>, <<"erlang">>)]},
+                      scopeSpans: [{scope: {name: <<"jet">>, version: <<"0.1.0">>},
+                                    spans: lists::map({|s| otlp_span(s)}, spans)}]}]}
+  end
+
+  def self.otlp_span(s)
+    base = {traceId: maps::get(:traceId, s),
+            spanId: maps::get(:spanId, s),
+            name: maps::get(:name, s),
+            kind: 1,
+            startTimeUnixNano: u64(maps::get(:startTimeUnixNano, s)),
+            endTimeUnixNano: u64(maps::get(:endTimeUnixNano, s)),
+            attributes: attrs_of(s),
+            status: {code: status_code(maps::get(:status, s, <<"ok">>))}}
+    match maps::get(:parentSpanId, s, nil)
+      case nil
+        base
+      case p
+        maps::put(:parentSpanId, p, base)
+    end
+  end
+
+  # the status verb is a shape's own word ("accepted", "rejected", "best-effort", ...), so
+  # keep it as an attribute as well as mapping it to OTel's three-valued code.
+  def self.attrs_of(s)
+    lists::append(lists::map({|kv| attr(to_bin(erlang::element(1, kv)), erlang::element(2, kv))},
+                             maps::to_list(maps::get(:attributes, s, maps::new()))),
+                  [attr(<<"jet.status">>, to_bin(maps::get(:status, s, <<"ok">>)))])
+  end
+
+  def self.status_code(status)
+    match to_bin(status)
+      case <<"fail">>
+        2
+      case <<"error">>
+        2
+      case <<"rejected">>
+        2
+      case <<"cancelled">>
+        2
+      case <<"unfinished">>
+        2
+      case _
+        1
+    end
+  end
+
+  # OTLP/JSON encodes 64-bit integers as decimal STRINGS.
+  def self.u64(n)
+    erlang::integer_to_binary(n)
+  end
+
+  def self.attr(k, v)
+    {key: k, value: attr_value(v)}
+  end
+
+  def self.attr_value(v)
+    if erlang::is_integer(v)
+      {intValue: erlang::integer_to_binary(v)}
+    elsif erlang::is_float(v)
+      {doubleValue: v}
+    elsif (v == true) or (v == false)
+      {boolValue: v}
+    else
+      {stringValue: to_bin(v)}
+    end
+  end
+
+  def self.to_bin(x)
+    if erlang::is_binary(x)
+      x
+    elsif erlang::is_atom(x)
+      erlang::atom_to_binary(x, :utf8)
+    elsif erlang::is_list(x)
+      erlang::iolist_to_binary(x)
+    else
+      erlang::iolist_to_binary(io_lib::format("~p", [x]))
+    end
+  end
+end

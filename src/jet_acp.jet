@@ -747,7 +747,12 @@ module jet_acp
   # Timing is centralized here: the first sighting records t0, and every non-running update
   # carries :ms (elapsed since t0) -- emitters stay untouched, consumers Map.get(:ms).
   def self.emit_trace(id, label, status)
-    emit_event({:trace, with_ms(id, status, {id: id, parent: cur_parent(), label: label, status: status})})
+    parent = cur_parent()
+    span = with_ms(id, status, {id: id, parent: parent, label: label, status: status})
+    # the same tree, exported as OpenTelemetry spans -- so a shape becomes observable
+    # without knowing anything about tracing. No-op unless an OTLP endpoint is configured.
+    jet_otel::on_trace(id, parent, label, status, maps::get(:ms, span, 0))
+    emit_event({:trace, span})
   end
 
   def self.with_ms(id, status, span)

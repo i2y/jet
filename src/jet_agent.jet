@@ -34,13 +34,36 @@ module jet_agent
         caller ! {ref, {:done, :ok}}
       case _
         jet_usage::reset()                     # per-turn metering (this worker process)
+        # the turn is the OpenTelemetry root span: every shape node, backend call and tool
+        # this worker runs nests under it, so one trace = one turn. No-op unless an OTLP
+        # endpoint is configured (see jet_otel).
+        span = jet_otel::start_turn(<<"jet.agent.turn">>, turn_attrs(config, method, kind))
         result = try
           dispatch(config, method, args, schema, kind)
         catch e
           {:error, :agent_turn_crashed, e.get(:class), e.get(:reason)}
         end
         jet_usage::emit_turn_total()           # one whole-turn aggregate, before done
+        jet_otel::end_turn(span, turn_status(result),
+                           jet_otel::turn_usage_attrs(jet_usage::turn_total()))
         caller ! {ref, {:done, result}}
+    end
+  end
+
+  # what the turn's root span says about the agent that ran it.
+  def self.turn_attrs(config, method, kind)
+    maps::from_list([{<<"jet.agent.runner">>, erlang::atom_to_binary(runner_name(config), :utf8)},
+                     {<<"jet.agent.method">>, jet_otel::to_bin(method)},
+                     {<<"jet.agent.kind">>, jet_otel::to_bin(kind)}])
+  end
+
+  # every error result this runtime produces is an :error tuple, whatever its arity.
+  def self.turn_status(result)
+    if erlang::is_tuple(result) and (erlang::tuple_size(result) > 0)
+         and (erlang::element(1, result) == :error)
+      "error"
+    else
+      "ok"
     end
   end
 

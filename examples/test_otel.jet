@@ -1,0 +1,60 @@
+# OpenTelemetry export, end to end and offline.
+#
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+#     ./jet -r test_otel::run examples/test_otel.jet
+#
+# Without the variable it prints "disabled" and does nothing -- which is the point: the
+# instrumentation in jet_agent / jet_acp / jet_backend / jet_llm costs nothing until an
+# endpoint is configured.
+#
+# Part 1 runs a real agent turn (Fake runner: no model, key or network) -- that alone
+# produces the `jet.agent.turn` root span. Part 2 replays the span tree a shape emits
+# (jet_acp::emit_trace) plus a metered call (jet_usage::note), so the nesting, the
+# statuses and the gen_ai.* attributes are all exercised deterministically.
+module test_otel
+  agent Desk
+    role "You are a parts desk."
+    runner Fake(replies: "A blue widget costs 4217 yen.")
+    expose ask(question)
+  end
+
+  def self.run()
+    io::format("otel enabled? => ~p (endpoint ~p)~n",
+               [jet_otel::enabled?(), jet_otel::traces_endpoint()])
+    real_turn()
+    shape_tree()
+    jet_otel::flush()
+    io::format("flushed~n", [])
+  end
+
+  # a genuine turn through the runtime: jet_agent::run_turn opens the root span.
+  def self.real_turn()
+    a = test_otel::Desk.spawn()
+    io::format("turn          => ~p~n", [a.ask("how much is a blue widget?").await()])
+  end
+
+  # the span tree a shape produces. Emitted here directly so the test needs no backend;
+  # a Fleet/Goal/Debate run emits exactly these calls.
+  def self.shape_tree()
+    root = jet_otel::start_turn(<<"jet.agent.turn">>,
+                                maps::from_list([{<<"jet.agent.runner">>, <<"Fleet">>}]))
+    jet_acp::emit_trace("t1", "🏗 Fleet · team of 2", "running")
+    old = jet_acp::trace_set_parent("t1")
+    jet_acp::emit_trace("m1", "👤 Researcher", "running")
+    inner = jet_acp::trace_set_parent("m1")   # the member's own work nests under the member
+    jet_usage::note({input: 1200, output: 460, model: <<"qwen3.6:35b-a3b">>, source: :ollama, duration_ms: 900})
+    jet_acp::trace_set_parent(inner)
+    jet_acp::emit_trace("m1", "👤 Researcher", "ok")
+    jet_acp::emit_trace("m2", "👤 Critic", "running")
+    # a `claude` CLI member: jet_usage calls the source :claude_cli, but gen_ai.system is
+    # normalized to the registry's provider name, with the finer source kept alongside.
+    inner2 = jet_acp::trace_set_parent("m2")
+    jet_usage::note({input: 8000, output: 300, model: <<"claude-opus-5">>, source: :claude_cli,
+                     cost_usd: 0.42, duration_ms: 3100})
+    jet_acp::trace_set_parent(inner2)
+    jet_acp::emit_trace("m2", "👤 Critic", "fail")
+    jet_acp::trace_set_parent(old)
+    jet_acp::emit_trace("t1", "🏗 Fleet · team of 2", "ok")
+    jet_otel::end_turn(root, "ok", jet_otel::turn_usage_attrs(jet_usage::turn_total()))
+  end
+end

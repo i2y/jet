@@ -302,8 +302,32 @@ module jet_backend
     end
   end
 
+  # every backend call is one OpenTelemetry span, named and attributed by the gen_ai
+  # semantic conventions ("{operation} {target}"), nested inside whatever shape node is
+  # running. No-op unless an OTLP endpoint is configured (see jet_otel).
+  def self.chat_attrs(system, model)
+    maps::from_list([{<<"gen_ai.system">>, system},
+                     {<<"gen_ai.operation.name">>, <<"chat">>},
+                     {<<"gen_ai.request.model">>, to_bin(model)}])
+  end
+
+  # driving an external agent is `invoke_agent`, not `chat`: it gets a task rather than a
+  # prompt, and runs its own model behind its own protocol. The registry has no value for
+  # "some agent over ACP", so `acp` is a deliberate custom one.
+  def self.agent_attrs(cmd)
+    maps::from_list([{<<"gen_ai.system">>, <<"acp">>},
+                     {<<"gen_ai.operation.name">>, <<"invoke_agent">>},
+                     {<<"gen_ai.agent.name">>, to_bin(cmd)}])
+  end
+
   def self.run_ollama(m, role, input)
     jet_acp::emit_prompt(:member, m, role, input)
+    jet_otel::with_span(erlang::iolist_to_binary(["chat ", to_bin(m)]),
+                        chat_attrs(<<"ollama">>, m),
+                        {|| ollama_call(m, role, input)})
+  end
+
+  def self.ollama_call(m, role, input)
     match jet_llm::ollama_post({model: m, stream: false,
                                 messages: [{role: "system", content: role}, {role: "user", content: to_bin(input)}]})
       case {:ok, msg}
@@ -323,6 +347,12 @@ module jet_backend
 
   def self.run_acp_in(cmd, role, input, workspace)
     jet_acp::emit_prompt(:member, cmd, role, input)
+    jet_otel::with_span(erlang::iolist_to_binary(["invoke_agent ", to_bin(cmd)]),
+                        agent_attrs(cmd),
+                        {|| acp_call(cmd, role, input, workspace)})
+  end
+
+  def self.acp_call(cmd, role, input, workspace)
     base = {runner: {name: :Acp, opts: {command: to_bin(cmd)}}, role: role}
     config = if workspace == nil
       base

@@ -15,6 +15,7 @@ module jet_usage
   def self.note(m)
     m2 = maps::put(:scope, :call, m)
     erlang::put(:__usage_acc__, fold(acc(), m2))
+    jet_otel::note_usage(m2)               # gen_ai.usage.* on the enclosing span
     jet_acp::emit_event({:usage, m2})
   end
 

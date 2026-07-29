@@ -44,7 +44,7 @@ module Llm
 
   # one POST -> {:ok, parsed_body} | {:error, typed_reason}
   def self.chat_once(url, headers, json)
-    match jet_http_ffi::post(url, headers, json)
+    match jet_http_ffi::post(url, jet_otel::with_traceparent(headers), json)
       case {:ok, response}
         status = maps::get(:status, response)
         resp_body = maps::get(:body, response)
@@ -119,7 +119,7 @@ module Llm
       end
     end
 
-    jet_http_ffi::post_stream(url, headers, json, stream_callback)
+    jet_http_ffi::post_stream(url, jet_otel::with_traceparent(headers), json, stream_callback)
   end
 
   # --- Stream to actor (sends {:llm_chunk, chunk} messages) ---

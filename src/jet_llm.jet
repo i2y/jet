@@ -95,7 +95,7 @@ module jet_llm
     erlang::put(:__ollama_acc__, <<>>)
     body = jet_json_ffi::encode(stream_body(model, messages, schema))
     jet_http_ffi::post_stream_plain(erlang::iolist_to_binary([jet_settings::ollama_url(), "/api/chat"]),
-                                    [{<<"content-type">>, <<"application/json">>}],
+                                    jet_otel::with_traceparent([{<<"content-type">>, <<"application/json">>}]),
                                     body,
                                     {|ev| on_stream(ev)})
     jet_sap::parse(erlang::get(:__ollama_acc__), schema)
@@ -246,7 +246,7 @@ module jet_llm
 
   def self.ollama_post_once(body)
     match jet_http_ffi::post_plain(erlang::iolist_to_binary([jet_settings::ollama_url(), "/api/chat"]),
-                                   [{<<"content-type">>, <<"application/json">>}],
+                                   jet_otel::with_traceparent([{<<"content-type">>, <<"application/json">>}]),
                                    jet_json_ffi::encode(body))
       case {:ok, resp}
         status = maps::get(:status, resp, 200)
@@ -343,6 +343,27 @@ module jet_llm
   end
 
   def self.run_tool(name, args, t)
+    jet_otel::with_span(erlang::iolist_to_binary(["execute_tool ", jet_backend::to_bin(name)]),
+                        tool_attrs(name, t), {|| do_run_tool(name, args, t)})
+  end
+
+  # a tool span records which tool ran and whether it was local or on an MCP server.
+  # `execute_tool` is the gen_ai operation name for exactly this.
+  def self.tool_attrs(name, t)
+    maps::from_list([{<<"gen_ai.operation.name">>, <<"execute_tool">>},
+                     {<<"gen_ai.tool.name">>, jet_backend::to_bin(name)},
+                     {<<"gen_ai.tool.type">>, tool_type(t)}])
+  end
+
+  def self.tool_type(t)
+    if maps::get(:mcp, t, nil) == nil
+      <<"function">>
+    else
+      <<"mcp">>
+    end
+  end
+
+  def self.do_run_tool(name, args, t)
     try
       match maps::get(:mcp, t, nil)
         case nil
