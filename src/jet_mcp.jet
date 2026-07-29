@@ -152,8 +152,10 @@ module jet_mcp
       case {:log, level, data}
         emit_log(level, data, st)
         router_loop(st)
-      case {:rpc, rmethod, params, from}
-        router_loop(send_request(rmethod, params, from, st))
+      case {:rpc, rmethod, params, from, ref}
+        router_loop(send_request(rmethod, params, from, ref, st))
+      case {:rpc_abandon, ref}
+        router_loop(abandon(ref, st))
       case {:call_done, reqid, result, pair}
         router_loop(finish_call(reqid, result, pair, st))
       case :stdin_closed
@@ -252,8 +254,8 @@ module jet_mcp
     match maps::get(id, pending, nil)
       case nil
         st
-      case from
-        from ! {:rpc_reply, response_value(msg)}
+      case {from, ref}
+        from ! {:rpc_reply, ref, response_value(msg)}
         maps::put(:pending, maps::remove(id, pending), st)
     end
   end
@@ -358,7 +360,9 @@ module jet_mcp
                              maps::get(:apid, st), conv_text(maps::get(:mem, st), user), user])
         maps::put(:calls, maps::put(reqid, pid, maps::get(:calls, st)), st)
       case :error
-        send_result(reqid, error_result(erlang::iolist_to_binary(["unknown tool: ", name])))
+        # a tool that RAN and failed is an isError result (the model should read it and
+        # recover); a tool that does not exist is a protocol error, as the spec has it.
+        send_error(reqid, -32602, erlang::iolist_to_binary(["unknown tool: ", name]))
         st
     end
   end
@@ -442,15 +446,17 @@ module jet_mcp
     end
   end
 
-  # a cancelled request MUST NOT get a response (MCP spec) -- drop the result, keep the turn's
-  # memory, and forget the id.
+  # a cancelled request MUST NOT get a response (MCP spec) -- drop the result, but still
+  # record the turn: it ran, and the ACP mirror keeps it too. Dropping it would make a
+  # cancelled exchange vanish from jet://memory/conversation and from every later context
+  # window, which is not what cancelling a REQUEST means.
   def self.finish_call(reqid, result, pair, st)
     cancelled = maps::get(:cancelled, st)
+    remember(maps::get(:mem, st), pair)
     if lists::member(reqid, cancelled)
       forget_call(reqid, maps::put(:cancelled, lists::delete(reqid, cancelled), st))
     else
       send_result(reqid, result)
-      remember(maps::get(:mem, st), pair)
       forget_call(reqid, st)
     end
   end
@@ -459,13 +465,21 @@ module jet_mcp
     maps::put(:calls, maps::remove(reqid, maps::get(:calls, st)), st)
   end
 
-  # notifications/cancelled: end the turn WITHOUT killing the agent (jet_agent::cancel), and
-  # remember the id so its result is suppressed. Spawned, because the router must not block.
+  # notifications/cancelled: suppress the request's response (the MCP rule), and end the
+  # turn WITHOUT killing the agent (jet_agent::cancel). Spawned, because the router must
+  # not block.
+  #
+  # The kill is only issued when this is the SOLE call in flight. jet_agent::cancel is
+  # agent-wide -- the agent remembers exactly one turn worker -- so with two concurrent
+  # calls it would end whichever turn started last, i.e. cancelling A would kill B and let
+  # A finish (with A's answer then suppressed): precisely inverted. Suppressing without
+  # killing is the honest degradation; it never harms the other call.
   def self.cancel_call(params, st)
     reqid = maps::get(<<"requestId">>, params, nil)
-    if maps::is_key(reqid, maps::get(:calls, st))
+    calls = maps::get(:calls, st)
+    if maps::is_key(reqid, calls)
       apid = maps::get(:apid, st)
-      if apid != nil
+      if (apid != nil) and (maps::size(calls) == 1)
         erlang::spawn({|| jet_agent::cancel(apid)})
       end
       maps::put(:cancelled, [reqid] ++ maps::get(:cancelled, st), st)
@@ -692,15 +706,21 @@ module jet_mcp
   # (or a tool impl on it); the router services it concurrently. The mirror of
   # jet_acp_server::request/2 -- and of jet_acp's fs/terminal callbacks: the server
   # borrows a capability it does not own.
+  # Every reply carries the ref of the request it answers. Without one, a request that
+  # timed out and a late answer arriving afterwards would sit in this process's mailbox
+  # and be picked up by the NEXT request/2 -- so a second elicit would instantly return
+  # the first question's answer. Matching on the ref makes a stale reply unmatchable.
   def self.request(rmethod, params)
     if erlang::whereis(:jet_mcp_router) == :undefined
       {:error, :no_mcp_client}
     else
-      :jet_mcp_router ! {:rpc, rmethod, params, erlang::self()}
+      ref = erlang::make_ref()
+      :jet_mcp_router ! {:rpc, rmethod, params, erlang::self(), ref}
       receive
-        case {:rpc_reply, result}
+        case {:rpc_reply, r, result} if r == ref
           result
       after 120000
+        :jet_mcp_router ! {:rpc_abandon, ref}
         {:error, :mcp_request_timeout}
       end
     end
@@ -735,11 +755,17 @@ module jet_mcp
     request("elicitation/create", {message: to_text(message), requestedSchema: schema})
   end
 
-  def self.send_request(rmethod, params, from, st)
+  def self.send_request(rmethod, params, from, ref, st)
     id = maps::get(:next_id, st)
     send_msg({jsonrpc: "2.0", id: id, method: rmethod, params: params})
     maps::put(:next_id, id + 1,
-              maps::put(:pending, maps::put(id, from, maps::get(:pending, st)), st))
+              maps::put(:pending, maps::put(id, {from, ref}, maps::get(:pending, st)), st))
+  end
+
+  # a waiter that gave up: drop its pending entry so the map doesn't grow for the life of
+  # the server, and so a late response is discarded rather than sent to nobody.
+  def self.abandon(ref, st)
+    maps::put(:pending, maps::filter({|_id, v| erlang::element(2, v) != ref}, maps::get(:pending, st)), st)
   end
 
   # --- conversation memory (the server owns it, exactly as jet_acp_server does) ---
@@ -870,7 +896,7 @@ module jet_mcp
                             jet_llm::arg_values(jet_llm::param_names_of(t), args))
         reply(id, {content: [text_block(jet_llm::to_content(out))]})
       case :error
-        reply(id, error_result(erlang::iolist_to_binary(["unknown tool: ", name])))
+        err(id, -32602, erlang::iolist_to_binary(["unknown tool: ", name]))
     end
   end
 

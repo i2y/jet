@@ -339,8 +339,12 @@ module jet_agent
   # loadSession), so a server-driven agent must NOT also remember -- otherwise the
   # transcript is double-counted (the server threads it AND the agent re-threads/stores
   # it). The server registers :jet_acp_router; its presence means "defer to the server".
+  # `jet mcp-serve` owns the conversation the same way (jet_mcp::conv_text), so its router
+  # counts too -- otherwise an Llm agent served over MCP would re-thread AND re-store the
+  # transcript the server already prefixed, nesting it deeper every turn.
   def self.server_owned?()
-    erlang::whereis(:jet_acp_router) != :undefined
+    (erlang::whereis(:jet_acp_router) != :undefined)
+      or (erlang::whereis(:jet_mcp_router) != :undefined)
   end
 
   # Get-or-create the agent's PERSISTENT MCP connections (one supervised process per declared

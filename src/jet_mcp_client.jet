@@ -80,11 +80,11 @@ module jet_mcp_client
             put_buf(port, buf2)
             erlang::put({:__mcp_id__, port}, 3)
             {:ok, port, descriptors(port, tools_of(r2))}
-          case {:error, reason}
+          case {:error, reason, _rest}
             jet_port_ffi::close(port)
             {:error, reason}
         end
-      case {:error, reason}
+      case {:error, reason, _rest}
         jet_port_ffi::close(port)
         {:error, reason}
     end
@@ -132,21 +132,26 @@ module jet_mcp_client
       case {:ok, resp, rest}
         put_buf(port, rest)
         extract(resp)
-      case {:error, reason}
-        put_buf(port, <<>>)
+      case {:error, reason, rest}
+        put_buf(port, rest)
         failure(<<"call">>, reason)
     end
   end
 
   # MCP tool result: {result: {content: [{type: "text", text: ...}, ...]}} -> joined text.
   # An isError result is text too -- the model is meant to read it and recover.
+  # An error RESPONSE is checked first: its result is absent, so `content` would default to
+  # [] -- which is a list, and would quietly render the failure as an empty string.
   def self.extract(resp)
-    result = maps::get(<<"result">>, resp, maps::new())
-    content = maps::get(<<"content">>, result, [])
-    if erlang::is_list(content)
-      erlang::iolist_to_binary(lists::map({|b| block_text(b)}, content))
-    else
+    if maps::is_key(<<"error">>, resp)
       error_text(resp)
+    else
+      content = maps::get(<<"content">>, maps::get(<<"result">>, resp, maps::new()), [])
+      if erlang::is_list(content)
+        erlang::iolist_to_binary(lists::map({|b| block_text(b)}, content))
+      else
+        <<>>
+      end
     end
   end
 
@@ -218,10 +223,10 @@ module jet_mcp_client
         match recv(port, buf1, 2)
           case {:ok, r2, buf2}
             conn_loop(port, descriptors(erlang::self(), tools_of(r2)), buf2, 3)
-          case {:error, _r}
+          case {:error, _r, _rest}
             jet_port_ffi::close(port)
         end
-      case {:error, _r}
+      case {:error, _r, _rest}
         jet_port_ffi::close(port)
     end
   end
@@ -237,20 +242,33 @@ module jet_mcp_client
         conn_loop(port, tools2, buf2, id2)
       case {:mcp_call, from, ref, name, args, stream}
         with_stream(stream)
-        {result, buf2} = do_call(port, next_id, name, args, buf)
+        {result, buf2, st} = do_call(port, next_id, name, args, buf)
         from ! {ref, result}
-        conn_loop(port, tools, buf2, next_id + 1)
+        continue(st, port, tools, buf2, next_id + 1)
       case {:mcp_rpc, from, ref, method, params, pick, stream}
         with_stream(stream)
-        {result, buf2} = do_rpc(port, next_id, method, params, pick, buf)
+        {result, buf2, st} = do_rpc(port, next_id, method, params, pick, buf)
         from ! {ref, result}
-        conn_loop(port, tools, buf2, next_id + 1)
+        continue(st, port, tools, buf2, next_id + 1)
       case :__close__
         jet_port_ffi::close(port)
       case {:DOWN, _mref, :process, _p, _reason}
         jet_port_ffi::close(port)
       case {p, {:exit_status, _st}} if p == port
         :ok
+    end
+  end
+
+  # A server that died DURING a call has had its exit_status consumed inside recv, so
+  # conn_loop's own exit_status clause can never fire for it. Without this the process
+  # would live on around a dead port -- and alive?/1 would keep jet_agent::ensure_mcp_conns
+  # reusing it, so every later tool call would block until the recv timeout, for the rest
+  # of the agent's life. Exiting here lets the next turn open a fresh connection.
+  def self.continue(st, port, tools, buf, next_id)
+    if st == :closed
+      jet_port_ffi::close(port)
+    else
+      conn_loop(port, tools, buf, next_id)
     end
   end
 
@@ -274,21 +292,23 @@ module jet_mcp_client
       match recv(port, buf, next_id)
         case {:ok, resp, rest}
           {descriptors(erlang::self(), tools_of(resp)), rest, next_id + 1}
-        case {:error, _r}
-          {tools, buf, next_id + 1}
+        case {:error, _r, rest}
+          {tools, rest, next_id + 1}
       end
     else
       {tools, buf, next_id}
     end
   end
 
+  # each returns {result, remaining_buffer, :ok | :closed} -- the third element tells
+  # conn_loop the server is gone, which recv has already consumed the exit_status for.
   def self.do_call(port, id, name, args, buf)
     send_req(port, id, "tools/call", {name: to_bin(name), arguments: args})
     match recv(port, buf, id)
       case {:ok, resp, rest}
-        {extract(resp), rest}
-      case {:error, reason}
-        {failure(<<"call">>, reason), buf}
+        {extract(resp), rest, :ok}
+      case {:error, reason, rest}
+        {failure(<<"call">>, reason), rest, live_state(reason)}
     end
   end
 
@@ -297,9 +317,17 @@ module jet_mcp_client
     send_req(port, id, method, params)
     match recv(port, buf, id)
       case {:ok, resp, rest}
-        {pick_result(resp, pick), rest}
-      case {:error, reason}
-        {{:error, reason}, buf}
+        {pick_result(resp, pick), rest, :ok}
+      case {:error, reason, rest}
+        {{:error, reason}, rest, live_state(reason)}
+    end
+  end
+
+  def self.live_state(reason)
+    if reason == :closed
+      :closed
+    else
+      :ok
     end
   end
 
@@ -332,8 +360,11 @@ module jet_mcp_client
 
   # --- worker-side: ask a conn process for its tools / to run a call or an rpc ---
 
+  # generous, because this is usually the FIRST thing asked of a conn that is still doing
+  # its handshake -- and a cold `npx -y …` server can take tens of seconds to boot. Giving
+  # up early would silently hand the turn an empty tool list.
   def self.tools_of_conn(conn_pid)
-    ask(conn_pid, {|from, ref| {:mcp_tools, from, ref}}, [], 10000)
+    ask(conn_pid, {|from, ref| {:mcp_tools, from, ref}}, [], 60000)
   end
 
   # the conn process runs the call, so it -- not this worker -- is where the server's
@@ -377,7 +408,7 @@ module jet_mcp_client
   end
 
   def self.port_rpc(port, method, params, pick)
-    {result, rest} = do_rpc(port, next_id(port), method, params, pick, get_buf(port))
+    {result, rest, _st} = do_rpc(port, next_id(port), method, params, pick, get_buf(port))
     put_buf(port, rest)
     result
   end
@@ -477,6 +508,11 @@ module jet_mcp_client
   # read ndjson lines until the response whose "id" == id. Everything else on the wire is
   # SERVED, not skipped: a server->client request is answered and a notification is routed
   # to the event bus. (Skipping a request is what leaves a server blocked forever.)
+  #
+  # BOTH outcomes carry the unconsumed remainder: {:ok, msg, rest} | {:error, reason, rest}.
+  # Handing back the PRE-call buffer on failure would replay lines recv had already acted
+  # on -- emitting a notification twice, or answering a server request twice with the same
+  # JSON-RPC id.
   def self.recv(port, buf, id)
     match binary::split(buf, <<"\n">>)
       case [line, rest]
@@ -502,11 +538,11 @@ module jet_mcp_client
           case {p, {:data, data}} if p == port
             recv(port, erlang::iolist_to_binary([buf, data]), id)
           case {p, {:exit_status, _st}} if p == port
-            {:error, :closed}
+            {:error, :closed, buf}
         after 120000
           send_note(port, "notifications/cancelled",
                     {requestId: id, reason: "the jet client timed out waiting"})
-          {:error, :timeout}
+          {:error, :timeout, buf}
         end
     end
   end
@@ -664,12 +700,24 @@ module jet_mcp_client
   end
 
   # the agent's OWN backend, or nil when it has none (then `sampling` is not advertised).
+  #
+  # jet_backend can run an Ollama model or an ACP command, and nothing else -- resolve/4
+  # maps ANY model string to {:ollama, …}, so a hosted-provider agent (`model "claude-…"`,
+  # provider: :claude) would advertise sampling and then send that model name to the local
+  # Ollama, which fails every time. Such an agent counts as having no backend here: a
+  # capability we would refuse is worse than one we never offered.
   def self.backend_of(config)
     opts = jet_backend::opts(config)
-    try
-      jet_backend::resolve(maps::get(:command, opts, nil), maps::get(:model, opts, nil), nil, nil)
-    catch _e
+    cmd = maps::get(:command, opts, nil)
+    model = maps::get(:model, opts, nil)
+    if (cmd == nil) and (not jet_llm::ollama?(model))
       nil
+    else
+      try
+        jet_backend::resolve(cmd, model, nil, nil)
+      catch _e
+        nil
+      end
     end
   end
 
