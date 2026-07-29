@@ -362,11 +362,39 @@ N 人のエージェントが同じタスクをそれぞれの git worktree で�
 
 ### MCP、双方向
 
-Jet は MCP も双方向に話します。
-クライアントとしては、`mcp "…"` で宣言した外部 MCP サーバを消費し、そのツールがターン中に呼べるようになります（[`examples/agent_mcp_demo.jet`](examples/agent_mcp_demo.jet)）。
-サーバとしては、`jet_mcp::handle` が `tools/list` と `tools/call` に応答するので、エージェントの `tool` を MCP クライアントに公開できます。
-プロトコルの中核と実行可能なテストは [`examples/test_mcp.jet`](examples/test_mcp.jet) にあります。
-stdio のサーバループはまだ CLI に配線されていません。
+Jet は MCP を ACP と同じ水準で、双方向に話します。
+
+サーバとしては、`jet mcp-serve Module::Agent::method file.jet` がエージェント全体を stdio JSON-RPC の背後に置きます。MCP の3つのプリミティブはいずれもエージェントそのものです。
+
+| MCP | 対応するもの |
+| --- | --- |
+| `tools` | `expose` したメソッド（1つにつき1ツール）と `tool` 宣言 |
+| `resources` | `jet://agent/role`、`jet://agent/manifest`、`jet://memory/conversation`、`jet://memory/facts` |
+| `prompts` | `skills` |
+
+`tools/call` は専用プロセスで走るため、実行中も `ping` と2本目の呼び出しは生きたままです。`_meta.progressToken` を伴う呼び出しではターンが `notifications/progress` として流れ、`notifications/cancelled` はエージェントを殺さずにターンだけを終わらせます。宣言された `-> Type` はテキストに加えて `structuredContent` としても返ります。公開されたエージェントからクライアントを呼び返すこともできます（`jet_mcp::roots`、クライアントのモデルを借りる `jet_mcp::sample`、`jet_mcp::elicit`）。[`examples/mcp_server_demo.jet`](examples/mcp_server_demo.jet) を参照。
+
+クライアントとしては、`mcp "…"` で宣言した外部 MCP サーバを消費し、そのツールがターン中に呼べるようになります（[`examples/agent_mcp_demo.jet`](examples/agent_mcp_demo.jet)）。接続は ACP と同じく双方向です。サーバからの `ping` / `roots/list` / `sampling/createMessage` には応答し（サンプリングはエージェント自身のバックエンドで走ります）、progress とログの通知は他のイベントと同じバスに乗ります。ツールだけでなく `resources/*` と `prompts/*` も使えます。`Acp` ランナーのエージェントで宣言されたサーバは、外部エージェントにもそのまま渡されます。
+
+両側は互いに対してテストされており、モデルも API キーもネットワークも要りません（[`examples/test_mcp_client.jet`](examples/test_mcp_client.jet)）。
+
+### OpenTelemetry
+
+エンドポイントを設定すれば、すべてのターンがトレースになります。コードの変更も、エージェントごとの設定も要りません。
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./jet -r App::run app.jet
+```
+
+```
+jet.agent.turn                       ← ターンごとに1つのルートスパン。ターン全体のトークン数を持つ
+└─ 🏗 Fleet · team of 2               ← シェイプの各ノードが、実際の親の下に入れ子になる
+   ├─ 👤 Researcher
+   │  └─ gen_ai.usage qwen3.6         ← gen_ai.usage.input_tokens / .output_tokens
+   └─ 👤 Critic                       ← status code 2。このメンバーは失敗した
+```
+
+このツリーは、Console の実行ビューを描くためにランタイムがすでに組み立てていたものです。[`jet_otel`](src/jet_otel.jet) はそれを OTLP/HTTP JSON として送り出す唯一の場所であり、シェイプもランナーも例も、観測可能になるために変更を必要としませんでした。バックエンド呼び出しとツール呼び出しは `gen_ai.*` のセマンティック規約に従い、プロバイダへの HTTP には W3C の `traceparent` が乗り、送信はバッチ処理のバックグラウンドプロセスで走るため、テレメトリがターンを遅くすることはありません。設定は標準のもの（`OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`、`OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_SERVICE_NAME`、`OTEL_SDK_DISABLED`）で、**エンドポイントが設定されるまでは無効で、コストもゼロ**です。実行可能な例は [`examples/test_otel.jet`](examples/test_otel.jet)。
 
 ## エディタの中のエージェント（ACP 経由）
 

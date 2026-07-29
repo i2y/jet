@@ -339,13 +339,62 @@ resolves the name generically, so no parser change): see
 
 ### MCP, both directions
 
-Jet also speaks **MCP**, both directions. As a **client**, an agent **consumes**
-external MCP servers it declares with `mcp "…"` — their tools become callable mid-turn
-([`examples/agent_mcp_demo.jet`](examples/agent_mcp_demo.jet)). As a **server**,
-`jet_mcp::handle` answers `tools/list` / `tools/call`, so an agent's `tool`s can be
-exposed to an MCP client (protocol core + a runnable test in
-[`examples/test_mcp.jet`](examples/test_mcp.jet); the stdio server loop isn't wired
-into the CLI yet).
+Jet speaks **MCP** as fully as it speaks ACP, in both directions.
+
+As a **server**, `jet mcp-serve Module::Agent::method file.jet` puts the whole agent
+behind stdio JSON-RPC, and all three MCP primitives are the agent:
+
+| MCP | is |
+| --- | --- |
+| `tools` | its `expose`d methods (one tool each) **and** its `tool` declarations |
+| `resources` | `jet://agent/role`, `jet://agent/manifest`, `jet://memory/conversation`, `jet://memory/facts` |
+| `prompts` | its `skills` |
+
+A `tools/call` runs in its own process, so `ping` and a second call stay live while it
+works; with a `_meta.progressToken` the turn streams back as `notifications/progress`;
+`notifications/cancelled` ends the turn **without killing the agent**. A declared
+`-> Type` comes back as `structuredContent` as well as text. The served agent can call
+*back* into the client — `jet_mcp::roots`, `jet_mcp::sample` (borrow the client's model),
+`jet_mcp::elicit`. See [`examples/mcp_server_demo.jet`](examples/mcp_server_demo.jet).
+
+As a **client**, an agent **consumes** external MCP servers it declares with `mcp "…"` —
+their tools become callable mid-turn
+([`examples/agent_mcp_demo.jet`](examples/agent_mcp_demo.jet)). The connection is
+bidirectional, like the ACP one: the server's `ping` / `roots/list` /
+`sampling/createMessage` are **answered** (sampling runs on the agent's own backend),
+and its progress and log notifications land on the same event bus as everything else.
+`resources/*` and `prompts/*` are available too, not just tools. A server declared on an
+agent with an `Acp` runner is passed through to the external agent as well.
+
+Both halves are tested against each other, with no model, key or network:
+[`examples/test_mcp_client.jet`](examples/test_mcp_client.jet).
+
+### OpenTelemetry
+
+Set an endpoint and every turn becomes a trace — no code change, and nothing to
+configure per agent:
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./jet -r App::run app.jet
+```
+
+```
+jet.agent.turn                       ← one root span per turn, with the turn's token totals
+└─ 🏗 Fleet · team of 2               ← every shape node, nested by its real parent
+   ├─ 👤 Researcher
+   │  └─ gen_ai.usage qwen3.6         ← gen_ai.usage.input_tokens / .output_tokens
+   └─ 👤 Critic                       ← status code 2: this member failed
+```
+
+The runtime already built that tree to draw the Console's execution view;
+[`jet_otel`](src/jet_otel.jet) is the one place that exports it as OTLP/HTTP JSON —
+so shapes, runners and examples needed no changes to become observable. Backend calls
+and tool calls carry the `gen_ai.*` semantic conventions, W3C `traceparent` goes out on
+provider HTTP, and export runs in a batching background process, so telemetry never
+slows a turn. Standard configuration (`OTEL_EXPORTER_OTLP_ENDPOINT`,
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`,
+`OTEL_SDK_DISABLED`); **off, at zero cost, until an endpoint is set**. Runnable:
+[`examples/test_otel.jet`](examples/test_otel.jet).
 
 ## Agents in your editor (over ACP)
 
