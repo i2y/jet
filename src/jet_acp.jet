@@ -171,7 +171,7 @@ module jet_acp
     send_req(port, 1, "initialize", init_params())
     match await(port, <<>>, 1, <<>>)
       case {:response, _r1, buf1, _}
-        send_req(port, 2, "session/new", new_params(root))
+        send_req(port, 2, "session/new", new_params(root, config))
         match await(port, buf1, 2, <<>>)
           case {:response, r2, buf2, _}
             sid = maps::get(<<"sessionId">>, maps::get(<<"result">>, r2))
@@ -412,6 +412,68 @@ module jet_acp
 
   def self.new_params(root)
     {cwd: root, mcpServers: []}
+  end
+
+  # An agent's declared `mcp "..."` servers, handed to the external ACP agent as well.
+  # With an Acp runner IT is what calls tools, so a server declared on the agent has to
+  # reach it -- otherwise `mcp` would quietly mean nothing outside the Llm runner. ACP
+  # wants the command split into program + args, and env as name/value objects.
+  def self.new_params(root, config)
+    {cwd: root, mcpServers: mcp_servers(config)}
+  end
+
+  def self.mcp_servers(config)
+    lists::map({|s| mcp_server(s)}, jet_mcp_client::norm_specs(maps::get(:mcp, config, [])))
+  end
+
+  def self.mcp_server(spec)
+    parts = lists::filter({|p| p != <<>>},
+                          string::split(to_bin(jet_mcp_client::spec_command(spec)), <<" ">>, :all))
+    {name: mcp_name(spec, parts),
+     command: mcp_program(parts),
+     args: mcp_args(parts),
+     env: mcp_env(spec)}
+  end
+
+  def self.mcp_program(parts)
+    match parts
+      case [p, *_]
+        p
+      case _
+        <<>>
+    end
+  end
+
+  def self.mcp_args(parts)
+    match parts
+      case [_p, *rest]
+        rest
+      case _
+        []
+    end
+  end
+
+  # an explicit `name:` on a map spec, else the program's basename ("npx", "uvx", ...).
+  def self.mcp_name(spec, parts)
+    if erlang::is_map(spec) and maps::is_key(:name, spec)
+      to_bin(maps::get(:name, spec))
+    else
+      to_bin(filename::basename(mcp_program(parts)))
+    end
+  end
+
+  def self.mcp_env(spec)
+    env = if erlang::is_map(spec)
+      maps::get(:env, spec, nil)
+    else
+      nil
+    end
+    if erlang::is_map(env)
+      lists::map({|kv| {name: to_bin(erlang::element(1, kv)), value: to_bin(erlang::element(2, kv))}},
+                 maps::to_list(env))
+    else
+      []
+    end
   end
 
   def self.cwd_bin()

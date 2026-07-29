@@ -584,6 +584,12 @@ module jet_runtime
                       caller ! {ref, {:item, {:describe, jet_agent::describe(c)}}}
                       caller ! {ref, {:done, :ok}}
                       {:reply, jet_agent::AsyncResult.new(ref), new_self}
+                    case [:jet_manifest]
+                      # surface probe (see jet_agent::run_turn) -- answered here too, so an
+                      # ACP-runner agent is servable over MCP without opening its connection.
+                      caller ! {ref, {:item, {:manifest, c}}}
+                      caller ! {ref, {:done, :ok}}
+                      {:reply, jet_agent::AsyncResult.new(ref), new_self}
                     case [:jet_list_commands]
                       # slash-command probe on a SEPARATE throwaway connection (one minimal prompt,
                       # response hidden) -- doesn't touch the persistent session. Native `claude`

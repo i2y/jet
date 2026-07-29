@@ -1,0 +1,64 @@
+# End-to-end test of BOTH halves of Jet's MCP support against each other: the client
+# (jet_mcp_client) drives the server (jet_mcp) as a real subprocess over stdio.
+#
+#   ./jet -r test_mcp_client::run examples/test_mcp_client.jet
+#
+# The server is examples/mcp_server_demo.jet on the Fake runner, so this needs no model,
+# key or network -- it is a protocol test, and it is deterministic.
+module test_mcp_client
+  def self.server_cmd()
+    "./jet mcp-serve mcp_server_demo::Desk::ask examples/mcp_server_demo.jet"
+  end
+
+  def self.run()
+    match jet_mcp_client::connect(server_cmd())
+      case {:ok, port, tools}
+        report(port, tools)
+        jet_mcp_client::close(port)
+      case {:error, reason}
+        io::format("connect failed: ~p~n", [reason])
+    end
+  end
+
+  def self.report(port, tools)
+    info = jet_mcp_client::server_info()
+    io::format("server        => ~p ~p~n", [maps::get(:info, info), maps::get(:proto, info)])
+    io::format("capabilities  => ~p~n", [maps::get(:capabilities, info)])
+    io::format("tools         => ~p~n", [lists::map({|t| maps::get(:name, t)}, tools)])
+    io::format("schema(ask)   => ~p~n", [schema_of(tools, :ask)])
+    io::format("call stock    => ~p~n", [jet_mcp_client::call(port, <<"stock">>, one(<<"item">>, <<"widget">>))])
+    io::format("call ask      => ~p~n", [jet_mcp_client::call(port, <<"ask">>, one(<<"question">>, <<"how much?">>))])
+    io::format("resources     => ~p~n", [lists::map({|r| maps::get(<<"uri">>, r)}, unwrap(jet_mcp_client::resources(port)))])
+    io::format("read memory   => ~p~n", [jet_mcp_client::read_resource(port, <<"jet://memory/conversation">>)])
+    io::format("prompts       => ~p~n", [jet_mcp_client::prompts(port)])
+    io::format("ping          => ~p~n", [jet_mcp_client::ping(port)])
+    io::format("unknown tool  => ~p~n", [jet_mcp_client::call(port, <<"nope">>, maps::new())])
+    # the SERVER -> CLIENT direction: the tool below runs inside the served agent and calls
+    # roots/list back at us mid-call. A client that skipped incoming requests would hang here.
+    io::format("roots callback=> ~p~n", [jet_mcp_client::call(port, <<"workspace">>, one(<<"unused">>, <<"x">>))])
+    io::format("caps no model => ~p~n", [jet_mcp_client::capabilities(nil)])
+    io::format("caps w/ model => ~p~n", [jet_mcp_client::capabilities({:ollama, <<"qwen3.6">>})])
+  end
+
+  def self.one(k, v)
+    maps::from_list([{k, v}])
+  end
+
+  def self.unwrap(r)
+    match r
+      case {:ok, list}
+        list
+      case _
+        []
+    end
+  end
+
+  def self.schema_of(tools, name)
+    match lists::filter({|t| maps::get(:name, t) == name}, tools)
+      case [t, *_]
+        maps::get(:json_schema, t)
+      case _
+        :none
+    end
+  end
+end

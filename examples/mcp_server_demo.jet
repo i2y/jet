@@ -1,0 +1,31 @@
+# A Jet agent served over MCP -- the mirror of serving one over ACP.
+#
+#   jet mcp-serve mcp_server_demo::Desk::ask examples/mcp_server_demo.jet
+#
+# Point any MCP client at that command and the whole agent is there:
+#   tools/list      -> `ask` (the agent itself, one tool per exposed method) + `stock`
+#                      (its own `tool` declaration)
+#   resources/list  -> jet://agent/role, jet://agent/manifest, jet://memory/conversation,
+#                      jet://memory/facts
+#   prompts/list    -> its skills
+# A tools/call that carries a `_meta.progressToken` streams the turn back as
+# notifications/progress; notifications/cancelled ends the turn without killing the agent.
+#
+# The runner is Fake, so the demo needs no model, key or network. Swap in
+# `model "ollama:..."` or `drives "claude"` and the MCP surface is unchanged.
+module mcp_server_demo
+  agent Desk
+    role "You are a parts desk. Answer with the part's price."
+    runner Fake(replies: "A blue widget costs 4217 yen.")
+    tool stock(item: String), "How many of a part are in stock right now" do |i|
+      42
+    end
+    # the OTHER direction: a served agent can call back into the client that connected to
+    # it. roots/list asks which directories the client has granted (jet_mcp::sample would
+    # borrow the client's model the same way).
+    tool workspace(unused: String), "Which directories the connecting MCP client has granted" do |u|
+      erlang::iolist_to_binary(lists::map({|r| [maps::get(<<"uri">>, r, <<"?">>), " "]}, jet_mcp::roots()))
+    end
+    expose ask(question)
+  end
+end

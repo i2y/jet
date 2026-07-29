@@ -26,6 +26,12 @@ module jet_agent
         # ACP runners never reach here; they're intercepted in jet_runtime's :Acp branch.
         caller ! {ref, {:item, {:commands, []}}}
         caller ! {ref, {:done, :ok}}
+      case [:jet_manifest]
+        # surface probe: the agent's STATIC config (role, tools, exposed methods + their
+        # param names, skills). `jet mcp-serve` turns it into the MCP tool/resource/prompt
+        # lists. Runs nothing, exactly like :jet_describe.
+        caller ! {ref, {:item, {:manifest, config}}}
+        caller ! {ref, {:done, :ok}}
       case _
         jet_usage::reset()                     # per-turn metering (this worker process)
         result = try
@@ -328,7 +334,9 @@ module jet_agent
       if alive_list?(existing)
         {existing, self_obj}
       else
-        conns = lists::map({|s| jet_mcp_client::open_conn(s, agent_pid)}, specs)
+        # the config goes along so a server that calls BACK (sampling/roots) is answered
+        # with the agent's own backend and workspace, not with a refusal.
+        conns = lists::map({|s| jet_mcp_client::open_conn(s, agent_pid, config)}, specs)
         {conns, erlang::setelement(3, self_obj, maps::put(:__mcp_conns__, conns, state))}
       end
     end

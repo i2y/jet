@@ -1,28 +1,336 @@
 module jet_mcp
-  # MCP *server*: exposes a Jet agent's `tool`s to an external agent (the Acp
-  # runner's coding agent connects here via session/new mcpServers, the mirror
-  # of jet_acp which is the ACP *client*). Speaks MCP JSON-RPC.
+  # MCP *server* -- the mirror of jet_acp_server (which serves ACP). Exposes a Jet agent
+  # over MCP stdio JSON-RPC so any MCP client (an IDE, a desktop app, another Jet agent's
+  # `mcp "..."`) can drive it:  `jet mcp-serve mod::Agent::method file.jet`.
   #
-  # `handle/2` maps one request to {:reply, response} | :noreply, reusing the
-  # tool descriptors + helpers from jet_llm. The stdio transport (serve loop),
-  # the `./jet mcp` CLI entry, and the ACP `mcpServers` wiring are the
-  # integration layer (follow-up; needs a live agent to exercise).
+  # Architecture mirrors jet_acp_server, for the same reason: one process cannot block on
+  # io::get_line AND its mailbox, and a running tool call must not stall the server.
+  #   reader -- the only stdin reader; forwards each line to the router.
+  #   router -- owns stdout + all state. Requests it answers inline; a tools/call runs in
+  #             its OWN process, so ping / notifications/cancelled / a second call stay
+  #             live -- and the call can make outbound requests (sampling, roots,
+  #             elicitation) mid-turn via request/2.
+  #   call   -- one per tools/call: runs the turn, streams the event bus out as
+  #             notifications/progress + notifications/message, ends with {:call_done,…}.
+  #
+  # The agent maps onto all three MCP primitives:
+  #   tools     <- its `expose`d methods (one tool each) + its `tool` declarations
+  #   resources <- jet://agent/role, jet://agent/manifest, jet://memory/conversation,
+  #                jet://memory/facts
+  #   prompts   <- its `skills`
+  #
+  # handle/2 stays the pure stateless core (a request + a tool list -> a response): it is
+  # what examples/test_mcp.jet exercises and what an embedder can reuse without a transport.
 
-  def self.handle(msg, tools)
+  # --- protocol version ---
+
+  # newest first. `initialize` echoes the client's version when we speak it, else answers
+  # with our latest and lets the client decide -- the MCP negotiation rule.
+  def self.versions()
+    [<<"2025-06-18">>, <<"2025-03-26">>, <<"2024-11-05">>]
+  end
+
+  def self.latest_version()
+    <<"2025-06-18">>
+  end
+
+  def self.negotiate(requested)
+    asked = to_text(requested)
+    if lists::member(asked, versions())
+      asked
+    else
+      latest_version()
+    end
+  end
+
+  def self.server_info()
+    {name: "jet", version: "0.1.0"}
+  end
+
+  # --- serve: stdio transport ---
+
+  # serve an agent by name -- `jet mcp-serve mod::Agent::method` builds the spawn closure
+  # for you, so an agent file needs no serve boilerplate at all (mirrors acp-serve).
+  def self.serve_named(module_name, class_name, method)
+    serve({|_| jet_runtime::call_method(jet_runtime::new_class(module_name, class_name), :spawn, [])},
+          method)
+  end
+
+  def self.serve(spawn_fn, method)
+    logger::set_primary_config(:level, :critical)   # keep stdout protocol-only
+    apid = erlang::apply(spawn_fn, [0])
+    config = probe_manifest(apid, method)
+    router = erlang::spawn(:jet_mcp, :router_loop,
+                           [{apid: apid, config: config, method: method,
+                             tools: tools_of(config, method), mem: open_mem(),
+                             calls: maps::new(), cancelled: [], pending: maps::new(),
+                             next_id: 1000000, proto: latest_version(),
+                             level: :info, client: maps::new()}])
+    erlang::register(:jet_mcp_router, router)
+    reader_loop(router)
+  end
+
+  # serve a bare tool list with no agent (embedding / tests): every MCP primitive still
+  # answers, there is just no agent-method tool, memory or skill prompt behind it.
+  def self.serve_tools(tools)
+    logger::set_primary_config(:level, :critical)
+    router = erlang::spawn(:jet_mcp, :router_loop,
+                           [{apid: nil, config: maps::new(), method: nil,
+                             tools: tools, mem: open_mem(),
+                             calls: maps::new(), cancelled: [], pending: maps::new(),
+                             next_id: 1000000, proto: latest_version(),
+                             level: :info, client: maps::new()}])
+    erlang::register(:jet_mcp_router, router)
+    reader_loop(router)
+  end
+
+  # --- reader: stdin -> router ---
+
+  def self.reader_loop(router)
+    match io::get_line("")
+      case :eof
+        router ! :stdin_closed
+      case {:error, _r}
+        router ! :stdin_closed
+      case line
+        router ! {:stdin, line}
+        reader_loop(router)
+    end
+  end
+
+  # --- the agent's static config (the :jet_manifest probe runs nothing) ---
+
+  # probed in its OWN process with a timeout, so an agent that replaced its exposed method
+  # with a real `def` body -- and so actually runs on the probe -- cannot hang startup; we
+  # just serve no agent-method tool in that case.
+  def self.probe_manifest(apid, method)
+    if apid == nil
+      maps::new()
+    else
+      me = erlang::self()
+      ref = erlang::make_ref()
+      p = erlang::spawn({|| me ! {ref, manifest_of(apid, method)}})
+      receive
+        case {r, cfg} if r == ref
+          cfg
+      after 5000
+        erlang::exit(p, :kill)
+        maps::new()
+      end
+    end
+  end
+
+  def self.manifest_of(apid, method)
+    try
+      erlang::put(:__mcp_manifest__, maps::new())
+      ar = jet_runtime::call_method(apid, method, [:jet_manifest])
+      jet_runtime::call_method(ar, :stream, [{|ev| capture_manifest(ev)}])
+      erlang::get(:__mcp_manifest__)
+    catch _e
+      maps::new()
+    end
+  end
+
+  def self.capture_manifest(ev)
+    match ev
+      case {:manifest, cfg}
+        erlang::put(:__mcp_manifest__, cfg)
+      case _
+        :ok
+    end
+  end
+
+  # --- router: the single owner of stdout + state ---
+
+  def self.router_loop(st)
+    receive
+      case {:stdin, line}
+        router_loop(on_stdin(line, st))
+      case {:out, msg}
+        send_msg(msg)
+        router_loop(st)
+      case {:log, level, data}
+        emit_log(level, data, st)
+        router_loop(st)
+      case {:rpc, rmethod, params, from}
+        router_loop(send_request(rmethod, params, from, st))
+      case {:call_done, reqid, result, pair}
+        router_loop(finish_call(reqid, result, pair, st))
+      case :stdin_closed
+        :ok
+    end
+  end
+
+  def self.on_stdin(line, st)
+    dbg("IN  ", line)
+    match jet_json_ffi::decode(erlang::iolist_to_binary(line))
+      case {:ok, msg}
+        if maps::is_key(<<"method">>, msg)
+          on_request(msg, st)        # client -> us
+        else
+          on_response(msg, st)       # client's reply to one of our requests
+        end
+      case _
+        st
+    end
+  end
+
+  def self.on_request(msg, st)
     id = maps::get(<<"id">>, msg, nil)
+    params = maps::get(<<"params">>, msg, maps::new())
     match maps::get(<<"method">>, msg, nil)
       case <<"initialize">>
-        reply(id, {protocolVersion: "2024-11-05",
-                   capabilities: {tools: {}},
-                   serverInfo: {name: "jet", version: "0.1.0"}})
-      case <<"tools/list">>
-        reply(id, {tools: tool_defs(tools)})
-      case <<"tools/call">>
-        call(id, maps::get(<<"params">>, msg, maps::new()), tools)
+        on_initialize(id, params, st)
       case <<"notifications/initialized">>
-        :noreply
+        st
+      case <<"notifications/cancelled">>
+        cancel_call(params, st)
+      case <<"ping">>
+        send_result(id, maps::new())
+        st
+      case <<"tools/list">>
+        send_result(id, {tools: tool_defs(maps::get(:tools, st))})
+        st
+      case <<"tools/call">>
+        start_call(id, params, msg, st)
+      case <<"resources/list">>
+        send_result(id, {resources: resource_defs()})
+        st
+      case <<"resources/templates/list">>
+        send_result(id, {resourceTemplates: []})
+        st
+      case <<"resources/read">>
+        read_resource(id, to_text(maps::get(<<"uri">>, params, <<>>)), st)
+        st
+      case <<"prompts/list">>
+        send_result(id, {prompts: prompt_defs(st)})
+        st
+      case <<"prompts/get">>
+        get_prompt(id, params, st)
+        st
+      case <<"logging/setLevel">>
+        send_result(id, maps::new())
+        maps::put(:level, level_atom(maps::get(<<"level">>, params, <<"info">>)), st)
       case _
-        err(id, -32601, "method not found")
+        if id == nil
+          st                                  # an unhandled notification
+        else
+          send_error(id, -32601, "method not supported by this jet MCP server")
+          st
+        end
+    end
+  end
+
+  def self.on_initialize(id, params, st)
+    proto = negotiate(maps::get(<<"protocolVersion">>, params, nil))
+    send_result(id, {protocolVersion: proto,
+                     capabilities: {tools: {listChanged: false},
+                                    resources: {subscribe: false, listChanged: false},
+                                    prompts: {listChanged: false},
+                                    logging: maps::new()},
+                     serverInfo: server_info(),
+                     instructions: instructions(st)})
+    maps::put(:client, maps::get(<<"capabilities">>, params, maps::new()),
+              maps::put(:proto, proto, st))
+  end
+
+  # MCP's `instructions` tells the client's model what this server is for -- the agent's
+  # own `role` is exactly that, so hand it over verbatim.
+  def self.instructions(st)
+    match maps::get(:role, maps::get(:config, st, maps::new()), nil)
+      case nil
+        <<"A Jet agent served over MCP. Call its method tool to run a turn.">>
+      case role
+        to_text(role)
+    end
+  end
+
+  # client's response to an outbound request -> hand the value to the waiter.
+  def self.on_response(msg, st)
+    id = maps::get(<<"id">>, msg, nil)
+    pending = maps::get(:pending, st)
+    match maps::get(id, pending, nil)
+      case nil
+        st
+      case from
+        from ! {:rpc_reply, response_value(msg)}
+        maps::put(:pending, maps::remove(id, pending), st)
+    end
+  end
+
+  def self.response_value(msg)
+    match maps::find(<<"result">>, msg)
+      case {:ok, r}
+        {:ok, r}
+      case :error
+        {:error, maps::get(<<"error">>, msg, nil)}
+    end
+  end
+
+  # --- tools ---
+
+  # the MCP tool list: one tool per `expose`d method (the agent itself), then the agent's
+  # own `tool` declarations. Method tools come first so a client that truncates the list
+  # still sees the agent.
+  def self.tools_of(config, method)
+    lists::append(method_tools(config, method), local_tools(config))
+  end
+
+  def self.local_tools(config)
+    ts = maps::get(:tools, config, [])
+    if erlang::is_list(ts)
+      ts
+    else
+      []
+    end
+  end
+
+  # the parser records each exposed method's declared parameter names in config[:params];
+  # that map IS the agent's callable surface, so it becomes the MCP tool list.
+  def self.method_tools(config, method)
+    params = maps::get(:params, config, maps::new())
+    if erlang::is_map(params) and (maps::size(params) > 0)
+      lists::map({|kv| method_tool(config, kv, maps::size(params))}, maps::to_list(params))
+    elsif method == nil
+      []
+    else
+      [method_tool(config, {method, ["input"]}, 1)]   # no manifest: expose the named method
+    end
+  end
+
+  def self.method_tool(config, kv, total)
+    {mname, raw} = kv
+    names = param_atoms(raw)
+    {name: mname,
+     desc: method_desc(config, mname, total),
+     param_names: names,
+     json_schema: {type: "object",
+                   properties: maps::from_list(lists::map({|n| {atom_bin(n), {type: "string"}}}, names)),
+                   required: lists::map({|n| atom_bin(n)}, names)},
+     turn_method: mname}
+  end
+
+  # `expose def chat(message)` -> ["message"] (Jet string literals are char lists).
+  def self.param_atoms(raw)
+    if erlang::is_list(raw)
+      lists::map({|p| erlang::binary_to_atom(to_text(p), :utf8)}, raw)
+    else
+      [:input]
+    end
+  end
+
+  # the agent's `role` IS what the tool does. With more than one exposed method the role
+  # alone would describe them all identically, so name the method too.
+  def self.method_desc(config, mname, total)
+    match maps::get(:role, config, nil)
+      case nil
+        erlang::iolist_to_binary(["Run the agent's `", atom_bin(mname), "` turn."])
+      case role
+        if total > 1
+          erlang::iolist_to_binary([atom_bin(mname), ": ", to_text(role)])
+        else
+          to_text(role)
+        end
     end
   end
 
@@ -31,22 +339,538 @@ module jet_mcp
   end
 
   def self.tool_def(t)
-    name = erlang::atom_to_binary(maps::get(:name, t), :utf8)
-    {name: name,
+    {name: atom_bin(maps::get(:name, t)),
      description: jet_llm::desc_of(t),
-     inputSchema: jet_llm::to_json_schema(maps::get(:params, t, maps::new()))}
+     inputSchema: jet_llm::tool_params_json(t)}
+  end
+
+  # --- tools/call: one process per call ---
+
+  def self.start_call(reqid, params, msg, st)
+    name = to_text(maps::get(<<"name">>, params, <<>>))
+    args = maps::get(<<"arguments">>, params, maps::new())
+    match jet_llm::find_tool(name, maps::get(:tools, st))
+      case {:ok, t}
+        router = erlang::self()
+        user = user_text(t, args)
+        pid = erlang::spawn(:jet_mcp, :call_proc,
+                            [router, reqid, t, args, progress_token(msg),
+                             maps::get(:apid, st), conv_text(maps::get(:mem, st), user), user])
+        maps::put(:calls, maps::put(reqid, pid, maps::get(:calls, st)), st)
+      case :error
+        send_result(reqid, error_result(erlang::iolist_to_binary(["unknown tool: ", name])))
+        st
+    end
+  end
+
+  # a tool that raises must come back as an MCP tool ERROR (isError, in the result), not a
+  # JSON-RPC error: the model is meant to see it and recover.
+  def self.call_proc(router, reqid, t, args, ptoken, apid, conv, user)
+    result = try
+      run_tool(t, args, router, ptoken, apid, conv)
+    catch e
+      error_result(erlang::iolist_to_binary(["tool error: ", io_lib::format("~p", [e.get(:reason)])]))
+    end
+    router ! {:call_done, reqid, result, remember_pair(t, user, result)}
+  end
+
+  def self.run_tool(t, args, router, ptoken, apid, conv)
+    match maps::get(:turn_method, t, nil)
+      case nil
+        out = erlang::apply(maps::get(:impl, t), jet_llm::arg_values(jet_llm::param_names_of(t), args))
+        {content: [text_block(jet_llm::to_content(out))]}
+      case mname
+        agent_turn(mname, apid, conv, router, ptoken)
+    end
+  end
+
+  def self.agent_turn(mname, apid, conv, router, ptoken)
+    if apid == nil
+      error_result(<<"no agent is bound to this server">>)
+    else
+      ar = jet_runtime::call_method(apid, mname, [conv])
+      turn_result(jet_runtime::call_method(ar, :stream, [{|ev| route_event(router, ptoken, ev)}]))
+    end
+  end
+
+  def self.turn_result(response)
+    match response
+      case {:ok, v}
+        with_structured({content: [text_block(to_text(v))]}, v)
+      case {:error, :cancelled}
+        error_result(<<"the turn was cancelled">>)
+      case {:error, reason}
+        error_result(erlang::iolist_to_binary(["turn failed: ", io_lib::format("~p", [reason])]))
+      case other
+        error_result(to_text(other))
+    end
+  end
+
+  # a typed turn (`-> Type`) yields a real value, not prose: hand it to the client in
+  # `structuredContent` too (MCP 2025-06-18), keeping the text block for older clients.
+  def self.with_structured(body, v)
+    if erlang::is_map(v)
+      maps::put(:structuredContent, v, body)
+    else
+      body
+    end
+  end
+
+  def self.text_block(text)
+    {type: "text", text: to_text(text)}
+  end
+
+  def self.error_result(text)
+    {content: [text_block(text)], isError: true}
+  end
+
+  # only an agent-method turn is a conversation worth remembering; a plain tool call is not.
+  def self.remember_pair(t, user, result)
+    if maps::get(:turn_method, t, nil) == nil
+      nil
+    else
+      {user, result_text(result)}
+    end
+  end
+
+  def self.result_text(result)
+    match maps::get(:content, result, [])
+      case [b, *_]
+        maps::get(:text, b, <<>>)
+      case _
+        <<>>
+    end
+  end
+
+  # a cancelled request MUST NOT get a response (MCP spec) -- drop the result, keep the turn's
+  # memory, and forget the id.
+  def self.finish_call(reqid, result, pair, st)
+    cancelled = maps::get(:cancelled, st)
+    if lists::member(reqid, cancelled)
+      forget_call(reqid, maps::put(:cancelled, lists::delete(reqid, cancelled), st))
+    else
+      send_result(reqid, result)
+      remember(maps::get(:mem, st), pair)
+      forget_call(reqid, st)
+    end
+  end
+
+  def self.forget_call(reqid, st)
+    maps::put(:calls, maps::remove(reqid, maps::get(:calls, st)), st)
+  end
+
+  # notifications/cancelled: end the turn WITHOUT killing the agent (jet_agent::cancel), and
+  # remember the id so its result is suppressed. Spawned, because the router must not block.
+  def self.cancel_call(params, st)
+    reqid = maps::get(<<"requestId">>, params, nil)
+    if maps::is_key(reqid, maps::get(:calls, st))
+      apid = maps::get(:apid, st)
+      if apid != nil
+        erlang::spawn({|| jet_agent::cancel(apid)})
+      end
+      maps::put(:cancelled, [reqid] ++ maps::get(:cancelled, st), st)
+    else
+      st
+    end
+  end
+
+  # --- stream events -> MCP notifications (the analogue of ACP's session/update) ---
+
+  # answer text and thinking become progress `message`s when the client asked for progress
+  # (_meta.progressToken); everything structured becomes a logging notification, which the
+  # router drops unless the client's level allows it.
+  def self.route_event(router, ptoken, ev)
+    match ev
+      case {:text, chunk}
+        progress(router, ptoken, to_text(chunk))
+      case {:thought, chunk}
+        progress(router, ptoken, to_text(chunk))
+      case {:thinking, chunk}
+        progress(router, ptoken, to_text(chunk))
+      case {:tool_call, info}
+        log_out(router, :info, {event: "tool_call", tool: to_text(maps::get(:title, info, <<"tool">>)),
+                                status: to_text(maps::get(:status, info, <<"in_progress">>))})
+      case {:plan, entries}
+        log_out(router, :info, {event: "plan", steps: erlang::length(entries)})
+      case {:trace, span}
+        log_out(router, :debug, {event: "trace", label: to_text(maps::get(:label, span, <<>>)),
+                                 status: to_text(maps::get(:status, span, <<>>))})
+      case {:usage, u}
+        log_out(router, :debug, maps::put(:event, "usage", u))
+      case _
+        :ok
+    end
+  end
+
+  def self.progress(router, ptoken, text)
+    if (ptoken == nil) or (text == <<>>)
+      :ok
+    else
+      router ! {:out, {jsonrpc: "2.0", method: "notifications/progress",
+                       params: {progressToken: ptoken, progress: next_progress(), message: text}}}
+    end
+  end
+
+  # MCP requires progress to increase with every notification; the counter lives in the
+  # call process, which is the only emitter for its own token.
+  def self.next_progress()
+    n = match erlang::get(:__mcp_progress__)
+          case :undefined
+            0
+          case v
+            v
+        end
+    erlang::put(:__mcp_progress__, n + 1)
+    n + 1
+  end
+
+  def self.progress_token(msg)
+    maps::get(<<"progressToken">>, maps::get(<<"_meta">>, maps::get(<<"params">>, msg, maps::new()), maps::new()), nil)
+  end
+
+  def self.log_out(router, level, data)
+    router ! {:log, level, data}
+  end
+
+  def self.emit_log(level, data, st)
+    if log_enabled?(level, maps::get(:level, st, :info))
+      send_msg({jsonrpc: "2.0", method: "notifications/message",
+                params: {level: level, logger: "jet", data: data}})
+    else
+      :ok
+    end
+  end
+
+  # syslog severities, as MCP names them: a message is sent when its level is at least the
+  # level the client set with logging/setLevel.
+  def self.level_rank(l)
+    match l
+      case :debug
+        0
+      case :info
+        1
+      case :notice
+        2
+      case :warning
+        3
+      case :error
+        4
+      case :critical
+        5
+      case :alert
+        6
+      case :emergency
+        7
+      case _
+        1
+    end
+  end
+
+  def self.log_enabled?(level, floor)
+    level_rank(level) >= level_rank(floor)
+  end
+
+  def self.level_atom(l)
+    match to_text(l)
+      case <<"debug">>
+        :debug
+      case <<"info">>
+        :info
+      case <<"notice">>
+        :notice
+      case <<"warning">>
+        :warning
+      case <<"error">>
+        :error
+      case <<"critical">>
+        :critical
+      case <<"alert">>
+        :alert
+      case <<"emergency">>
+        :emergency
+      case _
+        :info
+    end
+  end
+
+  # --- resources: the agent's role, composition and memory ---
+
+  def self.resource_defs()
+    [{uri: "jet://agent/role", name: "role", title: "Agent role",
+      description: "The agent's system role, verbatim.", mimeType: "text/plain"},
+     {uri: "jet://agent/manifest", name: "manifest", title: "Agent composition",
+      description: "The agent's declared runner shape and key parameters.", mimeType: "application/json"},
+     {uri: "jet://memory/conversation", name: "conversation", title: "Conversation",
+      description: "Every turn this server has run, oldest first.", mimeType: "text/plain"},
+     {uri: "jet://memory/facts", name: "facts", title: "Remembered facts",
+      description: "Key/value facts the agent has remembered.", mimeType: "application/json"}]
+  end
+
+  def self.read_resource(id, uri, st)
+    config = maps::get(:config, st, maps::new())
+    match uri
+      case <<"jet://agent/role">>
+        send_contents(id, uri, "text/plain", to_text(maps::get(:role, config, <<>>)))
+      case <<"jet://agent/manifest">>
+        send_contents(id, uri, "application/json", jet_json_ffi::encode(compact(jet_agent::describe(config))))
+      case <<"jet://memory/conversation">>
+        send_contents(id, uri, "text/plain", turns_text(jet_memory::turns(maps::get(:mem, st))))
+      case <<"jet://memory/facts">>
+        send_contents(id, uri, "application/json", facts_json(jet_memory::recall(maps::get(:mem, st), <<>>)))
+      case _
+        send_error(id, -32002, "no such resource")
+    end
+  end
+
+  def self.send_contents(id, uri, mime, text)
+    send_result(id, {contents: [{uri: uri, mimeType: mime, text: to_text(text)}]})
+  end
+
+  def self.facts_json(facts)
+    jet_json_ffi::encode(maps::from_list(facts))
+  end
+
+  # drop the undeclared keys: a Jet nil is [], which the encoder writes as an empty JSON
+  # ARRAY -- "model": [] reads like a value, when it means "not set".
+  def self.compact(m)
+    maps::filter({|_k, v| v != nil}, m)
+  end
+
+  # --- prompts: the agent's skills (a skill IS a named, described instruction template) ---
+
+  # Only a DECLARED `skills "<dir>"` is published. Without one, jet_skills would fall back
+  # to the machine's standard locations (~/.claude/skills, .agents/skills, …) -- fine for
+  # the agent's own use, but this server hands its prompt list to an outside client, and
+  # the operator's whole local catalogue is not ours to publish.
+  def self.skills_dir(st)
+    maps::get(:skills, maps::get(:config, st, maps::new()), nil)
+  end
+
+  def self.prompt_defs(st)
+    lists::map({|s| prompt_def(s)}, skills_of(st))
+  end
+
+  def self.prompt_def(s)
+    {id, desc} = s
+    {name: id, description: to_text(desc), arguments: []}
+  end
+
+  def self.skills_of(st)
+    dir = skills_dir(st)
+    if jet_skills::is_nil?(dir)
+      []
+    else
+      try
+        jet_skills::catalog(dir)
+      catch _e
+        []
+      end
+    end
+  end
+
+  def self.get_prompt(id, params, st)
+    name = to_text(maps::get(<<"name">>, params, <<>>))
+    if lists::any({|s| erlang::element(1, s) == name}, skills_of(st))
+      send_result(id, {description: name,
+                       messages: [{role: "user", content: text_block(prompt_body(st, name))}]})
+    else
+      send_error(id, -32602, "no such prompt")
+    end
+  end
+
+  def self.prompt_body(st, name)
+    try
+      jet_skills::body(skills_dir(st), name)
+    catch _e
+      <<>>
+    end
+  end
+
+  # --- outbound requests (server -> client), callable from a tool impl or a runner ---
+
+  # make a request to the MCP client and block for its response. Runs in a call process
+  # (or a tool impl on it); the router services it concurrently. The mirror of
+  # jet_acp_server::request/2 -- and of jet_acp's fs/terminal callbacks: the server
+  # borrows a capability it does not own.
+  def self.request(rmethod, params)
+    if erlang::whereis(:jet_mcp_router) == :undefined
+      {:error, :no_mcp_client}
+    else
+      :jet_mcp_router ! {:rpc, rmethod, params, erlang::self()}
+      receive
+        case {:rpc_reply, result}
+          result
+      after 120000
+        {:error, :mcp_request_timeout}
+      end
+    end
+  end
+
+  # ask the CLIENT's model to complete a prompt (MCP sampling): a Jet agent with no backend
+  # of its own can still think, on whatever model the client runs.
+  def self.sample(system, input)
+    match request("sampling/createMessage",
+                  {systemPrompt: to_text(system), maxTokens: 4096,
+                   messages: [{role: "user", content: text_block(input)}]})
+      case {:ok, r}
+        {:ok, to_text(maps::get(<<"text">>, maps::get(<<"content">>, r, maps::new()), <<>>))}
+      case err
+        err
+    end
+  end
+
+  # the directories the client has granted (MCP roots) -- the analogue of ACP's workspace.
+  def self.roots()
+    match request("roots/list", maps::new())
+      case {:ok, r}
+        maps::get(<<"roots">>, r, [])
+      case _
+        []
+    end
+  end
+
+  # ask the user, through the client, for a structured value -- MCP elicitation, the
+  # analogue of ACP's session/request_permission.
+  def self.elicit(message, schema)
+    request("elicitation/create", {message: to_text(message), requestedSchema: schema})
+  end
+
+  def self.send_request(rmethod, params, from, st)
+    id = maps::get(:next_id, st)
+    send_msg({jsonrpc: "2.0", id: id, method: rmethod, params: params})
+    maps::put(:next_id, id + 1,
+              maps::put(:pending, maps::put(id, from, maps::get(:pending, st)), st))
+  end
+
+  # --- conversation memory (the server owns it, exactly as jet_acp_server does) ---
+
+  # in-RAM by default: an MCP tool call is stateless unless the operator opts in with
+  # JET_MCP_SESSION=<id>, which makes the thread durable across restarts.
+  def self.open_mem()
+    match os::getenv("JET_MCP_SESSION")
+      case false
+        jet_memory::open(maps::new())
+      case ""
+        jet_memory::open(maps::new())
+      case id
+        jet_memory::open({id: erlang::iolist_to_binary(id), dir: session_dir()})
+    end
+  end
+
+  def self.session_dir()
+    match os::getenv("JET_MCP_SESSIONS_DIR")
+      case false
+        default_session_dir()
+      case ""
+        default_session_dir()
+      case dir
+        dir
+    end
+  end
+
+  def self.default_session_dir()
+    match os::getenv("HOME")
+      case false
+        "/tmp/jet_mcp_sessions"
+      case home
+        home ++ "/.jet/mcp_sessions"
+    end
+  end
+
+  def self.remember(mem, pair)
+    match pair
+      case {u, a}
+        jet_memory::append_turn(mem, u, a)
+      case _
+        :ok
+    end
+  end
+
+  # the turn's user message: a single-parameter method gets its value verbatim (the common
+  # `chat(message)` shape); a multi-parameter one gets labelled lines.
+  def self.user_text(t, args)
+    match jet_llm::param_names_of(t)
+      case [one]
+        to_text(maps::get(atom_bin(one), args, <<>>))
+      case names
+        erlang::iolist_to_binary(lists::map({|n| arg_line(n, args)}, names))
+    end
+  end
+
+  def self.arg_line(n, args)
+    [atom_bin(n), ": ", to_text(maps::get(atom_bin(n), args, <<>>)), "\n"]
+  end
+
+  # prepend a byte-budgeted window of recent turns (+ a rolling summary if present), so a
+  # long thread is not re-sent whole each call; the full history stays in jet_memory.
+  def self.conv_text(mem, user)
+    {_to_compact, recent} = jet_memory::window(mem, prompt_budget())
+    summary = jet_memory::summary(mem)
+    if (recent == []) and (summary == <<>>)
+      user
+    else
+      erlang::iolist_to_binary([summary_text(summary), turns_text(recent), "User: ", user])
+    end
+  end
+
+  def self.prompt_budget()
+    24000
+  end
+
+  def self.summary_text(summary)
+    if summary == <<>>
+      []
+    else
+      ["Summary of earlier conversation:\n", summary, "\n\n"]
+    end
+  end
+
+  def self.turns_text(turns)
+    erlang::iolist_to_binary(lists::map({|t| pair_text(t)}, turns))
+  end
+
+  def self.pair_text(t)
+    {u, a} = t
+    ["User: ", u, "\n\nAssistant: ", a, "\n\n"]
+  end
+
+  # --- stateless core: one request + a tool list -> one response (no transport) ---
+
+  def self.handle(msg, tools)
+    id = maps::get(<<"id">>, msg, nil)
+    params = maps::get(<<"params">>, msg, maps::new())
+    match maps::get(<<"method">>, msg, nil)
+      case <<"initialize">>
+        reply(id, {protocolVersion: negotiate(maps::get(<<"protocolVersion">>, params, nil)),
+                   capabilities: {tools: {listChanged: false}, logging: maps::new()},
+                   serverInfo: server_info()})
+      case <<"ping">>
+        reply(id, maps::new())
+      case <<"tools/list">>
+        reply(id, {tools: tool_defs(tools)})
+      case <<"tools/call">>
+        call(id, params, tools)
+      case <<"notifications/initialized">>
+        :noreply
+      case _
+        if id == nil
+          :noreply
+        else
+          err(id, -32601, "method not found")
+        end
+    end
   end
 
   def self.call(id, params, tools)
-    name = maps::get(<<"name">>, params, <<>>)
+    name = to_text(maps::get(<<"name">>, params, <<>>))
     args = maps::get(<<"arguments">>, params, maps::new())
     match jet_llm::find_tool(name, tools)
       case {:ok, t}
         out = erlang::apply(maps::get(:impl, t),
                             jet_llm::arg_values(jet_llm::param_names_of(t), args))
-        reply(id, {content: [{type: "text", text: jet_llm::to_content(out)}]})
+        reply(id, {content: [text_block(jet_llm::to_content(out))]})
       case :error
-        err(id, -32602, "unknown tool")
+        reply(id, error_result(erlang::iolist_to_binary(["unknown tool: ", name])))
     end
   end
 
@@ -56,5 +880,56 @@ module jet_mcp
 
   def self.err(id, code, message)
     {:reply, {jsonrpc: "2.0", id: id, error: {code: code, message: message}}}
+  end
+
+  # --- send helpers (router process only -> serialized stdout) ---
+
+  def self.send_result(id, result)
+    send_msg({jsonrpc: "2.0", id: id, result: result})
+  end
+
+  def self.send_error(id, code, message)
+    send_msg({jsonrpc: "2.0", id: id, error: {code: code, message: message}})
+  end
+
+  def self.send_msg(msg)
+    out = erlang::iolist_to_binary([jet_json_ffi::encode(msg), "\n"])
+    dbg("OUT ", out)
+    io::put_chars(out)
+  end
+
+  # optional wire log for debugging real MCP clients: set JET_MCP_LOG to a path and every
+  # line in/out is appended there. Off (and zero-cost) otherwise -- mirrors JET_ACP_LOG.
+  def self.dbg(tag, data)
+    match os::getenv("JET_MCP_LOG")
+      case false
+        :ok
+      case path
+        file::write_file(path, erlang::iolist_to_binary([tag, data]), [:append])
+    end
+  end
+
+  # --- text helpers ---
+
+  def self.atom_bin(a)
+    if erlang::is_atom(a)
+      erlang::atom_to_binary(a, :utf8)
+    else
+      to_text(a)
+    end
+  end
+
+  def self.to_text(v)
+    if erlang::is_binary(v)
+      v
+    elsif erlang::is_atom(v)
+      erlang::atom_to_binary(v, :utf8)
+    elsif erlang::is_list(v)
+      erlang::iolist_to_binary(v)
+    elsif erlang::is_map(v)
+      jet_json_ffi::encode(v)
+    else
+      erlang::iolist_to_binary(io_lib::format("~p", [v]))
+    end
   end
 end

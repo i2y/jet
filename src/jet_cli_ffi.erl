@@ -1,5 +1,5 @@
 -module(jet_cli_ffi).
--export([write_beam/2, call_module_func/2, call_acp_serve/3, add_code_path/1,
+-export([write_beam/2, call_module_func/2, call_acp_serve/3, call_mcp_serve/3, add_code_path/1,
          setup_code_paths/0, get_stdlib_beam_dir/0, do_build_escript/3,
          do_build_release/3]).
 
@@ -52,6 +52,14 @@ call_acp_serve(Module, Class, Method)
     jet_acp_server:serve_named(binary_to_atom(Module, utf8),
                                binary_to_atom(Class, utf8),
                                binary_to_atom(Method, utf8)),
+    nil.
+
+%% Serve a Jet agent over MCP by name: `jet mcp-serve mod::Agent::method`.
+call_mcp_serve(Module, Class, Method)
+  when is_binary(Module), is_binary(Class), is_binary(Method) ->
+    jet_mcp:serve_named(binary_to_atom(Module, utf8),
+                        binary_to_atom(Class, utf8),
+                        binary_to_atom(Method, utf8)),
     nil.
 
 resolve_func_name(Func) ->
