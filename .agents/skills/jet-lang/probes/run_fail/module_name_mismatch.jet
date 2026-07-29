@@ -1,0 +1,9 @@
+module ThisNameDoesNotMatchTheFilename
+  # The .beam is named after the SOURCE FILE, but the module inside it is named by
+  # the `module` declaration -- and BEAM's loader finds a module by looking for
+  # <module>.beam. Mismatch them and the module compiles but can never be loaded.
+  # Name the file after the module.
+  def self.run()
+    :ok
+  end
+end

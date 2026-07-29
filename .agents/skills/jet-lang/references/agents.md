@@ -25,11 +25,10 @@ agent Researcher
   expose research(question) -> {answer: String, sources: [String]}
 
   def on_approval(req)                          # permission policy
-    match req.get(:kind)
-      case "execute"
-        :deny
-      case _
-        :allow
+    if reviewer::executes?(req.get(:kind))      # normalise -- see the warning below
+      :deny
+    else
+      :allow
     end
   end
 end
@@ -52,6 +51,10 @@ comes back, so there is no second keyword to learn:
 | `expose fix(desc) -> TurnResult` | the work the agent did: `.text` `.ok?` `.edits` `.plan` `.files` `.tool_calls` `.commands` |
 
 `ask m(...)` and `task m(...)` are older aliases for `expose` and still work.
+
+A closed set of values is `enum(:low, :medium, :high)` — **atoms**, since a string there is a parse
+error. A model answering `"high"` is coerced to the atom for you; it is only the declaration that
+is strict. `match` over such a schema is then checked for exhaustiveness at compile time.
 
 Calls are **async**. They return a future:
 
@@ -124,6 +127,33 @@ end
 ```
 
 Prefer this to mocks. See `examples/agent_fake_test.jet` in the Jet repo.
+
+## Normalise `:kind` in on_approval
+
+The two paths that call `on_approval` disagree on the type of `:kind`, and a policy that matches
+only one form **silently allows everything** on the other:
+
+| Caller | `:kind` arrives as |
+|---|---|
+| an ACP agent's permission request | a **char list** (`jet_acp` converts it), so `case "execute"` fires |
+| the native tool gate on an `Llm` agent | a **binary** (`<<"execute">>`), so `case "execute"` does not fire |
+
+So normalise before deciding, rather than matching a literal:
+
+```jet
+def self.executes?(kind)
+  k = if erlang::is_binary(kind)
+    kind
+  elsif erlang::is_atom(kind)
+    erlang::atom_to_binary(kind, :utf8)
+  else
+    erlang::iolist_to_binary(kind)
+  end
+  lists::any({|w| binary::split(k, w) != [k]}, [<<"execute">>, <<"command">>, <<"terminal">>, <<"shell">>])
+end
+```
+
+(`binary::split` rather than `binary::match`, which is unreachable — `match` is a keyword.)
 
 ## Memory
 

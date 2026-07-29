@@ -65,6 +65,26 @@ module is the local idiom.
 
 **A parenthesised comma list is a tuple.** `(1, 2, 3)` is `{1,2,3}`, not a grouping.
 
+**A permission policy that matches `case "execute"` may gate nothing.** The two callers of
+`on_approval` disagree on the type of `:kind` — an ACP request delivers a char list, the native tool
+gate delivers a binary — so a literal match fires on one path and silently allows everything on the
+other. Normalise the value first; `references/agents.md` has the helper.
+
+**A plain `def` inside a module gets an implicit `self`, so it exports at arity + 1.**
+
+```jet
+def plain(x)         # exports as plain/2  — not callable as plain/1, invisible to `jet -r`
+def self.plain(x)    # exports as plain/1  — what you meant
+```
+
+Module-level functions want `def self.`. Only methods inside a `class`/`actor`/`agent` want the
+bare form, where the implicit `self` is the point.
+
+**Name the file after the module.** The `.beam` is named from the **source filename**, but the
+module inside it is named by the `module` declaration — and BEAM's loader finds a module by looking
+for `<module>.beam`. So `module Foo` in `bar.jet` compiles cleanly, produces `bar.beam`, and can
+never be loaded: every call reports "a function was called but it did not exist".
+
 ## Traps that fail to compile
 
 Faster to discover, so just know the fixes. Pinned by `probes/compile_fail/`.
@@ -76,8 +96,15 @@ Faster to discover, so just know the fixes. Pinned by `probes/compile_fail/`.
 | `binary::match(...)` | `match` is reserved | `binary::split`, or `erlang::apply(:binary, :match, [...])` |
 | `{agent: x}`, `def f(actor)` | `agent`/`actor` are reserved — also as map keys | any other name: `apid`, `member`, `turn_method` |
 | `a div b` | not an operator | `erlang::div(a, b)` or `erlang::trunc(a / b)` |
-| `x = if c do 1 else 2 end` | no inline form | the block form of `if` |
+| `if c do … end` | `if` takes no `do` — it fails with or without an `else` | drop the `do`: `if c` / body / `else` / body / `end`, which **is** an expression and can be assigned |
 | `module A` inside `module B` | not supported | one module per file |
+| `case p when guard` | `when` is not a keyword here — it parses as a variable, then `unbound_var 'When'` | `case p if guard` |
+| `enum("low", "high")` | `expected an atom value in enum(...), got string` | `enum(:low, :high)` |
+| `Thing.spawn()` unqualified | `unbound_var 'Thing'` — a class/actor/agent name is not a bare variable | `mod::Thing.spawn()`, **even inside `mod` itself** |
+
+Two of those are Erlang/Elixir reflexes, which is why they are worth naming: `when` for a guard, and
+strings where Jet wants atoms. A model's `"high"` **is** accepted at run time and coerced to the atom
+— it is only the *schema declaration* that must be written with atoms.
 
 An **`actor` needs an explicit `def initialize()`**; only `agent` gets one synthesised. Without it,
 `spawn()` dies with `bad key: {initialize,0}`.
@@ -152,7 +179,7 @@ Every factual claim above has a probe. Run them against the compiler you actuall
 .agents/skills/jet-lang/probes/run.sh
 ```
 
-21 probes, four kinds: must-not-compile (the trap is real), must-compile (the trap was fixed),
+29 probes, four kinds: must-not-compile (the trap is real), must-compile (the trap was fixed),
 must-print-its-`.expected` (the silent traps), and compiles-but-fails-at-run-time. A failure means
 a sentence here has become false — **fix the prose, not the probe**. If you discover a new trap,
 add a probe with it, so the next reader gets a claim that is checked rather than remembered.

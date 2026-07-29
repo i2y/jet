@@ -1,0 +1,13 @@
+module implicit_self_arity
+  # A `def` inside a module still gets the implicit `self`, so it exports at
+  # arity+1 and `jet -r` cannot reach it. `def self.` gives the arity you wrote.
+  def plain(x)
+    x
+  end
+  def self.qualified(x)
+    x
+  end
+  def self.run()
+    io::format("~p~n", [lists::sort(erlang::apply(:implicit_self_arity, :module_info, [:exports]))])
+  end
+end

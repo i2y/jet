@@ -1,0 +1,9 @@
+module enum_of_strings
+  # enum(...) takes ATOMS. Strings are rejected outright:
+  #   "expected an atom value in enum(...), got string"
+  agent A
+    role "x"
+    runner Fake(replies: "{\"s\": \"low\"}")
+    expose go(q) -> {s: enum("low", "medium", "high")}
+  end
+end

@@ -1,0 +1,131 @@
+{
+  "skill_name": "jet-lang",
+  "note": "Both arms get the compiler and are barred from reading the Jet stdlib source, README and docs -- the deployment this skill is for is writing .jet files OUTSIDE a Jet checkout. Compiling is cheap for both arms, so the discriminating assertions are the SILENT traps, which a compiler cannot catch.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "json-null-config",
+      "prompt": "JSON config blobs where optional fields come back as JSON null rather than absent. Module `cfg` with `summarize(json_binary)` returning atom-keyed name/retries/tags with defaults for missing OR null.",
+      "traps": [
+        "JSON null decodes to the atom null, not nil",
+        "nil is []",
+        "char list vs binary",
+        "map literal keys are atoms only"
+      ],
+      "assertions": [
+        {
+          "id": "A1",
+          "text": "cfg.jet compiles"
+        },
+        {
+          "id": "A2",
+          "text": "DISCRIMINATING: a JSON null name yields <<\"unnamed\">>, not the atom null (nil is [], and null is neither)"
+        },
+        {
+          "id": "A3",
+          "text": "a present retries (7) is kept, and a missing tags defaults to []"
+        },
+        {
+          "id": "A4",
+          "text": "second input: name <<\"api\">>, retries defaults to 3, tags [<<\"a\">>,<<\"b\">>]"
+        },
+        {
+          "id": "A5",
+          "text": "the result map's keys are the atoms name/retries/tags (no `unknown`, no char-list keys)"
+        },
+        {
+          "id": "A6",
+          "text": "no [x | rest] cons pattern in the source"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "agent-dsl-reviewer",
+      "prompt": "An agent file: drives claude-code-acp, workspace ./src, expose review(diff) with a typed schema including an enum severity, a shell tool, and an on_approval policy.",
+      "traps": [
+        "expose + -> Type",
+        "enum(...) schema",
+        "tool with a do block",
+        "on_approval not approve",
+        "drives shorthand"
+      ],
+      "assertions": [
+        {
+          "id": "B1",
+          "text": "reviewer.jet compiles"
+        },
+        {
+          "id": "B2",
+          "text": "drives claude-code-acp (or runner Acp(command:))"
+        },
+        {
+          "id": "B3",
+          "text": "workspace \"./src\""
+        },
+        {
+          "id": "B4",
+          "text": "expose review(diff) carries a -> schema rather than being untyped"
+        },
+        {
+          "id": "B5",
+          "text": "DISCRIMINATING: severity is expressed as enum(...) of low/medium/high, the mechanism Jet actually checks"
+        },
+        {
+          "id": "B6",
+          "text": "a tool with a body that runs a shell command"
+        },
+        {
+          "id": "B7",
+          "text": "DISCRIMINATING: the policy is `def on_approval(req)`, not the removed `approve do |req|` form"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "actor-stats",
+      "prompt": "An actor accumulating numbers: add/mean/reset, plus surviving a bare message.",
+      "traps": [
+        "actor needs an explicit initialize",
+        "@attr state",
+        "cons pattern [h|t] is illegal",
+        "is_* needs erlang:: outside a guard"
+      ],
+      "assertions": [
+        {
+          "id": "C1",
+          "text": "stats.jet compiles"
+        },
+        {
+          "id": "C2",
+          "text": "DISCRIMINATING: the actor declares an explicit def initialize() (an actor without one dies at spawn)"
+        },
+        {
+          "id": "C3",
+          "text": "the demonstrated run prints mean 20 for 10,20,30"
+        },
+        {
+          "id": "C4",
+          "text": "after reset, mean prints :none"
+        },
+        {
+          "id": "C5",
+          "text": "add returns the running count"
+        },
+        {
+          "id": "C6",
+          "text": "an on_message callback exists so a bare message doesn't kill the actor"
+        },
+        {
+          "id": "C7",
+          "text": "no [x | rest] cons pattern in the source"
+        },
+        {
+          "id": "C8",
+          "text": "DISCRIMINATING: any is_* type test outside a guard is erlang::-qualified"
+        }
+      ]
+    }
+  ],
+  "how_to_run": "python3 grade.py <iteration-dir>  -- recompiles each produced .jet and drives it with grade.py's own driver; never trusts the agent's self-reported output. See RESULTS.md."
+}

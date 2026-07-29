@@ -1,6 +1,0 @@
-module inline_if
-  # There is no inline if/do/else/end form.
-  def self.run()
-    if true do 1 else 2 end
-  end
-end

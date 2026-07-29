@@ -1,0 +1,12 @@
+module when_guard
+  # Erlang/Elixir reflex: `when` is NOT a guard keyword here. It parses as a
+  # variable, so codegen dies with unbound_var 'When'. Use `if` after the pattern.
+  def self.run(x)
+    match x
+      case {:ok, m} when erlang::is_map(m)
+        m
+      case _
+        :no
+    end
+  end
+end

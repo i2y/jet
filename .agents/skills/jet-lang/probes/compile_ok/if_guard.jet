@@ -1,0 +1,11 @@
+module if_guard
+  # The guard form that works: `if` after the case pattern.
+  def self.run(x)
+    match x
+      case {:ok, m} if erlang::is_map(m)
+        m
+      case _
+        :no
+    end
+  end
+end

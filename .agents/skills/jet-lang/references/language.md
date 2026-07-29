@@ -63,7 +63,7 @@ across calls. `on_*` is the callback convention (`on_message`, `on_terminate`, `
 match value
   case {:ok, v}
     v
-  case {:error, reason} if erlang::is_atom(reason)
+  case {:error, reason} if erlang::is_atom(reason)   # `if`, never `when`
     reason
   case [h, *rest]                # NOT [h | rest]
     h

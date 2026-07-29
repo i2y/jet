@@ -1,0 +1,15 @@
+module bare_class_reference
+  # A class/actor/agent name is NOT a bare variable, even inside its own module:
+  # `W.spawn()` compiles the receiver to an Erlang variable -> unbound_var 'W'.
+  # Always qualify: bare_class_reference::W.spawn().
+  actor W
+    def initialize()
+    end
+    def ping()
+      :pong
+    end
+  end
+  def self.run()
+    W.spawn().ping()
+  end
+end

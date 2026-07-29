@@ -1,0 +1,15 @@
+module if_as_expression
+  # `if` IS an expression -- condition, body, optional else, end -- so it can be
+  # assigned directly. No `do`, and no need to fall back to `match` for a two-way branch.
+  def self.run(c)
+    x = if c
+      1
+    else
+      2
+    end
+    y = if c
+      1
+    end
+    {x, y}
+  end
+end

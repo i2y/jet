@@ -1,0 +1,9 @@
+module if_with_do
+  # `if` takes NO `do`. This fails with or without an `else`; the `do` is the problem,
+  # not inline-ness. See compile_ok/if_as_expression.jet for the form that works.
+  def self.run()
+    if true do
+      1
+    end
+  end
+end
