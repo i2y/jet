@@ -86,6 +86,8 @@ Faster to discover, so just know the fixes. Pinned by `probes/compile_fail/`.
 
 | You write | What happens | Write instead |
 |---|---|---|
+| `@n += 1` | no compound assignment | `@n = @n + 1` — rebinding is fine, the compiler renames for you |
+| `a \|\| b`, `a && b`, `!a` | none of these exist | `a or b`, `a and b`, `not a` |
 | `[h \| rest]` | `illegal_pattern` — `\|` is the pipe operator | `[h, *rest]` |
 | `erlang::raise(...)` | `raise` is reserved | `erlang::apply(:erlang, :raise, [c, r, st])` |
 | `binary::match(...)` | `match` is reserved | `binary::split`, or `erlang::apply(:binary, :match, [...])` |
@@ -104,10 +106,30 @@ strings where Jet wants atoms. A model's `"high"` **is** accepted at run time an
 An **`actor` needs an explicit `def initialize()`**; only `agent` gets one synthesised. Without it,
 `spawn()` dies with `bad key: {initialize,0}`.
 
+Its callbacks are **`on_*`, not OTP's names**: `on_message`, `on_terminate`, `on_approval`. Writing
+`def handle_info(msg)` is the Erlang reflex and it is **inert** — it compiles, it looks correct to
+anyone who knows gen_server, and it never runs. Nothing crashes, so the only symptom is a handler
+that silently never fires. (A bare message doesn't kill the actor either way; the runtime drops what
+it cannot route.)
+
 Inside an actor method, the common BIFs (`element`, `length`, `hd`, `tl`, `integer_to_list`, …)
 work bare — `Kernel.jet` wraps them. The **`is_*` type tests do not**: they were left unwrapped so
 they don't shadow the guard BIFs, so in an expression position `if is_list(x)` dispatches as a
 method and dies with `method_missing`. Write `erlang::is_list(x)` anywhere that isn't a guard.
+
+## An `agent` body accepts only these
+
+Inventing a plausible-sounding declaration is an immediate parse error, and `sandbox` for
+`workspace` is the one a model reaches for unprompted:
+
+```
+runner X(...)   model "..."   drives "..."   role "..."   tool(s) ...
+workspace "..." memory ...    mcp "..."      skills "..."
+expose m(args) [-> Type]      def ... end
+```
+
+`model` and `drives` are shorthands for `runner Llm(model:)` and `runner Acp(command:)`.
+`references/agents.md` has what each one means.
 
 ## Do not defend against these — they are fixed
 
@@ -174,7 +196,7 @@ Every factual claim above has a probe. Run them against the compiler you actuall
 .agents/skills/jet-lang/probes/run.sh
 ```
 
-31 probes, four kinds: must-not-compile (the trap is real), must-compile (the trap was fixed),
+35 probes, four kinds: must-not-compile (the trap is real), must-compile (the trap was fixed),
 must-print-its-`.expected` (the silent traps), and compiles-but-fails-at-run-time. A failure means
 a sentence here has become false — **fix the prose, not the probe**. If you discover a new trap,
 add a probe with it, so the next reader gets a claim that is checked rather than remembered.

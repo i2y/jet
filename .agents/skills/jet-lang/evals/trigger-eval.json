@@ -1,0 +1,23 @@
+[
+  {"query": "our sage.jet agent keeps coming back with {:error, {:schema_mismatch, ...}} on the sources field even though the model clearly listed three URLs in its reply. how do i debug the contract", "should_trigger": true},
+  {"query": "add a tool to console/agents/builtin.jet that shells out to git and returns the staged diff, and gate it so it can't run without approval", "should_trigger": true},
+  {"query": "i need a supervised worker that accumulates events and flushes every 100. put it in worker.jet", "should_trigger": true},
+  {"query": "we already have the pricing lookup as an agent, i just want claude desktop to be able to call it. whats the command", "should_trigger": true},
+  {"query": "why does `[h | rest]` blow up in my match clause? erlang lets me destructure a list like that", "should_trigger": true},
+  {"query": "compile error says 'expected function name after ::' but the line looks fine to me:\n    erlang::raise(:error, :boom, [])", "should_trigger": true},
+  {"query": "port this elixir genserver to the .jet equivalent, keeping the same call/cast surface:\n  defmodule Counter do\n    use GenServer\n    def handle_call(:inc, _from, n), do: {:reply, n+1, n+1}\n  end", "should_trigger": true},
+  {"query": "spec out a debate agent — 3 debaters plus a judge, all on local ollama, and the verdict's severity field must only ever be low, medium or high", "should_trigger": true},
+  {"query": "the Fleet runner spawns its members but collect just sits there printing 'N members still working'. where do i even start looking", "should_trigger": true},
+  {"query": "my actor dies the moment i spawn it, bad key {initialize,0}. i copied the agent example and just changed the keyword", "should_trigger": true},
+
+  {"query": "write me an erlang gen_server that accumulates events and flushes every 100", "should_trigger": false},
+  {"query": "our phoenix liveview is crashing with a KeyError in handle_event and it takes the websocket down with it. here's the stacktrace from the server log", "should_trigger": false},
+  {"query": "set up an MCP server in typescript that exposes our postgres schema as resources, using the official sdk", "should_trigger": false},
+  {"query": "add opentelemetry spans to our python fastapi service so i can see request latency per endpoint in grafana", "should_trigger": false},
+  {"query": "how do i get gleam to warn me about a non-exhaustive case expression? it compiled fine and then panicked at runtime", "should_trigger": false},
+  {"query": "write a ruby class that memoizes an expensive computation, with the cache keyed on the args", "should_trigger": false},
+  {"query": "review the PR for our burrito release pipeline — mainly whether pinning zig 0.15.2 in the script is the right call vs documenting it", "should_trigger": false},
+  {"query": "whats the actual difference between a BEAM process and an OS thread, in terms of what the scheduler does", "should_trigger": false},
+  {"query": "our ollama qwen3 model keeps wrapping its json in a markdown fence instead of returning raw json. is there a request option to force it", "should_trigger": false},
+  {"query": "claude-code-acp isn't advertising any slash commands over the protocol until i actually send a prompt. is that a bug in the adapter or expected", "should_trigger": false}
+]

@@ -88,6 +88,74 @@ was **five new verified traps** and, more valuably, **two corrections to the ski
 
 That is the loop earning its keep: the eval found defects in the skill, not just gaps in it.
 
+## Three model tiers, and the result reverses
+
+The measurement above used one model (Claude Opus, max reasoning). Repeating it down the capability
+range is what actually located the skill's value — and showed that the first round had been measuring
+the least informative case.
+
+| | with skill | no skill |
+|---|---|---|
+| **Opus**, agentic (compiler in the loop) | 21/21 (100%) | 20/21 (95%) |
+| **Haiku 4.5**, agentic (compiler in the loop) | 20/21 (95%) | **7/21 (33%)** |
+| **qwen3.6:35b-a3b** (local), one-shot, no compiler | 2/9 compile (22%) | 0/9 compile (0%) |
+
+Opus finds every trap unaided, so the skill only buys it speed. Haiku does not: its unaided runs
+produced a `cfg.beam` whose module was named `Cfg` and could never be loaded, a `reviewer.jet` with
+no `drives`, no `workspace`, no typed `expose`, no `enum` and no tool, and a `Stats` the driver
+couldn't reach — **all three reported as successes.** That is where a skill earns its place: not
+making a capable model correct, but keeping a cheap one from shipping confident nonsense.
+
+The local one-shot run is a different experiment: no compiler in the loop, one attempt, no error to
+read. It isolates the model's PRIORS rather than its persistence, which is what a skill actually
+changes. The honest reading is that 22% is not a usable success rate — at this tier the skill is not
+enough — but the *shape* of the failures separates cleanly:
+
+```
+no skill     no `module` wrapper, `agent` at top level, `do` in a class body
+             -> the skeleton isn't there
+with skill   the skeleton is right; it dies on `+=`, on `||`, and on a `sandbox`
+             declaration that doesn't exist
+```
+
+Every one of those with-skill failures was a hole in the skill, not in the model. It had never said
+that Jet has **no `+=`, no `||`, no `&&`, no `!`** — the most basic Ruby-vs-Jet differences, each of
+which kills a file on its own. Opus and Haiku both knew to write `or` and never reached for `+=`, so
+six agentic runs across two tiers never once exposed it. **The skill had been calibrated, invisibly,
+for strong models.** Now pinned by `compile_fail/ruby_operators.jet`,
+`compile_fail/compound_assign.jet` and `compile_ok/word_operators.jet`, and the valid `agent` body
+declarations are listed in SKILL.md so an invented `sandbox` has something to be checked against.
+
+Reproduce the local run with `oneshot_ollama.py <model> <samples> <out-dir>`.
+
+## Does the description trigger at all?
+
+A skill that is never consulted is worth nothing regardless of its contents, and this went
+unmeasured for the whole first round. Measured through the real mechanism — the skill installed at
+`<project>/.claude/skills/jet-lang/`, a plain `claude -p` from that project, and a verdict of
+"triggered" only on an actual `Skill` tool call or a `Read` of its SKILL.md:
+
+```
+should trigger      3/3   cons-pattern question · write a worker.jet · a confusing :: error
+should NOT trigger  2/2   a ruby memoize class · an erlang gen_server
+```
+
+The `worker.jet` run went on to read `references/language.md` by itself, which is progressive
+disclosure working as designed.
+
+Two earlier attempts at this number were wrong and are discarded. The skill-creator trigger harness
+reported 0/10 on positives, but it resolves a project root by walking up for `.claude/` — started
+from its own directory it landed on `$HOME` and registered the skill as a slash command there. Then
+a hand-rolled replacement reported 0/3, because macOS has no GNU `timeout`: every invocation died
+instantly with empty output, which reads exactly like "never triggered". A third pass grepped the
+stream for the skill's name and counted the `available_skills` listing as an invocation, which
+inverted the negatives.
+
+The pattern is worth naming, because it is the same one three times: **a measurement that produces a
+suspiciously clean result is more likely broken than decisive.** A perfect 0 on one whole class, a
+tautological assertion that cannot fail, an all-passing grader — each looked like a finding and each
+was a bug in the instrument. It is also, exactly, the argument for `probes/`.
+
 ## Limits of this measurement
 
 - **n = 1 per cell.** Three tasks, one run each. The cost differences are large enough to survive
@@ -98,5 +166,9 @@ That is the loop earning its keep: the eval found defects in the skill, not just
   still spent 2.4× the tokens.
 - Only iteration 2's with-skill arm was re-run; the baseline does not change when the skill does, so
   re-running it would have measured run-to-run variance rather than anything about the skill.
+- The Haiku and local runs used the skill as it stood *before* the Ruby-operator traps were added.
+  Re-running the local one-shot would very likely score higher now — that number is not claimed here.
+- The trigger check is 5 queries, not the 20 the eval set holds; it was run by hand after the
+  automated harness proved unreliable.
 
 Reproduce with `grade.py <iteration-dir>`; the run artifacts are not committed.

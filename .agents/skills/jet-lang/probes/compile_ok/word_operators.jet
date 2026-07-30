@@ -1,0 +1,12 @@
+module word_operators
+  # The forms that DO exist: word operators, and plain rebinding.
+  def self.run(a, b)
+    x = 0
+    x = x + 1
+    if (a or b) and (not a)
+      x
+    else
+      0
+    end
+  end
+end

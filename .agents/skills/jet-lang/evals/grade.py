@@ -144,9 +144,10 @@ def grade_eval3(outdir):
     a.append({"text": "C3 mean of 10,20,30 is 20",
               "passed": mean is not None and abs(float(mean.group(1)) - 20.0) < 1e-6,
               "evidence": mean.group(0) if mean else out.strip()[:200]})
+    ar = re.search(r"after_reset=\S+", out)
     a.append({"text": "C4 after reset, mean is :none",
               "passed": re.search(r"after_reset=none", out) is not None,
-              "evidence": (re.search(r"after_reset=\S+", out) or type("", (), {"group": lambda s: "no output"})()).group(0)})
+              "evidence": ar.group(0) if ar else (out.strip()[:200] or "no output")})
     cnt = re.search(r"count=(\d+)", out)
     a.append({"text": "C5 add returns the running count",
               "passed": cnt is not None and cnt.group(1) == "1",

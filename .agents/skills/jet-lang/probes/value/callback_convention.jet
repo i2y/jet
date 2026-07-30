@@ -1,0 +1,30 @@
+module callback_convention
+  # Jet dispatches `on_message`, NOT Erlang's `handle_info`. A user-defined handle_info is
+  # inert -- it compiles, it looks right to anyone who knows OTP, and it never runs. (A bare
+  # message does not kill the actor either way; the runtime ignores what it can't route. So
+  # the only symptom is that your handler silently never fires.)
+  actor A
+    def initialize()
+      @via_on_message = 0
+      @via_handle_info = 0
+    end
+    def on_message(_m)
+      @via_on_message = @via_on_message + 1
+      :ok
+    end
+    def handle_info(_m)
+      @via_handle_info = @via_handle_info + 1
+      :ok
+    end
+    def counts()
+      {on_message: @via_on_message, handle_info: @via_handle_info}
+    end
+  end
+  def self.run()
+    a = callback_convention::A.spawn()
+    erlang::send(a, :ping)
+    erlang::send(a, {:other, 1})
+    timer::sleep(200)
+    io::format("~p~n", [a.counts()])
+  end
+end

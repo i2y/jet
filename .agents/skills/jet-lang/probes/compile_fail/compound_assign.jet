@@ -1,0 +1,13 @@
+module compound_assign
+  # No compound assignment. Rebinding is fine (`x = x + 1` is allowed and the compiler
+  # renames for you) -- it is only the `+=` spelling that does not exist.
+  actor A
+    def initialize()
+      @n = 0
+    end
+    def bump()
+      @n += 1
+      @n
+    end
+  end
+end

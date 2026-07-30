@@ -1,0 +1,15 @@
+module ruby_operators
+  # Jet reads like Ruby, so the Ruby operators are the first thing a hand reaches for --
+  # and NONE of these exist. Each one kills the file on its own.
+  #   @n += 1   ->  @n = @n + 1
+  #   a || b    ->  a or b
+  #   a && b    ->  a and b
+  #   !a        ->  not a
+  def self.run(a, b)
+    if a || b
+      1
+    else
+      2
+    end
+  end
+end
