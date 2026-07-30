@@ -126,7 +126,41 @@ for strong models.** Now pinned by `compile_fail/ruby_operators.jet`,
 `compile_fail/compound_assign.jet` and `compile_ok/word_operators.jet`, and the valid `agent` body
 declarations are listed in SKILL.md so an invented `sandbox` has something to be checked against.
 
-Reproduce the local run with `oneshot_ollama.py <model> <samples> <out-dir>`.
+### Re-measured after adding the operator traps
+
+The obvious follow-up: does documenting `+=` / `||` / `&&` / `!` raise the local score? It does not.
+
+```
+before the traps   with skill 2/9 (22%)   no skill 0/9
+after  the traps   with skill 2/9 (22%)   no skill 0/9
+```
+
+The traps themselves worked, precisely and completely — files in the with-skill arm containing a
+`+=` or a `||` went **3/9 → 0/9**, while the unaided arm sat at 6/9 → 7/9. The invented `sandbox`
+declaration is gone too; `workspace "./src"` is now written correctly. What did not happen is any
+improvement in the outcome: the failures simply moved.
+
+```
+before   `+=`, `||`, an invented `sandbox` declaration
+after    `Enum(:low, :medium, :high)` — capitalised, where the skill says `enum(...)`
+         `permissions deny "execute"` — another invented declaration
+         a `case` outside a `match`, and three codegen errors
+```
+
+At this tier the binding constraint is not any individual trap but the aggregate: fix one class of
+mistake and the next surfaces. **Adding traps to a skill has sharply diminishing returns for a weak
+model**, which is worth knowing before treating a trap list as the lever.
+
+The `Enum` failure is the most telling of them. The skill writes `enum(:low, :medium, :high)`, and
+the model got the *hard* part right — atoms rather than strings, the thing that took a capable model
+a probe to discover — while getting the trivial part wrong. That is a model reading a document and
+not being able to follow it precisely, which no amount of further documentation fixes.
+
+The unaided arm, by contrast, is now known to be robust rather than unlucky: at temperature 0.2 all
+three samples of each task failed identically — `cfg` on `|` 3/3, `reviewer` on a top-level `agent`
+3/3, `stats` on `+=` 3/3. **0/9 reproduces.**
+
+Reproduce either run with `oneshot_ollama.py <model> <samples> <out-dir>`.
 
 ## Does the description trigger at all?
 
@@ -166,8 +200,9 @@ was a bug in the instrument. It is also, exactly, the argument for `probes/`.
   still spent 2.4× the tokens.
 - Only iteration 2's with-skill arm was re-run; the baseline does not change when the skill does, so
   re-running it would have measured run-to-run variance rather than anything about the skill.
-- The Haiku and local runs used the skill as it stood *before* the Ruby-operator traps were added.
-  Re-running the local one-shot would very likely score higher now — that number is not claimed here.
+- The Haiku run used the skill as it stood *before* the Ruby-operator traps were added; it was not
+  repeated afterwards. The local one-shot WAS repeated, and did not improve (see above) — a
+  prediction this file made and that turned out to be wrong.
 - The trigger check is 5 queries, not the 20 the eval set holds; it was run by hand after the
   automated harness proved unreliable.
 
