@@ -198,7 +198,7 @@ The manual steps the script automates:
    `SECRET_KEY_BASE` (a shared or hosted deploy) still wins, and
    `JET_CONSOLE_BIND_ALL=1` / `PORT=…` are there when you want them.
 
-Verified: a **~17 MB** `jc_macos` Mach-O arm64 binary (v0.5.0) that boots and serves the **full**
+Verified: a **~17 MB** `jc_macos` Mach-O arm64 binary (v0.6.1) that boots and serves the **full**
 console standalone — the cleaned agent catalog, file viewer, terminal, highlight + mermaid all
 present, no machine-specific paths (xz-compressed, so smaller than the plain release). Windows
 targets also need `7z`/`7zz` on `PATH`.

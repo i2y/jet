@@ -4,7 +4,7 @@ defmodule Jc.MixProject do
   def project do
     [
       app: :jc,
-      version: "0.5.0",
+      version: "0.6.1",
       elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
