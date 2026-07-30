@@ -12,10 +12,16 @@ those are level-3 progressive disclosure that a one-shot call cannot ask for.
 
 Usage: oneshot_ollama.py <model> <samples-per-task> <out-dir>
 """
+import os
+
+# Resolve the repo (and so the compiler) from THIS file's location, or from $JET. Hardcoding an
+# author's absolute path into a script that ships in the repo makes it useless to everyone else.
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), *[".."] * 4))
+JET = os.environ.get("JET", os.path.join(_REPO, "jet"))
+SKILL = os.environ.get("JET_SKILL", os.path.join(_REPO, ".agents", "skills", "jet-lang", "SKILL.md"))
+
 import json, os, re, shutil, subprocess, sys, tempfile, urllib.request
 
-JET = "/Users/i2y/jet/jet"
-SKILL = "/Users/i2y/jet/.agents/skills/jet-lang/SKILL.md"
 OLLAMA = "http://localhost:11434/api/chat"
 
 BASE_SYS = ("You write Jet, a dynamically typed language with Ruby-like syntax that compiles to "

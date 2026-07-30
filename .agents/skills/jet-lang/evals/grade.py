@@ -2,11 +2,16 @@
 """Grade the jet-lang skill A/B runs objectively: compile the produced .jet, drive it with OUR
 own driver (never the agent's self-reported output), and grep the source for the mechanisms the
 assertions name. Writes grading.json into each run directory."""
+import os
+
+# Resolve the repo (and so the compiler) from THIS file's location, or from $JET. Hardcoding an
+# author's absolute path into a script that ships in the repo makes it useless to everyone else.
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), *[".."] * 4))
+JET = os.environ.get("JET", os.path.join(_REPO, "jet"))
+
 import json, os, re, shutil, subprocess, sys, tempfile
 
-JET = "/Users/i2y/jet/jet"
-ROOT = os.path.dirname(os.path.abspath(__file__))
-IT = os.path.join(ROOT, sys.argv[1] if len(sys.argv) > 1 else "iteration-1")
+IT = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.getcwd()
 
 
 def run(cmd, cwd=None, timeout=180):
